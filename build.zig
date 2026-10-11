@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
     _ = b.addModule("zui", .{ .root_source_file = b.path("zui/zui.zig") });
     _ = b.addModule("http", .{ .root_source_file = b.path("http/http.zig") });
     _ = b.addModule("mongo", .{ .root_source_file = b.path("mongo/mongo.zig") });
+    _ = b.addModule("env", .{ .root_source_file = b.path("env/env.zig") });
 
     // Host tool that packages APKs; apps reach it through `addApp`.
     b.installArtifact(b.addExecutable(.{
@@ -41,7 +42,7 @@ pub fn build(b: *std.Build) void {
     }));
 
     const test_step = b.step("test", "Run zig-core tests");
-    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
+    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
@@ -231,6 +232,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
             return bb.createModule(.{ .root_source_file = o.server, .target = target, .optimize = o.optimize, .imports = &.{
                 .{ .name = "http", .module = server_core.module("http") },
                 .{ .name = "mongo", .module = server_core.module("mongo") },
+                .{ .name = "env", .module = server_core.module("env") },
             } });
         }
     }.module;

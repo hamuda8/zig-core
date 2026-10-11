@@ -127,3 +127,24 @@ fn ping(c: *mongo.Client, failures: *std.atomic.Value(u32)) void {
         };
     }
 }
+
+test "bulk update with upserts" {
+    const c = try connectOrSkip();
+    defer c.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    defer c.database("zigcore_test").drop(a) catch {};
+    const usage = c.collection("usage");
+    try usage.drop(a);
+    try usage.bulkUpdate(a, &.{
+        .{ .filter = try bson.encode(a, .{ .key = "k1", .day = "2026-10-11" }), .update = try bson.encode(a, .{ .@"$inc" = .{ .@"counts.route" = 2 } }), .upsert = true },
+        .{ .filter = try bson.encode(a, .{ .key = "k2", .day = "2026-10-11" }), .update = try bson.encode(a, .{ .@"$inc" = .{ .@"counts.search" = 1 } }), .upsert = true },
+    });
+    try usage.bulkUpdate(a, &.{
+        .{ .filter = try bson.encode(a, .{ .key = "k1", .day = "2026-10-11" }), .update = try bson.encode(a, .{ .@"$inc" = .{ .@"counts.route" = 3 } }), .upsert = true },
+    });
+    const k1 = (try usage.findOne(a, .{ .key = "k1" }, .{})).?;
+    try testing.expectEqual(@as(i64, 5), k1.getPath("counts.route").?.asInt().?);
+    try testing.expectEqual(@as(i64, 2), try usage.countDocuments(a, .{}));
+}

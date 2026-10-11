@@ -11,6 +11,7 @@
         "shells",
         "http",
         "mongo",
+        "env",
         "tools",
         "toolchain.zon",
     },

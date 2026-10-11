@@ -511,6 +511,27 @@ pub const Collection = struct {
         };
     }
 
+    pub const UpdateStatement = struct { filter: Doc, update: Doc, upsert: bool = false, multi: bool = false };
+
+    /// Several updates in one round trip, unordered (one failing does not stop the others).
+    pub fn bulkUpdate(c: Collection, arena: std.mem.Allocator, stmts: []const UpdateStatement) !void {
+        if (stmts.len == 0) return;
+        var b = try bson.Builder.init(arena);
+        try b.string("update", c.name);
+        try b.beginArray("updates");
+        for (stmts) |st| {
+            try b.beginDoc("");
+            try b.doc("q", st.filter);
+            try b.doc("u", st.update);
+            try b.boolean("upsert", st.upsert);
+            try b.boolean("multi", st.multi);
+            try b.end();
+        }
+        try b.end();
+        try b.boolean("ordered", false);
+        _ = try c.run(arena, try b.finish());
+    }
+
     /// Deletes the first match; returns how many were deleted (0 or 1).
     pub fn deleteOne(c: Collection, arena: std.mem.Allocator, filter: anytype) !i64 {
         return c.deleteImpl(arena, try asDoc(arena, filter), 1);

@@ -45,9 +45,11 @@ fn events(ctx: *http.Context) !void {
 }
 
 fn echoSocket(ctx: *http.Context) !void {
-    var ws = (try ctx.webSocket()) orelse return ctx.fail(.bad_request, "WebSocket only");
-    const msg = try ws.readSmallMessage();
-    try ws.writeMessage(msg.data, .text);
+    if (!ctx.wantsWebSocket()) return ctx.fail(.bad_request, "WebSocket only");
+    var sock = try ctx.webSocket();
+    const msg = try sock.read();
+    try sock.sendText(msg.data);
+    sock.close(1000);
 }
 
 fn startServer(router: *const http.Router) !Io.Future(anyerror!void) {

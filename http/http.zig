@@ -15,7 +15,7 @@ const Io = std.Io;
 pub const Method = std.http.Method;
 pub const Status = std.http.Status;
 pub const Header = std.http.Header;
-pub const WebSocket = std.http.Server.WebSocket;
+pub const ws = @import("ws.zig");
 
 pub const Handler = *const fn (ctx: *Context) anyerror!void;
 
@@ -42,6 +42,44 @@ pub const Context = struct {
     max_body: usize,
     /// Free for middleware to pass data to handlers (the signed-in user, for example).
     user_data: ?*anyopaque = null,
+    /// The TCP connection: its peer address, and a handle WebSocket rooms use to close it.
+    stream: Io.net.Stream,
+    /// Whether to take the client address from the proxy headers (Cloudflare Tunnel).
+    trust_proxy: bool,
+
+    /// The visitor's IP address. Behind a trusted proxy, from CF-Connecting-IP or the first
+    /// X-Forwarded-For entry; otherwise the TCP peer.
+    pub fn clientIp(ctx: *Context) []const u8 {
+        if (ctx.trust_proxy) {
+            if (ctx.header("cf-connecting-ip")) |v| return std.mem.trim(u8, v, " ");
+            if (ctx.header("x-forwarded-for")) |v| return std.mem.trim(u8, v[0 .. std.mem.indexOfScalar(u8, v, ',') orelse v.len], " ");
+        }
+        return formatIp(ctx.arena, ctx.stream.socket.address) catch "";
+    }
+
+    /// The value of cookie `name`.
+    pub fn cookie(ctx: *const Context, name: []const u8) ?[]const u8 {
+        for (ctx.headers) |h| {
+            if (!std.ascii.eqlIgnoreCase(h.name, "cookie")) continue;
+            var it = std.mem.splitScalar(u8, h.value, ';');
+            while (it.next()) |part| {
+                const p = std.mem.trim(u8, part, " ");
+                const eq = std.mem.indexOfScalar(u8, p, '=') orelse continue;
+                if (std.mem.eql(u8, p[0..eq], name)) return p[eq + 1 ..];
+            }
+        }
+        return null;
+    }
+
+    /// Adds a Set-Cookie header. `max_age` 0 deletes the cookie.
+    pub fn setCookie(ctx: *Context, name: []const u8, value: []const u8, max_age: u32) !void {
+        try ctx.response_headers.append(ctx.arena, .{ .name = "set-cookie", .value = try std.fmt.allocPrint(ctx.arena, "{s}={s}; Path=/; Max-Age={d}; HttpOnly; SameSite=Lax", .{ name, value, max_age }) });
+    }
+
+    pub fn redirect(ctx: *Context, location: []const u8) !void {
+        try ctx.setHeader("location", location);
+        return ctx.send(.found, "text/plain; charset=utf-8", "");
+    }
 
     pub fn header(ctx: *const Context, name: []const u8) ?[]const u8 {
         for (ctx.headers) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
@@ -103,7 +141,7 @@ pub const Context = struct {
     /// `value` as JSON (structs, slices, numbers, strings, `std.json.Value`, ...).
     pub fn sendJson(ctx: *Context, status: Status, value: anytype) !void {
         var out: std.Io.Writer.Allocating = .init(ctx.arena);
-        try std.json.Stringify.value(value, .{ .emit_null_optional_fields = false }, &out.writer);
+        try std.json.Stringify.value(value, .{}, &out.writer);
         return ctx.send(status, "application/json", out.written());
     }
 
@@ -112,17 +150,22 @@ pub const Context = struct {
         return ctx.sendJson(status, .{ .@"error" = message });
     }
 
-    /// Upgrades to a WebSocket if the client asked for one; null otherwise.
-    pub fn webSocket(ctx: *Context) !?WebSocket {
+    /// Whether the client asked to upgrade to a WebSocket.
+    pub fn wantsWebSocket(ctx: *const Context) bool {
+        return ctx.request.upgradeRequested() == .websocket;
+    }
+
+    /// Completes the WebSocket handshake. The connection is closed when the handler returns.
+    pub fn webSocket(ctx: *Context) !ws.Socket {
         const k = switch (ctx.request.upgradeRequested()) {
-            .websocket => |k| k orelse return null,
-            else => return null,
+            .websocket => |k| k orelse return error.NotWebSocket,
+            else => return error.NotWebSocket,
         };
         ctx.responded = true;
         ctx.close_connection = true;
-        var ws = try ctx.request.respondWebSocket(.{ .key = k, .extra_headers = ctx.response_headers.items });
-        try ws.flush();
-        return ws;
+        var std_ws = try ctx.request.respondWebSocket(.{ .key = k, .extra_headers = ctx.response_headers.items });
+        try std_ws.flush();
+        return .{ .io = ctx.io, .in = std_ws.input, .out = std_ws.output, .stream = ctx.stream };
     }
 
     /// Starts a `text/event-stream` response.
@@ -160,6 +203,31 @@ pub const EventStream = struct {
         try s.body.end();
     }
 };
+
+/// An IP address without its port ("192.0.2.1", "2001:db8::1").
+pub fn formatIp(arena: std.mem.Allocator, addr: Io.net.IpAddress) ![]const u8 {
+    return switch (addr) {
+        .ip4 => |a| std.fmt.allocPrint(arena, "{d}.{d}.{d}.{d}", .{ a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3] }),
+        .ip6 => |a| blk: {
+            var out: std.ArrayList(u8) = .empty;
+            var i: usize = 0;
+            while (i < 16) : (i += 2) {
+                if (i > 0) try out.append(arena, ':');
+                try out.print(arena, "{x}", .{std.mem.readInt(u16, a.bytes[i..][0..2], .big)});
+            }
+            break :blk out.items;
+        },
+    };
+}
+
+/// Percent-encodes everything except unreserved characters (for query values).
+pub fn encode(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') try out.append(arena, c) else try out.print(arena, "%{X:0>2}", .{c});
+    }
+    return out.items;
+}
 
 /// Percent-decodes `s` (and `+` as space) into new memory.
 pub fn decode(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
@@ -271,6 +339,10 @@ pub const Options = struct {
     on_listen: ?*const fn (Io.net.IpAddress) void = null,
     /// HTTPS: every connection does a TLS 1.3 handshake with these certificates first.
     tls: ?*CertStore = null,
+    /// Read the client address from proxy headers (set when behind Cloudflare Tunnel).
+    trust_proxy: bool = false,
+    /// Answers a request whose handler failed before responding (default: {"error": ...}).
+    on_error: ?*const fn (ctx: *Context, status: Status, err: anyerror) anyerror!void = null,
 };
 
 pub const tls = struct {
@@ -323,15 +395,15 @@ fn connection(io: Io, gpa: std.mem.Allocator, stream: Io.net.Stream, options: *c
             .read_buffer = &clear_read,
             .write_buffer = &clear_write,
         }) catch return;
-        exchange(io, gpa, &session.reader, &session.writer, options);
+        exchange(io, gpa, stream, &session.reader, &session.writer, options);
         session.end() catch {};
         return;
     }
-    exchange(io, gpa, &reader.interface, &writer.interface, options);
+    exchange(io, gpa, stream, &reader.interface, &writer.interface, options);
 }
 
 /// Requests and responses on one connection, until either side ends it.
-fn exchange(io: Io, gpa: std.mem.Allocator, in: *std.Io.Reader, out: *std.Io.Writer, options: *const Options) void {
+fn exchange(io: Io, gpa: std.mem.Allocator, stream: Io.net.Stream, in: *std.Io.Reader, out: *std.Io.Writer, options: *const Options) void {
     var server = std.http.Server.init(in, out);
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -339,13 +411,13 @@ fn exchange(io: Io, gpa: std.mem.Allocator, in: *std.Io.Reader, out: *std.Io.Wri
     while (true) {
         _ = arena_state.reset(.retain_capacity);
         var request = server.receiveHead() catch return;
-        const keep = handle(io, arena_state.allocator(), &request, options) catch return;
+        const keep = handle(io, arena_state.allocator(), stream, &request, options) catch return;
         if (!keep or !request.head.keep_alive) return;
     }
 }
 
 /// Returns whether the connection can take another request.
-fn handle(io: Io, arena: std.mem.Allocator, request: *std.http.Server.Request, options: *const Options) !bool {
+fn handle(io: Io, arena: std.mem.Allocator, stream: Io.net.Stream, request: *std.http.Server.Request, options: *const Options) !bool {
     // A request with neither Content-Length nor Transfer-Encoding has an empty body (RFC 9112
     // 6.3). std.http asserts otherwise, so one bodiless POST would crash the server.
     if (request.head.method.requestHasBody() and request.head.transfer_encoding == .none and request.head.content_length == null)
@@ -367,6 +439,8 @@ fn handle(io: Io, arena: std.mem.Allocator, request: *std.http.Server.Request, o
         .query = if (q) |i| target[i + 1 ..] else "",
         .headers = headers.items,
         .max_body = options.max_body,
+        .stream = stream,
+        .trust_proxy = options.trust_proxy,
     };
     options.router.dispatch(&ctx) catch |err| {
         if (ctx.responded) return err;
@@ -376,7 +450,9 @@ fn handle(io: Io, arena: std.mem.Allocator, request: *std.http.Server.Request, o
             else => .internal_server_error,
         };
         if (status == .internal_server_error) std.log.err("{s} {s}: {t}", .{ @tagName(ctx.method), ctx.path, err });
-        try ctx.fail(status, status.phrase() orelse "Error");
+        if (options.on_error) |f| {
+            f(&ctx, status, err) catch return false;
+        } else try ctx.fail(status, status.phrase() orelse "Error");
     };
     if (!ctx.responded) try ctx.fail(.internal_server_error, "No response");
     return !ctx.close_connection;
@@ -461,4 +537,5 @@ test {
     _ = @import("test.zig");
     _ = tls.Server;
     _ = tls.acme;
+    _ = ws;
 }
