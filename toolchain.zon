@@ -1,0 +1,11 @@
+// Where the Android toolchain lives on this machine. Read by build.zig at configure time;
+// any value can be overridden with -Dandroid-sdk=, -Djdk=, -Dandroid-ndk=, ... (CI, other machines).
+.{
+    .android_sdk = "C:\\Tools\\android-sdk",
+    .jdk = "C:\\Tools\\jdk-21.0.12.1+1",
+    .android_ndk = "30.0.16248370",
+    .android_build_tools = "37.0.0",
+    .android_platform = "android-36",
+    // Debug signing key; created on first build. Keep it: changing it forces reinstalling the app.
+    .debug_keystore = "C:\\Users\\tarek\\.android\\debug.keystore",
+}
