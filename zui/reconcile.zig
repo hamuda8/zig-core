@@ -7,6 +7,8 @@
 //!   text(id, []const u8, Font, color: u32, PhysicalAlign)
 //!   input(id, value, placeholder, Font, color: u32, PhysicalAlign)
 //!   content(id, Size)                — scroll nodes: size of what scrolls
+//!   transform(id, Transform)         clip(id, bool)           pointer(id, bool)
+//!   image(id, url)                   path(id, tree.Path)
 
 const std = @import("std");
 const st = @import("style.zig");
@@ -163,6 +165,14 @@ pub fn Reconciler(comptime H: type) type {
             if (o == null or o.?.pressable != n.pressable) {
                 if (n.pressable or o != null) H.pressable(id, n.pressable);
             }
+            if (o == null or o.?.pointer != n.pointer) {
+                if (n.pointer or o != null) H.pointer(id, n.pointer);
+            }
+
+            const tr = st.Transform.of(s);
+            const old_tr: st.Transform = if (o) |old| st.Transform.of(old.style) else .{};
+            if (!std.meta.eql(old_tr, tr)) H.transform(id, tr);
+            if ((if (o) |old| old.style.clip else false) != s.clip) H.clip(id, s.clip);
 
             const font = st.Font.of(s);
             const color = s.color.argb();
@@ -175,6 +185,11 @@ pub fn Reconciler(comptime H: type) type {
                 .input => if (text_changed or !std.mem.eql(u8, o.?.placeholder, n.placeholder))
                     H.input(id, n.text, n.placeholder, font, color, al),
                 .scroll, .scroll_x => if (o == null or !std.meta.eql(o.?.content, n.content)) H.content(id, n.content),
+                .image => if (o == null or !std.mem.eql(u8, o.?.text, n.text)) H.image(id, n.text),
+                .path => if (n.path) |p| {
+                    const same = if (o) |old| (if (old.path) |op| op.eql(p) else false) else false;
+                    if (!same) H.path(id, p);
+                },
                 .view => {},
             }
         }
@@ -227,6 +242,21 @@ pub const RecordingHost = struct {
     }
     pub fn content(id: u32, s: st.Size) void {
         write("content {d} {d} {d}", .{ id, s.w, s.h });
+    }
+    pub fn transform(id: u32, t: st.Transform) void {
+        write("transform {d} {d} {d}", .{ id, t.rotate, t.tilt });
+    }
+    pub fn clip(id: u32, on: bool) void {
+        write("clip {d} {}", .{ id, on });
+    }
+    pub fn pointer(id: u32, on: bool) void {
+        write("pointer {d} {}", .{ id, on });
+    }
+    pub fn image(id: u32, url: []const u8) void {
+        write("image {d} {s}", .{ id, url });
+    }
+    pub fn path(id: u32, p: tree_mod.Path) void {
+        write("path {d} {d}", .{ id, p.points.len });
     }
 };
 

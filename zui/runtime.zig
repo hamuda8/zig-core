@@ -6,7 +6,7 @@
 //!   pub const Msg = union(enum) { ... };          // what can happen
 //!   pub const State = struct { ... };
 //!   pub fn init() State
-//!   pub fn update(state: *State, msg: Msg) void
+//!   pub fn update(state: *State, msg: Msg) void   (or with a third `env: zui.Env` parameter)
 //!   pub fn view(state: *const State, ui: *zui.Ui(Msg)) void
 //! and optionally `global_locale: []const u8` and `locales: []const zui.i18n.Locale`.
 
@@ -34,6 +34,21 @@ pub const Env = struct {
 
 pub const Event = enum(u8) { press_in = 1, press_out = 2, press = 3 };
 
+/// A finger, pen or mouse on a view that listens for pointers (`on_pointer`). Coordinates are in
+/// the view's own points.
+pub const Pointer = struct {
+    kind: Kind,
+    /// Stable while the finger is down; mouse is 0.
+    id: u32,
+    x: f32,
+    y: f32,
+    /// Mouse wheel: positive scrolls down (zooms out on a map).
+    wheel: f32 = 0,
+    time_ms: i64 = 0,
+
+    pub const Kind = enum(u8) { down = 1, move = 2, up = 3, cancel = 4, wheel = 5 };
+};
+
 /// Stable identity for a child among its siblings, from a string or an integer.
 pub fn key(v: anytype) u64 {
     return switch (@typeInfo(@TypeOf(v))) {
@@ -48,6 +63,9 @@ pub fn Ui(comptime Msg: type) type {
         tree: *Tree,
         env: Env,
         presses: std.ArrayList(Binding(Msg)) = .empty,
+        pointers: std.ArrayList(Binding(*const fn (Pointer) Msg)) = .empty,
+        /// Sent once at the next display frame (animation), if set.
+        frame_msg: ?Msg = null,
         changes: std.ArrayList(Binding(*const fn ([]const u8) Msg)) = .empty,
         background: ?Color = null,
         /// Set if memory ran out while building; the frame is then dropped.
@@ -58,6 +76,15 @@ pub fn Ui(comptime Msg: type) type {
         pub const BoxOptions = struct {
             key: u64 = 0,
             on_press: ?Msg = null,
+            /// Raw pointer events (gestures): pan, pinch, rotate, wheel.
+            on_pointer: ?*const fn (Pointer) Msg = null,
+        };
+
+        pub const PathStyle = struct {
+            color: Color,
+            width: f32 = 4,
+            dash: [2]f32 = .{ 0, 0 },
+            round: bool = true,
         };
 
         pub const InputOptions = struct {
@@ -76,8 +103,9 @@ pub fn Ui(comptime Msg: type) type {
 
         /// Opens a box; everything until `end` goes inside it.
         pub fn begin(ui: *Self, style: st.Style, o: BoxOptions) void {
-            const i = ui.tree.open(.{ .kind = .view, .style = style, .key = o.key, .pressable = o.on_press != null }) catch return ui.fail();
+            const i = ui.tree.open(.{ .kind = .view, .style = style, .key = o.key, .pressable = o.on_press != null, .pointer = o.on_pointer != null }) catch return ui.fail();
             if (o.on_press) |m| ui.presses.append(ui.arena(), .{ .node = i, .value = m }) catch ui.fail();
+            if (o.on_pointer) |f| ui.pointers.append(ui.arena(), .{ .node = i, .value = f }) catch ui.fail();
         }
 
         /// Opens a box whose content scrolls along `style.direction`.
@@ -102,6 +130,27 @@ pub fn Ui(comptime Msg: type) type {
         pub fn input(ui: *Self, o: InputOptions) void {
             const i = ui.tree.add(.{ .kind = .input, .style = o.style, .key = o.key, .text = o.value, .placeholder = o.placeholder }) catch return ui.fail();
             if (o.on_change) |f| ui.changes.append(ui.arena(), .{ .node = i, .value = f }) catch ui.fail();
+        }
+
+        /// A picture loaded from `url` (the host caches it), sized by `style`.
+        pub fn image(ui: *Self, url: []const u8, style: st.Style, k: u64) void {
+            _ = ui.tree.add(.{ .kind = .image, .style = style, .text = url, .key = k }) catch ui.fail();
+        }
+
+        /// A line through `points` (in this node's coordinates), sized by `style`.
+        pub fn path(ui: *Self, points: []const [2]f32, p: PathStyle, style: st.Style, k: u64) void {
+            _ = ui.tree.add(.{ .kind = .path, .style = style, .key = k, .path = .{
+                .points = points,
+                .color = p.color.argb(),
+                .width = p.width,
+                .dash = p.dash,
+                .round = p.round,
+            } }) catch ui.fail();
+        }
+
+        /// Asks for `msg` at the next display frame (animations); ask again each frame to continue.
+        pub fn requestFrame(ui: *Self, msg: Msg) void {
+            ui.frame_msg = msg;
         }
 
         /// The translation of `english` (Lassan bundles).
@@ -148,6 +197,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         var background: u32 = 0;
         /// Handlers of the frame on screen, by host id.
         var presses: []const Binding(Msg) = &.{};
+        var pointers: []const Binding(*const fn (Pointer) Msg) = &.{};
+        var frame_msg: ?Msg = null;
         var changes: []const Binding(*const fn ([]const u8) Msg) = &.{};
 
         /// `lang` is the system language ("ar", "en-US", ...); the app starts in it when it has a
@@ -206,6 +257,26 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             }
         }
 
+        /// The app state, for tests.
+        pub fn appState() *const App.State {
+            return &state;
+        }
+
+        pub fn pointerEvent(id: u32, p: Pointer) void {
+            if (!started) return;
+            for (pointers) |b| {
+                if (b.node == id) return dispatch(b.value(p));
+            }
+        }
+
+        /// The host's display frame, after `requestFrame`.
+        pub fn frame() void {
+            if (!started) return;
+            const m = frame_msg orelse return;
+            frame_msg = null;
+            dispatch(m);
+        }
+
         pub fn textEvent(id: u32, text: []const u8) void {
             if (!started) return;
             for (changes) |b| {
@@ -214,7 +285,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         }
 
         pub fn dispatch(msg: Msg) void {
-            App.update(&state, msg);
+            // `update(state, msg)`, or `update(state, msg, env)` when it needs the screen size.
+            if (@typeInfo(@TypeOf(App.update)).@"fn".param_types.len == 3) App.update(&state, msg, env) else App.update(&state, msg);
             render();
         }
 
@@ -229,15 +301,19 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             if (ui.failed) return;
 
             const s = env.safe;
-            const frame: st.Rect = .{ .x = s.left, .y = s.top, .w = @max(0, env.width - s.left - s.right), .h = @max(0, env.height - s.top - s.bottom) };
-            layout.Engine.run(tree, &H.measure, env.rtl, frame) catch return;
+            const root_frame: st.Rect = .{ .x = s.left, .y = s.top, .w = @max(0, env.width - s.left - s.right), .h = @max(0, env.height - s.top - s.bottom) };
+            layout.Engine.run(tree, &H.measure, env.rtl, root_frame) catch return;
             rec.run(if (has_old) &trees[current] else null, tree, .{ .rtl = env.rtl, .pressed = pressed });
 
             // Handlers now point at host ids, which is what events carry.
             for (ui.presses.items) |*b| b.node = tree.nodes.items[b.node].host;
             for (ui.changes.items) |*b| b.node = tree.nodes.items[b.node].host;
+            for (ui.pointers.items) |*b| b.node = tree.nodes.items[b.node].host;
             presses = ui.presses.items;
             changes = ui.changes.items;
+            pointers = ui.pointers.items;
+            frame_msg = ui.frame_msg;
+            if (frame_msg != null) H.requestFrame();
 
             // One layout pass for all of this frame's changes, on hosts that need to be told.
             if (@hasDecl(H, "commit")) H.commit();

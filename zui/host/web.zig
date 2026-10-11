@@ -15,6 +15,12 @@ const js = struct {
     extern "zui" fn zui_input(id: u32, value: [*]const u8, value_len: usize, placeholder: [*]const u8, placeholder_len: usize, size: f32, weight: u32, line_height: f32, mono: u32, color: u32, text_align: u32) void;
     extern "zui" fn zui_content(id: u32, w: f32, h: f32) void;
     extern "zui" fn zui_root_background(argb: u32) void;
+    extern "zui" fn zui_transform(id: u32, rotate: f32, tilt: f32, perspective: f32) void;
+    extern "zui" fn zui_clip(id: u32, on: u32) void;
+    extern "zui" fn zui_pointer_listen(id: u32, on: u32) void;
+    extern "zui" fn zui_image(id: u32, ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_path(id: u32, points: [*]const [2]f32, count: usize, color: u32, width: f32, dash_on: f32, dash_off: f32, round: u32) void;
+    extern "zui" fn zui_request_frame() void;
     extern "zui" fn zui_measure(ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, max_width: f32, out: *[2]f32) void;
 };
 
@@ -44,6 +50,24 @@ pub fn input(id: u32, value: []const u8, placeholder: []const u8, f: zui.Font, c
 }
 pub fn content(id: u32, s: zui.Size) void {
     js.zui_content(id, s.w, s.h);
+}
+pub fn transform(id: u32, t: zui.Transform) void {
+    js.zui_transform(id, t.rotate, t.tilt, t.perspective);
+}
+pub fn clip(id: u32, on: bool) void {
+    js.zui_clip(id, @intFromBool(on));
+}
+pub fn pointer(id: u32, on: bool) void {
+    js.zui_pointer_listen(id, @intFromBool(on));
+}
+pub fn image(id: u32, url: []const u8) void {
+    js.zui_image(id, url.ptr, url.len);
+}
+pub fn path(id: u32, p: zui.Path) void {
+    js.zui_path(id, p.points.ptr, p.points.len, p.color, p.width, p.dash[0], p.dash[1], @intFromBool(p.round));
+}
+pub fn requestFrame() void {
+    js.zui_request_frame();
 }
 pub fn rootBackground(argb: u32) void {
     js.zui_root_background(argb);
@@ -75,6 +99,12 @@ pub fn exportEntry(comptime App: type) void {
         fn textEvent(id: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
             R.textEvent(id, ptr[0..len]);
         }
+        fn pointerEvent(id: u32, kind: u32, pid: u32, x: f32, y: f32, wheel: f32, time_ms: f64) callconv(.c) void {
+            R.pointerEvent(id, .{ .kind = std.enums.fromInt(zui.Pointer.Kind, kind) orelse return, .id = pid, .x = x, .y = y, .wheel = wheel, .time_ms = @intFromFloat(time_ms) });
+        }
+        fn frame() callconv(.c) void {
+            R.frame();
+        }
         fn alloc(len: usize) callconv(.c) ?[*]u8 {
             const buf = zui.allocator.alloc(u8, len) catch return null;
             return buf.ptr;
@@ -89,6 +119,8 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.dark, .{ .name = "zui_dark" });
     @export(&Entry.event, .{ .name = "zui_event" });
     @export(&Entry.textEvent, .{ .name = "zui_text_event" });
+    @export(&Entry.pointerEvent, .{ .name = "zui_pointer" });
+    @export(&Entry.frame, .{ .name = "zui_frame" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });
     @export(&Entry.free, .{ .name = "zui_free" });
 }

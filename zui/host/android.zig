@@ -203,3 +203,11 @@ pub fn log(line: []const u8) void {
     buf[n] = 0;
     _ = __android_log_write(6, "zui", buf[0..n :0]);
 }
+
+// Map primitives (transform, clip, pointer, image, path, frames): implemented in the next commit.
+pub fn transform(_: u32, _: zui.Transform) void {}
+pub fn clip(_: u32, _: bool) void {}
+pub fn pointer(_: u32, _: bool) void {}
+pub fn image(_: u32, _: []const u8) void {}
+pub fn path(_: u32, _: zui.Path) void {}
+pub fn requestFrame() void {}

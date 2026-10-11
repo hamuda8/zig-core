@@ -8,6 +8,7 @@
         "build.zig",
         "build.zig.zon",
         "zui",
+        "map",
         "shells",
         "http",
         "mongo",

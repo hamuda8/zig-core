@@ -30,6 +30,9 @@ pub const PhysicalAlign = style.PhysicalAlign;
 pub const Env = runtime.Env;
 pub const Insets = runtime.Insets;
 pub const Event = runtime.Event;
+pub const Pointer = runtime.Pointer;
+pub const Transform = style.Transform;
+pub const Path = tree.Path;
 pub const Ui = runtime.Ui;
 pub const key = runtime.key;
 

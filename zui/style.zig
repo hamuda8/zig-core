@@ -86,6 +86,28 @@ pub const Style = struct {
     // While pressed (pressable views)
     pressed_background: ?Color = null,
     pressed_opacity: ?f32 = null,
+
+    // Transform, around the centre of the view (map bearing and pitch)
+    /// Clockwise rotation in degrees.
+    rotate: f32 = 0,
+    /// Tilt away from the viewer around the horizontal axis, in degrees.
+    tilt: f32 = 0,
+    /// Distance of the eye for `tilt`, in points; 0 for none.
+    perspective: f32 = 0,
+    /// Hide what children draw outside this view.
+    clip: bool = false,
+    /// Lay the children out left to right even in right-to-left languages (a map, a chart).
+    no_mirror: bool = false,
+};
+
+pub const Transform = struct {
+    rotate: f32 = 0,
+    tilt: f32 = 0,
+    perspective: f32 = 0,
+
+    pub fn of(s: Style) Transform {
+        return .{ .rotate = s.rotate, .tilt = s.tilt, .perspective = s.perspective };
+    }
 };
 
 /// What the box looks like, as sent to a host.

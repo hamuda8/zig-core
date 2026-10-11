@@ -4,7 +4,9 @@
 //
 // The page sets the fonts with CSS variables: --zui-font and --zui-mono.
 
-const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4;
+const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4, KIND_IMAGE = 5, KIND_PATH = 6;
+const POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4, POINTER_WHEEL = 5;
+const SVG = 'http://www.w3.org/2000/svg';
 const EVENT_PRESS_IN = 1, EVENT_PRESS_OUT = 2, EVENT_PRESS = 3;
 const ALIGN = ['left', 'center', 'right'];
 
@@ -51,6 +53,7 @@ export async function start(wasmUrl, mount = document.body) {
   sheet.textContent = 'input::placeholder{color:var(--zui-placeholder);opacity:1}';
   document.head.appendChild(sheet);
   const views = new Map([[0, root]]);
+  let frameRequested = false;
 
   // Text is measured in an invisible element with the same font and wrapping as text views.
   const measurer = document.createElement('div');
@@ -69,7 +72,8 @@ export async function start(wasmUrl, mount = document.body) {
   const imports = {
     zui: {
       zui_create(id, kind) {
-        const el = document.createElement(kind === KIND_INPUT ? 'input' : 'div');
+        const el = kind === KIND_PATH ? document.createElementNS(SVG, 'svg')
+          : document.createElement(kind === KIND_INPUT ? 'input' : kind === KIND_IMAGE ? 'img' : 'div');
         el.style.position = 'absolute';
         el.style.boxSizing = 'border-box';
         el.style.margin = '0';
@@ -84,6 +88,18 @@ export async function start(wasmUrl, mount = document.body) {
           el.style.outline = 'none';
           el.dir = 'auto';
           el.addEventListener('input', () => sendText(id, el.value));
+        } else if (kind === KIND_IMAGE) {
+          el.draggable = false;
+          el.alt = '';
+          el.decoding = 'async';
+          el.style.userSelect = 'none';
+          el.style.pointerEvents = 'none';
+        } else if (kind === KIND_PATH) {
+          el.style.overflow = 'visible';
+          el.style.pointerEvents = 'none';
+          el._line = document.createElementNS(SVG, 'polyline');
+          el._line.setAttribute('fill', 'none');
+          el.appendChild(el._line);
         } else if (kind === KIND_SCROLL || kind === KIND_SCROLL_X) {
           el.style.overflow = 'hidden';
           el.style.overscrollBehavior = 'contain';
@@ -170,6 +186,61 @@ export async function start(wasmUrl, mount = document.body) {
         // Scroll only along the axes where the content is bigger than the view.
         el.style.overflowX = w > parseFloat(el.style.width) ? 'auto' : 'hidden';
         el.style.overflowY = h > parseFloat(el.style.height) ? 'auto' : 'hidden';
+      },
+      zui_transform(id, rotate, tilt, perspective) {
+        const parts = [];
+        if (perspective > 0) parts.push(`perspective(${perspective}px)`);
+        if (tilt) parts.push(`rotateX(${tilt}deg)`);
+        if (rotate) parts.push(`rotate(${rotate}deg)`);
+        views.get(id).style.transform = parts.join(' ');
+      },
+      zui_clip(id, on) {
+        views.get(id).style.overflow = on ? 'hidden' : '';
+      },
+      zui_pointer_listen(id, on) {
+        const el = views.get(id);
+        if (!on) {
+          el.onpointerdown = el.onpointermove = el.onpointerup = el.onpointercancel = el._wheel = null;
+          return;
+        }
+        el.style.touchAction = 'none';
+        el.style.userSelect = 'none';
+        const send = (kind, e, wheel = 0) => {
+          const r = el.getBoundingClientRect();
+          ex.zui_pointer(id, kind, e.pointerId >>> 0 || 0, e.clientX - r.left, e.clientY - r.top, wheel, e.timeStamp);
+        };
+        el.onpointerdown = (e) => { el.setPointerCapture?.(e.pointerId); send(POINTER_DOWN, e); };
+        el.onpointermove = (e) => { if (el.hasPointerCapture?.(e.pointerId)) send(POINTER_MOVE, e); };
+        el.onpointerup = (e) => send(POINTER_UP, e);
+        el.onpointercancel = (e) => send(POINTER_CANCEL, e);
+        if (!el._wheel) el.addEventListener('wheel', (e) => el._wheel?.(e), { passive: false });
+        el._wheel = (e) => {
+          e.preventDefault();
+          send(POINTER_WHEEL, e, e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY);
+        };
+      },
+      zui_image(id, ptr, len) {
+        const el = views.get(id);
+        const url = str(ptr, len);
+        if (el.getAttribute('src') !== url) el.src = url;
+      },
+      zui_path(id, ptr, count, color, width, dashOn, dashOff, round) {
+        const line = views.get(id)._line;
+        const f = new Float32Array(memory.buffer, ptr >>> 0, count * 2);
+        let points = '';
+        for (let i = 0; i < count; i++) points += `${f[2 * i].toFixed(1)},${f[2 * i + 1].toFixed(1)} `;
+        line.setAttribute('points', points);
+        line.setAttribute('stroke', css(color));
+        line.setAttribute('stroke-width', String(width));
+        line.setAttribute('stroke-linecap', round ? 'round' : 'butt');
+        line.setAttribute('stroke-linejoin', round ? 'round' : 'miter');
+        if (dashOn > 0) line.setAttribute('stroke-dasharray', `${dashOn} ${dashOff}`);
+        else line.removeAttribute('stroke-dasharray');
+      },
+      zui_request_frame() {
+        if (frameRequested) return;
+        frameRequested = true;
+        requestAnimationFrame(() => { frameRequested = false; ex.zui_frame(); });
       },
       zui_root_background(argb) {
         const c = css(argb);

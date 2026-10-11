@@ -66,6 +66,8 @@ pub const Engine = struct {
                 const font = st.Font.of(s);
                 content = .{ .w = e.measure_text(sample, font, inf).w, .h = font.line_height };
             },
+            // Pictures and lines take the size their style gives them.
+            .image, .path => {},
             .view, .scroll, .scroll_x => {
                 const row = s.direction == .row;
                 var count: usize = 0;
@@ -105,7 +107,11 @@ pub const Engine = struct {
         const n = e.node(i);
         n.frame = frame;
         const s = n.style;
-        if (n.kind == .text or n.kind == .input) return;
+        // This node was placed by its parent; its children follow its own direction.
+        const parent_rtl = e.rtl;
+        defer e.rtl = parent_rtl;
+        if (s.no_mirror) e.rtl = false;
+        if (n.kind == .text or n.kind == .input or n.kind == .image) return;
 
         const pad_left = if (e.rtl) s.padding.end else s.padding.start;
         const inner_w = @max(0, frame.w - s.padding.start - s.padding.end);
@@ -376,6 +382,20 @@ test "scroll content is measured beyond the viewport" {
     try Engine.run(&t, fakeMeasure, false, .{ .w = 100, .h = 100 });
     try testing.expectEqual(Size{ .w = 100, .h = 290 }, t.nodes.items[0].content);
     try testing.expectEqual(@as(f32, 240), t.nodes.items[5].frame.y);
+}
+
+test "no_mirror keeps a subtree left to right" {
+    var t = testTree();
+    defer t.deinit();
+    _ = try t.open(.{ .kind = .view, .style = .{ .direction = .row } });
+    _ = try t.open(.{ .kind = .view, .style = .{ .width = .{ .px = 100 }, .direction = .row, .no_mirror = true } });
+    _ = try t.add(.{ .kind = .view, .style = .{ .width = .{ .px = 10 } } });
+    t.close();
+    t.close();
+    try Engine.run(&t, fakeMeasure, true, .{ .w = 200, .h = 50 });
+    // The map box itself is mirrored to the right; what is inside it is not.
+    try testing.expectEqual(@as(f32, 100), t.nodes.items[1].frame.x);
+    try testing.expectEqual(@as(f32, 0), t.nodes.items[2].frame.x);
 }
 
 test "absolute child pinned to the end and bottom" {

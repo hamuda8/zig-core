@@ -7,7 +7,23 @@ const style = @import("style.zig");
 pub const none: u32 = std.math.maxInt(u32);
 
 /// `scroll` scrolls vertically, `scroll_x` horizontally (Android needs a different view for each).
-pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4 };
+/// `image` shows a picture from a URL; `path` draws a line (routes on a map).
+pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4, image = 5, path = 6 };
+
+/// A polyline in the node's own coordinates.
+pub const Path = struct {
+    points: []const [2]f32,
+    color: u32,
+    width: f32,
+    /// Dash and gap lengths; 0 for a solid line.
+    dash: [2]f32 = .{ 0, 0 },
+    round: bool = true,
+
+    pub fn eql(a: Path, b: Path) bool {
+        return a.color == b.color and a.width == b.width and a.dash[0] == b.dash[0] and a.dash[1] == b.dash[1] and
+            a.round == b.round and std.mem.eql(u8, std.mem.sliceAsBytes(a.points), std.mem.sliceAsBytes(b.points));
+    }
+};
 
 pub const Node = struct {
     kind: Kind,
@@ -18,6 +34,9 @@ pub const Node = struct {
     text: []const u8 = "",
     placeholder: []const u8 = "",
     pressable: bool = false,
+    /// Receives pointer events (gestures).
+    pointer: bool = false,
+    path: ?Path = null,
 
     parent: u32 = none,
     first_child: u32 = none,
@@ -69,6 +88,7 @@ pub const Tree = struct {
         var n = node;
         n.text = try a.dupe(u8, node.text);
         n.placeholder = try a.dupe(u8, node.placeholder);
+        if (node.path) |p| n.path = .{ .points = try a.dupe([2]f32, p.points), .color = p.color, .width = p.width, .dash = p.dash, .round = p.round };
         if (t.stack.items.len > 0) {
             const p = t.stack.items[t.stack.items.len - 1];
             n.parent = p;

@@ -16,7 +16,14 @@ pub const View = struct {
     text: std.ArrayList(u8) = .empty,
     placeholder: std.ArrayList(u8) = .empty,
     pressable: bool = false,
+    pointer: bool = false,
+    transform: zui.Transform = .{},
+    clip: bool = false,
+    path_points: usize = 0,
 };
+
+/// Set when the app asked for a frame; `Driver.frame` delivers it.
+pub var frame_requested = false;
 
 const gpa = std.heap.page_allocator;
 pub var views: std.AutoArrayHashMapUnmanaged(u32, View) = .empty;
@@ -57,6 +64,26 @@ pub fn input(id: u32, value: []const u8, placeholder: []const u8, _: zui.Font, _
     v.placeholder.appendSlice(gpa, placeholder) catch {};
 }
 pub fn content(_: u32, _: zui.Size) void {}
+pub fn transform(id: u32, t: zui.Transform) void {
+    if (views.getPtr(id)) |v| v.transform = t;
+}
+pub fn clip(id: u32, on: bool) void {
+    if (views.getPtr(id)) |v| v.clip = on;
+}
+pub fn pointer(id: u32, on: bool) void {
+    if (views.getPtr(id)) |v| v.pointer = on;
+}
+pub fn image(id: u32, url: []const u8) void {
+    const v = views.getPtr(id) orelse return;
+    v.text.clearRetainingCapacity();
+    v.text.appendSlice(gpa, url) catch {};
+}
+pub fn path(id: u32, p: zui.Path) void {
+    if (views.getPtr(id)) |v| v.path_points = p.points.len;
+}
+pub fn requestFrame() void {
+    frame_requested = true;
+}
 pub fn rootBackground(argb: u32) void {
     root_background = argb;
 }
@@ -121,6 +148,35 @@ pub fn Driver(comptime App: type) type {
         }
 
         /// Frame relative to the parent view.
+        /// The first view that listens for pointers.
+        pub fn pointerView() u32 {
+            var it = views.iterator();
+            while (it.next()) |e| if (e.value_ptr.pointer) return e.key_ptr.*;
+            return 0;
+        }
+
+        pub fn pointer(p: zui.Pointer) void {
+            R.pointerEvent(pointerView(), p);
+        }
+
+        /// Delivers a requested frame, if any. Returns whether there was one.
+        pub fn frame() bool {
+            if (!frame_requested) return false;
+            frame_requested = false;
+            R.frame();
+            return true;
+        }
+
+        /// Views showing `url`.
+        pub fn countImages() usize {
+            var n: usize = 0;
+            var it = views.iterator();
+            while (it.next()) |e| if (e.value_ptr.kind == .image) {
+                n += 1;
+            };
+            return n;
+        }
+
         pub fn frameOf(id: u32) zui.Rect {
             return views.get(id).?.frame;
         }

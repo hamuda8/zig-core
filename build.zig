@@ -16,7 +16,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    _ = b.addModule("zui", .{ .root_source_file = b.path("zui/zui.zig") });
+    const zui = b.addModule("zui", .{ .root_source_file = b.path("zui/zui.zig") });
+    _ = b.addModule("map", .{ .root_source_file = b.path("map/map.zig"), .imports = &.{.{ .name = "zui", .module = zui }} });
     _ = b.addModule("http", .{ .root_source_file = b.path("http/http.zig") });
     _ = b.addModule("mongo", .{ .root_source_file = b.path("mongo/mongo.zig") });
     _ = b.addModule("env", .{ .root_source_file = b.path("env/env.zig") });
@@ -42,6 +43,12 @@ pub fn build(b: *std.Build) void {
     }));
 
     const test_step = b.step("test", "Run zig-core tests");
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("map/map.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zui", .module = b.createModule(.{ .root_source_file = b.path("zui/zui.zig"), .target = target, .optimize = optimize }) }},
+    }) })).step);
     for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(root),
@@ -91,13 +98,14 @@ var server_core: *std.Build.Dependency = undefined;
 /// `strings` and `test`.
 pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void {
     const zui = core.module("zui");
+    server_core = core;
     const client = struct {
         fn module(bb: *std.Build, o: AppOptions, z: *std.Build.Module, target: std.Build.ResolvedTarget) *std.Build.Module {
             return bb.createModule(.{
                 .root_source_file = o.client,
                 .target = target,
                 .optimize = o.optimize,
-                .imports = &.{.{ .name = "zui", .module = z }},
+                .imports = &.{ .{ .name = "zui", .module = z }, .{ .name = "map", .module = server_core.module("map") } },
             });
         }
     }.module;
