@@ -269,6 +269,33 @@ pub const Options = struct {
     max_body: usize = 1024 * 1024,
     /// Set once listening, with the bound address (useful with port 0).
     on_listen: ?*const fn (Io.net.IpAddress) void = null,
+    /// HTTPS: every connection does a TLS 1.3 handshake with these certificates first.
+    tls: ?*CertStore = null,
+};
+
+pub const tls = struct {
+    pub const Server = @import("tls/Server.zig");
+    pub const cert = @import("tls/cert.zig");
+};
+
+/// The certificates HTTPS connections use. Replaceable while serving (certificate renewal):
+/// connections already open keep the set they started with.
+pub const CertStore = struct {
+    mutex: Io.Mutex = .init,
+    certificates: []const tls.cert.Certificate,
+
+    pub fn get(s: *CertStore, io: Io) []const tls.cert.Certificate {
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        return s.certificates;
+    }
+
+    /// The old set is not freed: open connections may still be using it.
+    pub fn set(s: *CertStore, io: Io, certificates: []const tls.cert.Certificate) void {
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        s.certificates = certificates;
+    }
 };
 
 /// Accepts connections until canceled; each connection runs as its own task.
@@ -297,11 +324,31 @@ pub fn serve(io: Io, gpa: std.mem.Allocator, options: Options) !void {
 
 fn connection(io: Io, gpa: std.mem.Allocator, stream: Io.net.Stream, options: *const Options) void {
     defer stream.close(io);
-    var read_buf: [16 * 1024]u8 = undefined;
-    var write_buf: [16 * 1024]u8 = undefined;
+    // Socket buffers hold at least one full TLS record.
+    var read_buf: [tls.Server.min_buffer_len]u8 = undefined;
+    var write_buf: [tls.Server.min_buffer_len]u8 = undefined;
     var reader = stream.reader(io, &read_buf);
     var writer = stream.writer(io, &write_buf);
-    var server = std.http.Server.init(&reader.interface, &writer.interface);
+
+    if (options.tls) |store| {
+        var clear_read: [tls.Server.min_buffer_len]u8 = undefined;
+        var clear_write: [16 * 1024]u8 = undefined;
+        var session = tls.Server.init(&reader.interface, &writer.interface, .{
+            .io = io,
+            .certificates = store.get(io),
+            .read_buffer = &clear_read,
+            .write_buffer = &clear_write,
+        }) catch return;
+        exchange(io, gpa, &session.reader, &session.writer, options);
+        session.end() catch {};
+        return;
+    }
+    exchange(io, gpa, &reader.interface, &writer.interface, options);
+}
+
+/// Requests and responses on one connection, until either side ends it.
+fn exchange(io: Io, gpa: std.mem.Allocator, in: *std.Io.Reader, out: *std.Io.Writer, options: *const Options) void {
+    var server = std.http.Server.init(in, out);
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
 
@@ -407,4 +454,5 @@ pub fn contentType(path: []const u8) []const u8 {
 
 test {
     _ = @import("test.zig");
+    _ = tls.Server;
 }

@@ -186,3 +186,62 @@ test "content types and decoding" {
     defer arena.deinit();
     try testing.expectEqualStrings("a b/c", try http.decode(arena.allocator(), "a+b%2Fc"));
 }
+
+test "HTTPS: the router behind the TLS 1.3 server, checked by std's verifying client" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const key = http.tls.cert.KeyPair.generate(io);
+    const now = Io.Timestamp.now(io, .real).toSeconds();
+    const der = try http.tls.cert.selfSigned(io, a, key, &.{"localhost"}, now - 60, now + 3600);
+    var store: http.CertStore = .{ .certificates = &.{try http.tls.cert.Certificate.init(try a.dupe([]const u8, &.{der}), key)} };
+
+    var router: http.Router = .init(testing.allocator);
+    defer router.deinit();
+    try router.get("/healthz", healthz);
+    bound.store(0, .release);
+    var server = try io.concurrent(runTlsServer, .{ &router, &store });
+    defer _ = server.cancel(io) catch {};
+    while (bound.load(.acquire) == 0) try io.sleep(.fromMilliseconds(5), .awake);
+
+    const addr = try Io.net.IpAddress.parse("127.0.0.1", bound.load(.acquire));
+    var stream = try addr.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    const Client = std.crypto.tls.Client;
+    var in_buf: [Client.min_buffer_len]u8 = undefined;
+    var out_buf: [Client.min_buffer_len]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+    var writer = stream.writer(io, &out_buf);
+    var entropy: [Client.Options.entropy_len]u8 = undefined;
+    io.random(&entropy);
+    var read_buf: [Client.min_buffer_len]u8 = undefined;
+    var write_buf: [1024]u8 = undefined;
+    var client = try Client.init(&reader.interface, &writer.interface, .{
+        .host = .{ .explicit = "localhost" },
+        .ca = .self_signed,
+        .read_buffer = &read_buf,
+        .write_buffer = &write_buf,
+        .entropy = &entropy,
+        .realtime_now = Io.Timestamp.now(io, .real),
+    });
+    try client.writer.writeAll("GET /healthz HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n");
+    try client.writer.flush();
+    try writer.interface.flush();
+    var body: std.ArrayList(u8) = .empty;
+    while (true) {
+        const chunk = client.reader.peekGreedy(1) catch break;
+        try body.appendSlice(a, chunk);
+        client.reader.toss(chunk.len);
+    }
+    try expectContains(body.items, "HTTP/1.1 200 OK");
+    try expectContains(body.items, "{\"ok\":true}");
+}
+
+fn runTlsServer(router: *const http.Router, store: *http.CertStore) anyerror!void {
+    try http.serve(io, testing.allocator, .{
+        .address = try .parse("127.0.0.1", 0),
+        .router = router,
+        .on_listen = onListen,
+        .tls = store,
+    });
+}
