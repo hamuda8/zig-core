@@ -1,26 +1,188 @@
-//! Headless host for the build machine: records what would be shown, for tests and tools.
+//! Headless host: keeps the "native views" as plain records, with a fake font (8 points per
+//! character). Used by the tests on the build machine: `Driver` runs an app without a device and
+//! lets a test press buttons, type text and read what is on screen.
 
 const std = @import("std");
 const zui = @import("../zui.zig");
+const layout = @import("../layout.zig");
 
-pub const Context = struct {
-    buf: [256]u8 = undefined,
-    shown: []const u8 = "",
+const Self = @This();
+
+pub const View = struct {
+    kind: zui.tree.Kind,
+    parent: u32 = 0,
+    frame: zui.Rect = .{},
+    box: zui.Box = .{},
+    text: std.ArrayList(u8) = .empty,
+    placeholder: std.ArrayList(u8) = .empty,
+    pressable: bool = false,
 };
 
-pub fn showText(ctx: *Context, s: []const u8) void {
-    const n = @min(s.len, ctx.buf.len);
-    @memcpy(ctx.buf[0..n], s[0..n]);
-    ctx.shown = ctx.buf[0..n];
+const gpa = std.heap.page_allocator;
+pub var views: std.AutoArrayHashMapUnmanaged(u32, View) = .empty;
+pub var root_background: u32 = 0;
+
+pub fn create(id: u32, kind: zui.tree.Kind) void {
+    views.put(gpa, id, .{ .kind = kind }) catch {};
+}
+pub fn destroy(id: u32) void {
+    if (views.getPtr(id)) |v| {
+        v.text.deinit(gpa);
+        v.placeholder.deinit(gpa);
+    }
+    _ = views.swapRemove(id);
+}
+pub fn insert(parent: u32, id: u32, _: u32) void {
+    if (views.getPtr(id)) |v| v.parent = parent;
+}
+pub fn frame(id: u32, r: zui.Rect) void {
+    if (views.getPtr(id)) |v| v.frame = r;
+}
+pub fn box(id: u32, b: zui.Box) void {
+    if (views.getPtr(id)) |v| v.box = b;
+}
+pub fn pressable(id: u32, on: bool) void {
+    if (views.getPtr(id)) |v| v.pressable = on;
+}
+pub fn text(id: u32, s: []const u8, _: zui.Font, _: u32, _: zui.PhysicalAlign) void {
+    const v = views.getPtr(id) orelse return;
+    v.text.clearRetainingCapacity();
+    v.text.appendSlice(gpa, s) catch {};
+}
+pub fn input(id: u32, value: []const u8, placeholder: []const u8, _: zui.Font, _: u32, _: zui.PhysicalAlign) void {
+    const v = views.getPtr(id) orelse return;
+    v.text.clearRetainingCapacity();
+    v.text.appendSlice(gpa, value) catch {};
+    v.placeholder.clearRetainingCapacity();
+    v.placeholder.appendSlice(gpa, placeholder) catch {};
+}
+pub fn content(_: u32, _: zui.Size) void {}
+pub fn rootBackground(argb: u32) void {
+    root_background = argb;
+}
+pub fn measure(s: []const u8, font: zui.Font, max_width: f32) zui.Size {
+    return layout.fakeMeasure(s, font, max_width);
 }
 
-pub fn exportEntry(comptime app: zui.App) void {
-    _ = app;
+pub fn exportEntry(comptime App: type) void {
+    _ = App;
 }
 
-test "headless host records the text" {
-    var ctx: Context = .{};
-    var ui: zui.Ui = .{ .ctx = &ctx };
-    ui.text("Wufour");
-    try std.testing.expectEqualStrings("Wufour", ctx.shown);
+/// Runs `App` on the headless host, for tests.
+pub fn Driver(comptime App: type) type {
+    return struct {
+        pub const R = zui.runtime.Runtime(App, Self);
+
+        pub fn start(width: f32, height: f32) void {
+            reset();
+            R.start(std.heap.page_allocator, .{ .width = width, .height = height }, "en");
+        }
+
+        pub fn reset() void {
+            for (views.values()) |*v| {
+                v.text.deinit(gpa);
+                v.placeholder.deinit(gpa);
+            }
+            views.clearRetainingCapacity();
+        }
+
+        /// Id of the text view showing exactly `s`, or 0.
+        pub fn findText(s: []const u8) u32 {
+            var it = views.iterator();
+            while (it.next()) |e| {
+                if (e.value_ptr.kind == .text and std.mem.eql(u8, e.value_ptr.text.items, s)) return e.key_ptr.*;
+            }
+            return 0;
+        }
+
+        /// Presses the nearest pressable view around the text `label`.
+        pub fn press(label: []const u8) !void {
+            var id = findText(label);
+            while (id != 0) : (id = views.get(id).?.parent) {
+                if (views.get(id).?.pressable) {
+                    R.event(id, .press_in);
+                    R.event(id, .press_out);
+                    R.event(id, .press);
+                    return;
+                }
+            }
+            return error.NothingToPress;
+        }
+
+        /// Types `s` into the input whose placeholder is `placeholder`.
+        pub fn typeInto(placeholder: []const u8, s: []const u8) !void {
+            var it = views.iterator();
+            while (it.next()) |e| {
+                if (e.value_ptr.kind == .input and std.mem.eql(u8, e.value_ptr.placeholder.items, placeholder)) {
+                    return R.textEvent(e.key_ptr.*, s);
+                }
+            }
+            return error.NoSuchInput;
+        }
+
+        /// Frame relative to the parent view.
+        pub fn frameOf(id: u32) zui.Rect {
+            return views.get(id).?.frame;
+        }
+
+        /// Frame relative to the screen (scroll offsets are not applied).
+        pub fn absoluteFrame(id: u32) zui.Rect {
+            var r = frameOf(id);
+            var p = views.get(id).?.parent;
+            while (p != 0) : (p = views.get(p).?.parent) {
+                const f = views.get(p).?.frame;
+                r.x += f.x;
+                r.y += f.y;
+            }
+            return r;
+        }
+    };
+}
+
+// A small counter app, to test the whole loop.
+const Counter = struct {
+    pub const Msg = union(enum) { add, name: []const u8 };
+    pub const State = struct { n: u32 = 0, name_buf: [32]u8 = undefined, name_len: usize = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn update(s: *State, m: Msg) void {
+        switch (m) {
+            .add => s.n += 1,
+            .name => |v| {
+                s.name_len = @min(v.len, s.name_buf.len);
+                @memcpy(s.name_buf[0..s.name_len], v[0..s.name_len]);
+            },
+        }
+    }
+    fn onName(v: []const u8) Msg {
+        return .{ .name = v };
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{ .padding = .all(10), .gap = 8 }, .{});
+        ui.text(ui.tf("Count {n}", .{ .n = s.n }), .{});
+        ui.begin(.{ .padding = .all(4) }, .{ .on_press = .add });
+        ui.text("Add", .{});
+        ui.end();
+        ui.input(.{ .value = s.name_buf[0..s.name_len], .placeholder = "Name", .on_change = onName });
+        ui.text(s.name_buf[0..s.name_len], .{});
+        ui.end();
+    }
+};
+
+test "the loop: press, type, re-render" {
+    const D = Driver(Counter);
+    D.start(200, 400);
+    defer D.reset();
+    try std.testing.expect(D.findText("Count 0") != 0);
+    try D.press("Add");
+    try D.press("Add");
+    try std.testing.expect(D.findText("Count 2") != 0);
+    try D.typeInto("Name", "Sara");
+    try std.testing.expect(D.findText("Sara") != 0);
+    try std.testing.expectEqual(@as(f32, 10), D.frameOf(D.findText("Count 2")).x);
+}
+
+pub fn log(line: []const u8) void {
+    std.debug.print("{s}\n", .{line});
 }

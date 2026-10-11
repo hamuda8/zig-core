@@ -1,23 +1,100 @@
-//! Web host: the wasm module calls into `shells/web/zui.js`, which creates the DOM elements.
+//! Web host: the wasm module calls into the fixed shim `shells/web/zui.js`, which keeps one DOM
+//! element per view, places it at the frame zui computed, and measures text.
 
+const std = @import("std");
 const zui = @import("../zui.zig");
 
-extern "zui" fn zui_show_text(ptr: [*]const u8, len: usize) void;
+const js = struct {
+    extern "zui" fn zui_create(id: u32, kind: u32) void;
+    extern "zui" fn zui_destroy(id: u32) void;
+    extern "zui" fn zui_insert(parent: u32, id: u32, index: u32) void;
+    extern "zui" fn zui_frame(id: u32, x: f32, y: f32, w: f32, h: f32) void;
+    extern "zui" fn zui_box(id: u32, background: u32, radius: f32, border_width: f32, border_color: u32, opacity: f32) void;
+    extern "zui" fn zui_pressable(id: u32, on: u32) void;
+    extern "zui" fn zui_text(id: u32, ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, color: u32, text_align: u32) void;
+    extern "zui" fn zui_input(id: u32, value: [*]const u8, value_len: usize, placeholder: [*]const u8, placeholder_len: usize, size: f32, weight: u32, line_height: f32, mono: u32, color: u32, text_align: u32) void;
+    extern "zui" fn zui_content(id: u32, w: f32, h: f32) void;
+    extern "zui" fn zui_root_background(argb: u32) void;
+    extern "zui" fn zui_measure(ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, max_width: f32, out: *[2]f32) void;
+};
 
-pub const Context = struct {};
-
-pub fn showText(_: *Context, s: []const u8) void {
-    zui_show_text(s.ptr, s.len);
+pub fn create(id: u32, kind: zui.tree.Kind) void {
+    js.zui_create(id, @backingInt(kind));
+}
+pub fn destroy(id: u32) void {
+    js.zui_destroy(id);
+}
+pub fn insert(parent: u32, id: u32, index: u32) void {
+    js.zui_insert(parent, id, index);
+}
+pub fn frame(id: u32, r: zui.Rect) void {
+    js.zui_frame(id, r.x, r.y, r.w, r.h);
+}
+pub fn box(id: u32, b: zui.Box) void {
+    js.zui_box(id, b.background, b.radius, b.border_width, b.border_color, b.opacity);
+}
+pub fn pressable(id: u32, on: bool) void {
+    js.zui_pressable(id, @intFromBool(on));
+}
+pub fn text(id: u32, s: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
+    js.zui_text(id, s.ptr, s.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, color, @backingInt(a));
+}
+pub fn input(id: u32, value: []const u8, placeholder: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
+    js.zui_input(id, value.ptr, value.len, placeholder.ptr, placeholder.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), color, @backingInt(a));
+}
+pub fn content(id: u32, s: zui.Size) void {
+    js.zui_content(id, s.w, s.h);
+}
+pub fn rootBackground(argb: u32) void {
+    js.zui_root_background(argb);
+}
+pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
+    var out: [2]f32 = .{ 0, 0 };
+    js.zui_measure(s.ptr, s.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, max_width, &out);
+    return .{ .w = out[0], .h = out[1] };
 }
 
-pub fn exportEntry(comptime app: zui.App) void {
+pub fn exportEntry(comptime App: type) void {
+    const R = zui.runtime.Runtime(App, @This());
     const Entry = struct {
-        var ctx: Context = .{};
-
-        fn start() callconv(.c) void {
-            var ui: zui.Ui = .{ .ctx = &ctx };
-            app.start(&ui);
+        fn start(w: f32, h: f32, is_dark: u32, top: f32, right: f32, bottom: f32, left: f32, lang: [*]const u8, lang_len: usize) callconv(.c) void {
+            R.start(zui.allocator, .{ .width = w, .height = h, .dark = is_dark != 0, .safe = .{ .top = top, .right = right, .bottom = bottom, .left = left } }, lang[0..lang_len]);
+        }
+        fn resize(w: f32, h: f32) callconv(.c) void {
+            R.resize(w, h);
+        }
+        fn insets(top: f32, right: f32, bottom: f32, left: f32) callconv(.c) void {
+            R.setInsets(.{ .top = top, .right = right, .bottom = bottom, .left = left });
+        }
+        fn dark(on: u32) callconv(.c) void {
+            R.setDark(on != 0);
+        }
+        fn event(id: u32, kind: u32) callconv(.c) void {
+            R.event(id, std.enums.fromInt(zui.Event, kind) orelse return);
+        }
+        fn textEvent(id: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.textEvent(id, ptr[0..len]);
+        }
+        fn alloc(len: usize) callconv(.c) ?[*]u8 {
+            const buf = zui.allocator.alloc(u8, len) catch return null;
+            return buf.ptr;
+        }
+        fn free(ptr: [*]u8, len: usize) callconv(.c) void {
+            zui.allocator.free(ptr[0..len]);
         }
     };
     @export(&Entry.start, .{ .name = "zui_start" });
+    @export(&Entry.resize, .{ .name = "zui_resize" });
+    @export(&Entry.insets, .{ .name = "zui_insets" });
+    @export(&Entry.dark, .{ .name = "zui_dark" });
+    @export(&Entry.event, .{ .name = "zui_event" });
+    @export(&Entry.textEvent, .{ .name = "zui_text_event" });
+    @export(&Entry.alloc, .{ .name = "zui_alloc" });
+    @export(&Entry.free, .{ .name = "zui_free" });
+}
+
+extern "zui" fn zui_log(ptr: [*]const u8, len: usize) void;
+
+pub fn log(line: []const u8) void {
+    zui_log(line.ptr, line.len);
 }

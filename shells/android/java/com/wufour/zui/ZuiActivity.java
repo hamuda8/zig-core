@@ -1,7 +1,13 @@
 package com.wufour.zui;
 
 import android.app.Activity;
+import android.content.res.Configuration;
+import android.graphics.Insets;
+import android.os.Build;
 import android.os.Bundle;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
 
 /** Fixed Android entry for every zui app. Everything visible is created by the app's Zig code (libapp.so). */
 public final class ZuiActivity extends Activity {
@@ -9,11 +15,47 @@ public final class ZuiActivity extends Activity {
         System.loadLibrary("app");
     }
 
-    private static native void nativeStart(Activity activity);
-
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        nativeStart(this);
+        Zui.activity = this;
+        Zui.density = getResources().getDisplayMetrics().density;
+        Zui.dark = isDark(getResources().getConfiguration());
+
+        // Draw behind the system bars; zui keeps content out of them with the insets.
+        Window w = getWindow();
+        if (Build.VERSION.SDK_INT >= 30) {
+            w.setDecorFitsSystemWindows(false);
+        } else {
+            w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        }
+        w.setStatusBarColor(0);
+        w.setNavigationBarColor(0);
+
+        ZuiLayout root = new ZuiLayout(this);
+        root.isRoot = true;
+        Zui.root = root;
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            if (Build.VERSION.SDK_INT >= 30) {
+                Insets i = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+                Zui.insets(i.top, i.right, i.bottom, i.left);
+            } else {
+                Zui.insets(insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(),
+                        insets.getSystemWindowInsetBottom(), insets.getSystemWindowInsetLeft());
+            }
+            return insets;
+        });
+        setContentView(root);
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        Zui.darkChanged(isDark(c));
+    }
+
+    static boolean isDark(Configuration c) {
+        return (c.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
     }
 }

@@ -28,8 +28,18 @@ pub fn build(b: *std.Build) void {
         }),
     }));
 
+    // Host tool that lists an app's translatable strings; apps reach it through `addApp`.
+    b.installArtifact(b.addExecutable(.{
+        .name = "strings",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/strings.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    }));
+
     const test_step = b.step("test", "Run zig-core tests");
-    for ([_][]const u8{ "zui/zui.zig", "tools/zip.zig" }) |root| {
+    for ([_][]const u8{ "zui/zui.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
@@ -72,7 +82,8 @@ const ios_targets = [_]struct { dir: []const u8, query: std.Target.Query }{
     .{ .dir = "simulator", .query = .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .simulator } },
 };
 
-/// Adds the steps `web`, `android`, `ios`, `server`, `server-linux`, `serve` and `test`.
+/// Adds the steps `web`, `android`, `ios`, `ios-sim-app`, `server`, `server-linux`, `serve`,
+/// `strings` and `test`.
 pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void {
     const zui = core.module("zui");
     const client = struct {
@@ -153,6 +164,9 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 lib.link_z_max_page_size = 16 * 1024;
                 lib.setLibCFile(libc_file);
                 lib.root_module.link_libc = true;
+                // NDK system libraries (liblog now; libandroid, libaaudio, libmediandk later),
+                // passed by path: zig 0.17 on Windows hands lld a broken -l: for them otherwise.
+                for ([_][]const u8{"liblog.so"}) |name| lib.root_module.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ crt_dir, name }) });
                 run.addArg("--lib");
                 run.addPrefixedFileArg(b.fmt("{s}=", .{a.abi}), lib.getEmittedBin());
             }
@@ -230,6 +244,14 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
         b.step("server-linux", "Build the Linux server into zig-out/linux").dependOn(
             &b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "linux" } } }).step,
         );
+    }
+
+    // Translatable strings, for Lassan.
+    {
+        const run = b.addRunArtifact(core.artifact("strings"));
+        run.addDirectoryArg(opts.client.dirname());
+        const out = run.addOutputFileArg("strings.json");
+        b.step("strings", "List translatable strings into zig-out/strings.json").dependOn(&b.addInstallFile(out, "strings.json").step);
     }
 
     // Tests run on this machine: the client against the headless host, and the server.

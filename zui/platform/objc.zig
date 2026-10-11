@@ -16,10 +16,36 @@ pub extern "objc" fn objc_registerClassPair(cls: Class) void;
 pub extern "objc" fn class_addMethod(cls: Class, name: SEL, imp: *const anyopaque, types: [*:0]const u8) u8;
 pub extern "objc" fn class_addProtocol(cls: Class, protocol: *Protocol) u8;
 extern "objc" fn objc_msgSend() void;
+extern "objc" fn objc_msgSendSuper() void;
+pub extern "objc" fn class_getSuperclass(cls: Class) Class;
+pub extern "objc" fn object_getClass(obj: id) Class;
+
+/// CGFloat is a double on every 64-bit Apple platform.
+pub const CGFloat = f64;
+pub const CGPoint = extern struct { x: CGFloat, y: CGFloat };
+pub const CGSize = extern struct { w: CGFloat, h: CGFloat };
+pub const CGRect = extern struct { x: CGFloat = 0, y: CGFloat = 0, w: CGFloat = 0, h: CGFloat = 0 };
+pub const UIEdgeInsets = extern struct { top: CGFloat, left: CGFloat, bottom: CGFloat, right: CGFloat };
 
 /// `objc_msgSend` must be called through a pointer of the exact method signature.
 pub fn msgSend(comptime Fn: type) Fn {
     return @ptrCast(&objc_msgSend);
+}
+
+pub const Super = extern struct { receiver: id, super_class: Class };
+
+/// `[super name]` from a method of a class defined with `defineClass`.
+pub fn sendSuper(obj: id, class_name: [*:0]const u8, name: [*:0]const u8) void {
+    const s: Super = .{ .receiver = obj, .super_class = class_getSuperclass(objc_getClass(class_name)) };
+    const f: *const fn (*const Super, SEL) callconv(.c) void = @ptrCast(&objc_msgSendSuper);
+    f(&s, sel(name));
+}
+
+/// `[super name:a with:b]` with two object arguments.
+pub fn sendSuper2(obj: id, class_name: [*:0]const u8, name: [*:0]const u8, a: id, b: id) void {
+    const s: Super = .{ .receiver = obj, .super_class = class_getSuperclass(objc_getClass(class_name)) };
+    const f: *const fn (*const Super, SEL, id, id) callconv(.c) void = @ptrCast(&objc_msgSendSuper);
+    f(&s, sel(name), a, b);
 }
 
 pub fn sel(name: [*:0]const u8) SEL {
@@ -53,6 +79,21 @@ pub fn sendVoid1(obj: id, name: [*:0]const u8, arg: id) void {
 /// `[obj name:integer]` with no result (NSInteger arguments).
 pub fn sendVoidInt(obj: id, name: [*:0]const u8, arg: isize) void {
     msgSend(*const fn (id, SEL, isize) callconv(.c) void)(obj, sel(name), arg);
+}
+
+/// `[obj name:number]` with no result (CGFloat arguments).
+pub fn sendVoidFloat(obj: id, name: [*:0]const u8, arg: CGFloat) void {
+    msgSend(*const fn (id, SEL, CGFloat) callconv(.c) void)(obj, sel(name), arg);
+}
+
+/// `[obj name:flag]` with no result (BOOL arguments).
+pub fn sendVoidBool(obj: id, name: [*:0]const u8, arg: bool) void {
+    msgSend(*const fn (id, SEL, bool) callconv(.c) void)(obj, sel(name), arg);
+}
+
+/// `[obj name]` returning an NSInteger.
+pub fn sendInt(obj: id, name: [*:0]const u8) isize {
+    return msgSend(*const fn (id, SEL) callconv(.c) isize)(obj, sel(name));
 }
 
 /// `[[cls alloc] init]`
