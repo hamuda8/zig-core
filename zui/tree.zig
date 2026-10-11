@@ -11,16 +11,20 @@ pub const none: u32 = std.math.maxInt(u32);
 pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4, image = 5, path = 6 };
 
 /// A polyline in the node's own coordinates.
+/// Lines through points. A point with a NaN x starts a new sub-path (an icon is several).
 pub const Path = struct {
     points: []const [2]f32,
+    /// Stroke color; a width of 0 draws no stroke.
     color: u32,
     width: f32,
+    /// Fill color (each sub-path closed), or 0 for none.
+    fill: u32 = 0,
     /// Dash and gap lengths; 0 for a solid line.
     dash: [2]f32 = .{ 0, 0 },
     round: bool = true,
 
     pub fn eql(a: Path, b: Path) bool {
-        return a.color == b.color and a.width == b.width and a.dash[0] == b.dash[0] and a.dash[1] == b.dash[1] and
+        return a.color == b.color and a.width == b.width and a.fill == b.fill and a.dash[0] == b.dash[0] and a.dash[1] == b.dash[1] and
             a.round == b.round and std.mem.eql(u8, std.mem.sliceAsBytes(a.points), std.mem.sliceAsBytes(b.points));
     }
 };
@@ -88,7 +92,12 @@ pub const Tree = struct {
         var n = node;
         n.text = try a.dupe(u8, node.text);
         n.placeholder = try a.dupe(u8, node.placeholder);
-        if (node.path) |p| n.path = .{ .points = try a.dupe([2]f32, p.points), .color = p.color, .width = p.width, .dash = p.dash, .round = p.round };
+        if (node.path) |p| {
+            // Every field as given; only the points are copied into the tree's memory.
+            var copy = p;
+            copy.points = try a.dupe([2]f32, p.points);
+            n.path = copy;
+        }
         if (t.stack.items.len > 0) {
             const p = t.stack.items[t.stack.items.len - 1];
             n.parent = p;

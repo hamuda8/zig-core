@@ -13,6 +13,20 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import android.Manifest;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.Handler;
+import android.os.Looper;
+import android.speech.tts.TextToSpeech;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -84,21 +98,33 @@ public final class Zui {
     static final TextPaint paint = new TextPaint(TextPaint.ANTI_ALIAS_FLAG);
 
     // Implemented in Zig (libapp.so).
-    static native void nativeStart(float width, float height, boolean dark, float top, float right, float bottom, float left, String lang);
+    static native void nativeStart(float width, float height, boolean dark, float top, float right, float bottom, float left, String lang, String link);
     static native void nativeResize(float width, float height);
     static native void nativeInsets(float top, float right, float bottom, float left);
     static native void nativeDark(boolean dark);
     static native void nativeEvent(int id, int kind);
     static native void nativeText(int id, String text);
     static native void nativePointer(int id, int kind, int pointer, float x, float y, long timeMs);
-    static native void nativeFrame();
+    static native void nativeFrame(long timeNanos);
+    static native void nativeFetchDone(int id, int status, byte[] body);
+    static native void nativeTimer(int id);
+    static native void nativeLocation(double lat, double lng, float accuracy, float heading, float speed);
+    static native void nativeLocationError(boolean denied);
+    static native void nativeInput(int id, int kind);
+
+    static final int INPUT_FOCUS = 1, INPUT_BLUR = 2, INPUT_SUBMIT = 3;
+    /** The address the app was opened with (an App Link), or null. */
+    static String link;
+    static final Handler main = new Handler(Looper.getMainLooper());
+    /** Requests from the app (search, routes, ...), off the UI thread. */
+    static final ExecutorService network = Executors.newFixedThreadPool(4);
 
     // ---- From the activity ----
 
     static void rootSized(int w, int h) {
         if (!started) {
             started = true;
-            nativeStart(w / density, h / density, dark, insetTop, insetRight, insetBottom, insetLeft, java.util.Locale.getDefault().toLanguageTag());
+            nativeStart(w / density, h / density, dark, insetTop, insetRight, insetBottom, insetLeft, java.util.Locale.getDefault().toLanguageTag(), link);
         } else {
             nativeResize(w / density, h / density);
         }
@@ -138,6 +164,12 @@ public final class Zui {
                 e.setIncludeFontPadding(false);
                 e.setSingleLine(true);
                 e.setInputType(InputType.TYPE_CLASS_TEXT);
+                e.setImeOptions(EditorInfo.IME_ACTION_DONE);
+                e.setOnFocusChangeListener((view, has) -> nativeInput(id, has ? INPUT_FOCUS : INPUT_BLUR));
+                e.setOnEditorActionListener((view, action, ev) -> {
+                    nativeInput(id, INPUT_SUBMIT);
+                    return false;
+                });
                 e.addTextChangedListener(new TextWatcher() {
                     public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
                     public void onTextChanged(CharSequence s, int a, int b, int c) {}
@@ -304,6 +336,8 @@ public final class Zui {
         }
         e.setHint(placeholder);
         styleText(e, size, weight, lineHeight, mono, color, align);
+        // Text in the middle of the field, as on the web and iOS.
+        e.setGravity((gravity(align) & Gravity.HORIZONTAL_GRAVITY_MASK) | Gravity.CENTER_VERTICAL);
         e.setHintTextColor((Math.round(Color.alpha(color) * 0.45f) << 24) | (color & 0xffffff));
     }
 
@@ -321,8 +355,14 @@ public final class Zui {
         root.invalidate();
     }
 
-    static void transform(int id, float rotate, float tilt, float perspective) {
+    static void transform(int id, float rotate, float tilt, float perspective, boolean hasOrigin, float ox, float oy) {
         View v = views.get(id);
+        if (hasOrigin) {
+            v.setPivotX(ox * density);
+            v.setPivotY(oy * density);
+        } else if (Build.VERSION.SDK_INT >= 28) {
+            v.resetPivot();
+        }
         v.setRotation(rotate);
         v.setRotationX(tilt);
         // setCameraDistance is not in pixels: View divides it by densityDpi and the renderer's
@@ -426,8 +466,130 @@ public final class Zui {
         });
     }
 
-    static void path(int id, float[] points, int color, float width, float dashOn, float dashOff, boolean round) {
-        ((ZuiPath) views.get(id)).set(points, color, width, dashOn, dashOff, round, density);
+    static void path(int id, float[] points, int color, float width, float dashOn, float dashOff, boolean round, int fill) {
+        ((ZuiPath) views.get(id)).set(points, color, width, dashOn, dashOff, round, fill, density);
+    }
+
+    // ---- Effects: network, timers, location, speech ----
+
+    static void fetch(int id, String method, String url, byte[] body, String contentType) {
+        network.execute(() -> {
+            int status = 0;
+            byte[] out = new byte[0];
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(30000);
+                c.setRequestMethod(method);
+                if (body.length > 0) {
+                    c.setDoOutput(true);
+                    c.setRequestProperty("Content-Type", contentType);
+                    try (OutputStream o = c.getOutputStream()) {
+                        o.write(body);
+                    }
+                }
+                status = c.getResponseCode();
+                InputStream in = status >= 400 ? c.getErrorStream() : c.getInputStream();
+                if (in != null) {
+                    try (InputStream s = in) {
+                        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                        byte[] chunk = new byte[16384];
+                        for (int n; (n = s.read(chunk)) > 0; ) buf.write(chunk, 0, n);
+                        out = buf.toByteArray();
+                    }
+                }
+                c.disconnect();
+            } catch (Exception ignored) {
+                status = 0; // unreachable: the app shows its own message
+            }
+            final int st = status;
+            final byte[] b = out;
+            main.post(() -> nativeFetchDone(id, st, b));
+        });
+    }
+
+    static void timer(int id, int ms) {
+        main.postDelayed(() -> nativeTimer(id), ms);
+    }
+
+    static LocationManager locations;
+    static LocationListener listener;
+    static boolean locationWanted;
+    static final int LOCATION_REQUEST = 7001;
+
+    static void location(boolean on) {
+        locationWanted = on;
+        if (!on) {
+            if (listener != null) locations.removeUpdates(listener);
+            listener = null;
+            return;
+        }
+        if (activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(new String[] {Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, LOCATION_REQUEST);
+            return;
+        }
+        startLocation();
+    }
+
+    /** From the activity, after the permission prompt. */
+    static void locationPermission(boolean granted) {
+        if (!locationWanted) return;
+        if (granted) startLocation(); else nativeLocationError(true);
+    }
+
+    @SuppressWarnings("MissingPermission")
+    static void startLocation() {
+        if (listener != null) return;
+        locations = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+        listener = l -> nativeLocation(l.getLatitude(), l.getLongitude(), l.hasAccuracy() ? l.getAccuracy() : 0,
+                l.hasBearing() ? l.getBearing() : Float.NaN, l.hasSpeed() ? l.getSpeed() : Float.NaN);
+        boolean any = false;
+        // Android 12+ fuses GPS, Wi-Fi and cell itself; before that, both providers.
+        String[] providers = Build.VERSION.SDK_INT >= 31 && locations.hasProvider(LocationManager.FUSED_PROVIDER)
+                ? new String[] {LocationManager.FUSED_PROVIDER}
+                : new String[] {LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER};
+        for (String p : providers) {
+            if (!locations.isProviderEnabled(p)) continue;
+            locations.requestLocationUpdates(p, 1000, 0, listener, Looper.getMainLooper());
+            android.location.Location last = locations.getLastKnownLocation(p);
+            if (last != null) listener.onLocationChanged(last);
+            any = true;
+        }
+        if (!any) nativeLocationError(false);
+    }
+
+    static TextToSpeech tts;
+    static boolean ttsReady;
+    static String pendingSpeech, pendingLang;
+
+    static void speak(String text, String lang) {
+        if (tts == null) {
+            pendingSpeech = text;
+            pendingLang = lang;
+            tts = new TextToSpeech(activity, status -> {
+                ttsReady = status == TextToSpeech.SUCCESS;
+                if (ttsReady && pendingSpeech != null) say(pendingSpeech, pendingLang);
+                pendingSpeech = null;
+            });
+            return;
+        }
+        if (ttsReady) say(text, lang);
+    }
+
+    static void say(String text, String lang) {
+        tts.setLanguage(java.util.Locale.forLanguageTag(lang));
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "zui");
+    }
+
+    static void setLink(String l) {
+        link = l;
+    }
+
+    static void focus(int id) {
+        View v = views.get(id);
+        if (v == null) return;
+        v.requestFocus();
+        ((InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(v, InputMethodManager.SHOW_IMPLICIT);
     }
 
     static void requestFrame() {
@@ -435,7 +597,7 @@ public final class Zui {
         frameRequested = true;
         Choreographer.getInstance().postFrameCallback(time -> {
             frameRequested = false;
-            nativeFrame();
+            nativeFrame(time);
         });
     }
 

@@ -32,6 +32,22 @@ pub const CGSize = extern struct { w: CGFloat, h: CGFloat };
 pub const CGRect = extern struct { x: CGFloat = 0, y: CGFloat = 0, w: CGFloat = 0, h: CGFloat = 0 };
 pub const UIEdgeInsets = extern struct { top: CGFloat, left: CGFloat, bottom: CGFloat, right: CGFloat };
 
+/// The header of an Objective-C block (a closure), for APIs that only take a block, such as
+/// NSURLSession's completion handler. Built as a "global" block, so the runtime never copies
+/// or frees it: the owner frees it after its one call. Fields after the header are captures.
+pub const BlockHeader = extern struct {
+    isa: *const anyopaque,
+    flags: i32 = block_is_global,
+    reserved: i32 = 0,
+    invoke: *const anyopaque,
+    descriptor: *const BlockDescriptor,
+};
+
+pub const BlockDescriptor = extern struct { reserved: usize = 0, size: usize };
+
+pub const block_is_global: i32 = 1 << 28;
+pub extern "c" var _NSConcreteGlobalBlock: anyopaque;
+
 /// `objc_msgSend` must be called through a pointer of the exact method signature.
 pub fn msgSend(comptime Fn: type) Fn {
     return @ptrCast(&objc_msgSend);

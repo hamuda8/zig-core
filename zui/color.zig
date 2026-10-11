@@ -18,7 +18,11 @@ pub const Color = struct {
     /// "#rgb", "#rgba", "#rrggbb" or "#rrggbbaa". Invalid input is a compile error when used at
     /// comptime, which is how app themes use it.
     pub fn hex(comptime text: []const u8) Color {
-        return comptime parseHex(text) catch @compileError("bad hex color: " ++ text);
+        return comptime blk: {
+            // Each color costs some comptime branches; a theme has dozens.
+            @setEvalBranchQuota(100_000);
+            break :blk parseHex(text) catch @compileError("bad hex color: " ++ text);
+        };
     }
 
     pub fn parseHex(text: []const u8) !Color {

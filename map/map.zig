@@ -2,9 +2,12 @@
 //! gestures that move it, route lines and markers. Built only from zui primitives (image, path,
 //! view transforms), so it behaves the same on the web, Android and iOS, with no map library.
 //!
-//! The tiles lie on one square "layer" view, centred on the screen, which the hosts rotate
-//! (bearing) and tilt (pitch) natively. Markers stay upright: their screen position comes from
-//! the same projection the layer uses, computed here.
+//! The tiles lie on a square "layer" view turned by the bearing, inside a "tilt" view that the
+//! hosts tilt (pitch) natively around the screen centre. The tilt view is cut to the ground the
+//! screen can show: far up towards the horizon, just past the bottom edge. (A square centred on
+//! the screen would swing its lower half right up to the eye when tilted, which browsers fail to
+//! draw.) Markers stay upright: their screen position comes from the same projection, computed
+//! here.
 
 const std = @import("std");
 const zui = @import("zui");
@@ -64,6 +67,26 @@ pub const View = struct {
         return 1.5 * v.height;
     }
 
+    /// The ground the screen shows, in the tilted plane around the screen centre (before the
+    /// bearing turns it): how far it reaches sideways, up (negative) and down.
+    pub fn footprint(v: View) struct { half_width: f64, top: f64, bottom: f64 } {
+        const t = std.math.degreesToRadians(v.camera.pitch);
+        const p_dist = v.perspective();
+        const ground = struct {
+            fn y(sy: f64, tt: f64, pd: f64) f64 {
+                // Near the horizon the ground runs off to infinity: stop at 8 screen heights.
+                const den = pd * @cos(tt) + sy * @sin(tt);
+                if (den <= 1e-6) return -8 * pd;
+                return @max(sy * pd / den, -8 * pd);
+            }
+        }.y;
+        const top = ground(-v.height / 2, t, p_dist);
+        const bottom = ground(v.height / 2, t, p_dist);
+        // Width grows with distance: the far (top) edge is the widest.
+        const half_width = v.width / 2 * (p_dist - top * @sin(t)) / p_dist;
+        return .{ .half_width = @max(half_width, v.width / 2), .top = top, .bottom = bottom };
+    }
+
     /// Where `p` appears on screen, or null when it is behind the horizon.
     pub fn toScreen(v: View, p: LatLng) ?[2]f64 {
         const c = v.camera;
@@ -116,6 +139,23 @@ pub const View = struct {
 
 // ---- Gestures ---------------------------------------------------------------------------
 
+/// What a pointer event did besides moving the camera.
+pub const Gesture = struct {
+    /// A tap at this screen point (no drag, one finger, short).
+    tap: ?[2]f64 = null,
+};
+
+/// A camera move over time (flyTo, easeTo, fitBounds).
+const Animation = struct {
+    from: Camera,
+    to: Camera,
+    duration_ms: f64,
+    /// Set at the first frame.
+    start_ms: ?f64 = null,
+    /// How far to zoom out in the middle of a long flight (0 for an ease).
+    arc: f64 = 0,
+};
+
 /// Camera plus what the fingers are doing. Feed it pointer events; it moves the camera.
 pub const State = struct {
     camera: Camera,
@@ -130,6 +170,11 @@ pub const State = struct {
     velocity: [2]f64 = .{ 0, 0 },
     last_ms: i64 = 0,
     gliding: bool = false,
+    animation: ?Animation = null,
+    /// Time of the last frame that moved the camera, for frame-rate independent motion.
+    frame_ms: ?f64 = null,
+    /// Where and when the current single-finger touch began, for taps.
+    touch_start: ?struct { x: f64, y: f64, ms: i64, moved: bool, many: bool } = null,
 
     const Finger = struct { id: u32, x: f64, y: f64 };
     const Pinch = struct {
@@ -164,18 +209,99 @@ pub const State = struct {
         return @as(usize, @intFromBool(s.fingers[0] != null)) + @intFromBool(s.fingers[1] != null);
     }
 
-    /// Updates the camera from one pointer event. Returns true when a glide should start (ask for
-    /// frames and call `glide` on each).
-    pub fn handle(s: *State, p: zui.Pointer) bool {
+    /// Whether the camera is still moving on its own: ask for display frames and call `step`.
+    pub fn moving(s: *const State) bool {
+        return s.gliding or s.animation != null;
+    }
+
+    /// Advances a glide or an animation to frame time `now_ms`. Returns whether to keep going.
+    pub fn step(s: *State, now_ms: f64) bool {
+        const dt = if (s.frame_ms) |f| std.math.clamp(now_ms - f, 0, 50) else 16;
+        s.frame_ms = now_ms;
+        if (s.animation) |*a| {
+            const start = a.start_ms orelse blk: {
+                a.start_ms = now_ms;
+                break :blk now_ms;
+            };
+            const t = std.math.clamp((now_ms - start) / a.duration_ms, 0, 1);
+            s.camera = interpolate(a.*, ease(t));
+            if (t >= 1) {
+                s.camera = a.to;
+                s.animation = null;
+            }
+        } else if (s.gliding) {
+            s.panBy(s.velocity[0] * dt, s.velocity[1] * dt);
+            const decay = std.math.pow(f64, 0.92, dt / 16);
+            s.velocity[0] *= decay;
+            s.velocity[1] *= decay;
+            if (@abs(s.velocity[0]) + @abs(s.velocity[1]) < 0.02) s.gliding = false;
+        }
+        const more = s.moving();
+        if (!more) s.frame_ms = null;
+        return more;
+    }
+
+    /// Moves smoothly to `to` (fields left null keep their value) over `ms`. A long way away it
+    /// zooms out and back in, as a flight would.
+    pub fn flyTo(s: *State, to: CameraTarget, ms: f64) void {
+        const target = to.apply(s.camera);
+        s.gliding = false;
+        const from_w = project(s.camera.center);
+        const to_w = project(target.center);
+        var dx = to_w.x - from_w.x;
+        if (dx > tile_size / 2) dx -= tile_size;
+        if (dx < -tile_size / 2) dx += tile_size;
+        // The distance in screens at the lower zoom: more than ~1.5 screens is a flight.
+        const k = std.math.pow(f64, 2, @min(s.camera.zoom, target.zoom));
+        const screens = std.math.hypot(dx, to_w.y - from_w.y) * k / @max(1, @max(s.width, s.height));
+        s.animation = .{ .from = s.camera, .to = target, .duration_ms = ms, .arc = if (screens > 1.5) std.math.log2(screens) else 0 };
+    }
+
+    /// Like flyTo, without zooming out on the way.
+    pub fn easeTo(s: *State, to: CameraTarget, ms: f64) void {
+        s.gliding = false;
+        s.animation = .{ .from = s.camera, .to = to.apply(s.camera), .duration_ms = ms };
+    }
+
+    /// Shows all of `points` with `padding` points of margin (flat, north up), animated.
+    pub fn fitBounds(s: *State, points: []const LatLng, padding: zui.Insets, ms: f64) void {
+        if (points.len == 0 or s.width <= 0) return;
+        var min: World = .{ .x = std.math.inf(f64), .y = std.math.inf(f64) };
+        var max: World = .{ .x = -std.math.inf(f64), .y = -std.math.inf(f64) };
+        for (points) |pt| {
+            const w = project(pt);
+            min = .{ .x = @min(min.x, w.x), .y = @min(min.y, w.y) };
+            max = .{ .x = @max(max.x, w.x), .y = @max(max.y, w.y) };
+        }
+        const room_w = @max(40, s.width - padding.left - padding.right);
+        const room_h = @max(40, s.height - padding.top - padding.bottom);
+        const span_x = @max(max.x - min.x, 1e-9);
+        const span_y = @max(max.y - min.y, 1e-9);
+        const zoom = std.math.clamp(std.math.log2(@min(room_w / span_x, room_h / span_y)), s.minZoom(), 17);
+        // The centre of the free area, which the padding may shift off the screen's centre.
+        const k = std.math.pow(f64, 2, zoom);
+        const shift_x = (padding.left - padding.right) / 2 / k;
+        const shift_y = (padding.top - padding.bottom) / 2 / k;
+        const center = unproject(.{ .x = (min.x + max.x) / 2 - shift_x, .y = (min.y + max.y) / 2 - shift_y });
+        s.flyTo(.{ .center = center, .zoom = zoom, .bearing = 0, .pitch = 0 }, ms);
+    }
+
+    /// Updates the camera from one pointer event.
+    pub fn handle(s: *State, p: zui.Pointer) Gesture {
         const x: f64 = p.x;
         const y: f64 = p.y;
         switch (p.kind) {
             .wheel => {
+                s.animation = null;
                 s.zoomAround(x, y, s.camera.zoom - p.wheel / 300);
-                return false;
+                return .{};
             },
             .down => {
                 s.gliding = false;
+                s.animation = null;
+                if (s.count() == 0) {
+                    s.touch_start = .{ .x = x, .y = y, .ms = p.time_ms, .moved = false, .many = false };
+                } else if (s.touch_start) |*t| t.many = true;
                 for (&s.fingers) |*f| if (f.* == null) {
                     f.* = .{ .id = p.id, .x = x, .y = y };
                     break;
@@ -188,6 +314,9 @@ pub const State = struct {
                 for (&s.fingers) |*f| if (f.*) |*fp| if (fp.id == p.id) {
                     fp.x = x;
                     fp.y = y;
+                };
+                if (s.touch_start) |*t| if (std.math.hypot(x - t.x, y - t.y) > 8) {
+                    t.moved = true;
                 };
                 if (s.count() == 2) {
                     s.movePinch();
@@ -209,7 +338,12 @@ pub const State = struct {
                     };
                 } else false;
                 // A third finger, which the gesture ignores, lifting.
-                if (!known) return false;
+                if (!known) return .{};
+                var gesture: Gesture = .{};
+                if (s.count() == 0) if (s.touch_start) |t| {
+                    if (p.kind == .up and !t.moved and !t.many and p.time_ms - t.ms < 500) gesture.tap = .{ x, y };
+                    s.touch_start = null;
+                };
                 s.pinch = null;
                 if (was == 2) {
                     // Keep panning with the finger that is left.
@@ -226,25 +360,12 @@ pub const State = struct {
                         s.velocity = .{ s.velocity[0] / speed * max_speed, s.velocity[1] / speed * max_speed };
                         speed = max_speed;
                     }
-                    if (p.kind == .up and speed > 0.1 and p.time_ms - s.last_ms < 80) {
-                        s.gliding = true;
-                        return true;
-                    }
+                    if (p.kind == .up and speed > 0.1 and p.time_ms - s.last_ms < 80) s.gliding = true;
                 }
+                return gesture;
             },
         }
-        return false;
-    }
-
-    /// One frame of the glide after a quick pan (16 ms). Returns whether to keep gliding.
-    pub fn glide(s: *State) bool {
-        if (!s.gliding) return false;
-        const dt = 16.0;
-        s.panBy(s.velocity[0] * dt, s.velocity[1] * dt);
-        s.velocity[0] *= 0.92;
-        s.velocity[1] *= 0.92;
-        if (@abs(s.velocity[0]) + @abs(s.velocity[1]) < 0.02) s.gliding = false;
-        return s.gliding;
+        return .{};
     }
 
     /// Moves the map with the finger by (dx, dy) screen points.
@@ -326,6 +447,45 @@ pub const State = struct {
     }
 };
 
+/// Camera fields to change; null keeps the current value.
+pub const CameraTarget = struct {
+    center: ?LatLng = null,
+    zoom: ?f64 = null,
+    bearing: ?f64 = null,
+    pitch: ?f64 = null,
+
+    fn apply(t: CameraTarget, c: Camera) Camera {
+        return .{
+            .center = t.center orelse c.center,
+            .zoom = std.math.clamp(t.zoom orelse c.zoom, 0, max_zoom),
+            .bearing = t.bearing orelse c.bearing,
+            .pitch = std.math.clamp(t.pitch orelse c.pitch, 0, max_pitch),
+        };
+    }
+};
+
+fn ease(t: f64) f64 {
+    return if (t < 0.5) 4 * t * t * t else 1 - std.math.pow(f64, -2 * t + 2, 3) / 2;
+}
+
+fn interpolate(a: Animation, t: f64) Camera {
+    const f = project(a.from.center);
+    const to = project(a.to.center);
+    var dx = to.x - f.x;
+    if (dx > tile_size / 2) dx -= tile_size;
+    if (dx < -tile_size / 2) dx += tile_size;
+    // Zoom moves linearly, minus a bump in the middle of a flight.
+    const zoom = a.from.zoom + (a.to.zoom - a.from.zoom) * t - a.arc * 4 * t * (1 - t);
+    var db = a.to.bearing - a.from.bearing;
+    db = @mod(db + 540, 360) - 180;
+    return .{
+        .center = unproject(.{ .x = @mod(f.x + dx * t, tile_size), .y = f.y + (to.y - f.y) * t }),
+        .zoom = @max(0, zoom),
+        .bearing = @mod(a.from.bearing + db * t, 360),
+        .pitch = a.from.pitch + (a.to.pitch - a.from.pitch) * t,
+    };
+}
+
 fn angleDiff(a: f64, b: f64) f64 {
     var d = a - b;
     while (d > std.math.pi) d -= 2 * std.math.pi;
@@ -337,12 +497,21 @@ fn angleDiff(a: f64, b: f64) f64 {
 
 pub const Marker = struct {
     at: LatLng,
-    /// Image URL; null draws a dot.
-    icon: ?[]const u8 = null,
+    /// Image URL; else `icon`; else a dot.
+    image: ?[]const u8 = null,
+    icon: ?zui.Icon = null,
     size: f32 = 18,
     color: zui.Color = zui.Color.hex("#2563eb"),
     /// Heading in degrees (driver arrows); turns with the map.
     heading: ?f64 = null,
+    /// Which point of the marker sits on `at`: its centre, or its bottom (a pin's tip).
+    anchor: enum { center, bottom } = .center,
+    /// A soft ring around a dot (the live position).
+    halo: bool = false,
+    /// A dot's ring; an icon's outline when `outline` is set.
+    border_color: zui.Color = zui.Color.white,
+    border_width: f32 = 2,
+    outline: ?zui.Color = null,
     key: u64 = 0,
 };
 
@@ -375,47 +544,79 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
     ui.begin(.{ .width = .fill, .height = .fill, .clip = true, .no_mirror = true, .background = o.background }, .{ .on_pointer = o.on_pointer });
     defer ui.end();
 
-    // The layer: a square big enough to cover the screen at any bearing, taller when tilted.
-    const diagonal = @sqrt(v.width * v.width + v.height * v.height);
-    const side = @ceil(diagonal * (1 + 2.2 * @sin(std.math.degreesToRadians(c.pitch))));
+    // The tilt view: the ground the screen shows, turning around the screen centre.
+    const fp = v.footprint();
+    const margin = 48.0;
+    const half_w = @ceil(fp.half_width + margin);
+    const top_y = @floor(fp.top - margin);
+    const bottom_y = @ceil(fp.bottom + margin);
     ui.begin(.{
         .position = .absolute,
-        .inset = .{ .start = @floatCast((v.width - side) / 2), .top = @floatCast((v.height - side) / 2) },
+        .inset = .{ .start = @floatCast(v.width / 2 - half_w), .top = @floatCast(v.height / 2 + top_y) },
+        .width = .{ .px = @floatCast(2 * half_w) },
+        .height = .{ .px = @floatCast(bottom_y - top_y) },
+        .tilt = @floatCast(c.pitch),
+        .perspective = @floatCast(v.perspective()),
+        .origin = .{ @floatCast(half_w), @floatCast(-top_y) },
+        .clip = true,
+    }, .{ .key = zui.key("tilt") });
+    // The layer: a square around that centre, big enough to fill the tilt view at any bearing.
+    const r = @ceil(@sqrt(half_w * half_w + @max(top_y * top_y, bottom_y * bottom_y)));
+    const side = 2 * r;
+    ui.begin(.{
+        .position = .absolute,
+        .inset = .{ .start = @floatCast(half_w - r), .top = @floatCast(-top_y - r) },
         .width = .{ .px = @floatCast(side) },
         .height = .{ .px = @floatCast(side) },
         .rotate = @floatCast(-c.bearing),
-        .tilt = @floatCast(c.pitch),
-        .perspective = @floatCast(v.perspective()),
     }, .{ .key = zui.key("layer") });
+    // What of the layer can be seen: the tilt view turned by the bearing (its bounding box).
+    const area = visibleArea(half_w, top_y, bottom_y, c.bearing);
     // Two coarser levels underneath: usually already loaded (they were on screen moments ago,
     // or cover a wide area with few tiles), so a new level appears over a picture, never gray.
     const level = tileLevel(c.zoom);
-    if (level >= 3) drawTiles(Msg, ui, c, side, level - 3, o.tile_url);
-    if (level >= 1) drawTiles(Msg, ui, c, side, level - 1, o.tile_url);
-    drawTiles(Msg, ui, c, side, level, o.tile_url);
-    drawRoutes(Msg, ui, c, side, o.routes);
+    if (level >= 3) drawTiles(Msg, ui, c, side, area, level - 3, o.tile_url);
+    if (level >= 1) drawTiles(Msg, ui, c, side, area, level - 1, o.tile_url);
+    drawTiles(Msg, ui, c, side, area, level, o.tile_url);
+    drawRoutes(Msg, ui, c, side, area, o.routes);
+    ui.end();
     ui.end();
 
     for (o.markers, 0..) |m, i| {
         const p = v.toScreen(m.at) orelse continue;
         const half = m.size / 2;
         if (p[0] < -m.size or p[1] < -m.size or p[0] > v.width + m.size or p[1] > v.height + m.size) continue;
+        const top: f32 = @as(f32, @floatCast(p[1])) - if (m.anchor == .bottom) m.size else half;
         const style: zui.Style = .{
             .position = .absolute,
-            .inset = .{ .start = @as(f32, @floatCast(p[0])) - half, .top = @as(f32, @floatCast(p[1])) - half },
+            .inset = .{ .start = @as(f32, @floatCast(p[0])) - half, .top = top },
             .width = .{ .px = m.size },
             .height = .{ .px = m.size },
             .rotate = if (m.heading) |h| @floatCast(h - c.bearing) else 0,
         };
         const k = if (m.key != 0) m.key else zui.key(i + 1_000_000);
-        if (m.icon) |url| {
+        if (m.halo) {
+            const ring = m.size * 2.6;
+            ui.begin(.{
+                .position = .absolute,
+                .inset = .{ .start = @as(f32, @floatCast(p[0])) - ring / 2, .top = @as(f32, @floatCast(p[1])) - ring / 2 },
+                .width = .{ .px = ring },
+                .height = .{ .px = ring },
+                .radius = ring / 2,
+                .background = m.color.withAlpha(0.18),
+            }, .{ .key = k +% 1 });
+            ui.end();
+        }
+        if (m.image) |url| {
             ui.image(url, style, k);
+        } else if (m.icon) |ic| {
+            if (m.outline) |ring| ui.iconOutlined(ic, m.size, m.color, ring, m.border_width, style, k) else ui.icon(ic, m.size, m.color, style, k);
         } else {
             var dot = style;
             dot.background = m.color;
             dot.radius = half;
-            dot.border_width = 2;
-            dot.border_color = zui.Color.white;
+            dot.border_width = m.border_width;
+            dot.border_color = m.border_color;
             ui.begin(dot, .{ .key = k });
             ui.end();
         }
@@ -435,19 +636,31 @@ fn tileLevel(zoom: f64) u5 {
     return @intFromFloat(std.math.clamp(@floor(zoom), 0, @as(f64, max_tile_zoom)));
 }
 
-/// The tiles of level `z` covering the layer, scaled to the camera's zoom.
-fn drawTiles(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, z: u5, url_template: []const u8) void {
+/// The part of the layer the screen can show, around its centre: [min x, min y, max x, max y].
+fn visibleArea(half_w: f64, top: f64, bottom: f64, bearing: f64) [4]f64 {
+    const b = std.math.degreesToRadians(bearing);
+    var area: [4]f64 = .{ std.math.inf(f64), std.math.inf(f64), -std.math.inf(f64), -std.math.inf(f64) };
+    for ([_][2]f64{ .{ -half_w, top }, .{ half_w, top }, .{ -half_w, bottom }, .{ half_w, bottom } }) |p| {
+        // The layer is turned by -bearing: what shows at p is the layer's point turned by +bearing.
+        const x = p[0] * @cos(b) - p[1] * @sin(b);
+        const y = p[0] * @sin(b) + p[1] * @cos(b);
+        area = .{ @min(area[0], x), @min(area[1], y), @max(area[2], x), @max(area[3], y) };
+    }
+    return area;
+}
+
+/// The tiles of level `z` covering `area` of the layer, scaled to the camera's zoom.
+fn drawTiles(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, area: [4]f64, z: u5, url_template: []const u8) void {
     const n: i64 = @as(i64, 1) << z;
     const k = std.math.pow(f64, 2, c.zoom - @as(f64, @floatFromInt(z))); // on-screen size of a tile pixel
     const center = project(c.center);
     const cx = center.x * @as(f64, @floatFromInt(n)); // world pixels at zoom z
     const cy = center.y * @as(f64, @floatFromInt(n));
-    const half = side / 2 / k;
 
-    const x0: i64 = @intFromFloat(@floor((cx - half) / tile_size));
-    const x1: i64 = @intFromFloat(@floor((cx + half) / tile_size));
-    const y0: i64 = @max(0, @as(i64, @intFromFloat(@floor((cy - half) / tile_size))));
-    const y1: i64 = @min(n - 1, @as(i64, @intFromFloat(@floor((cy + half) / tile_size))));
+    const x0: i64 = @intFromFloat(@floor((cx + area[0] / k) / tile_size));
+    const x1: i64 = @intFromFloat(@floor((cx + area[2] / k) / tile_size));
+    const y0: i64 = @max(0, @as(i64, @intFromFloat(@floor((cy + area[1] / k) / tile_size))));
+    const y1: i64 = @min(n - 1, @as(i64, @intFromFloat(@floor((cy + area[3] / k) / tile_size))));
     if (x1 - x0 > 64 or y1 - y0 > 64) return;
 
     var ty = y0;
@@ -471,22 +684,89 @@ fn drawTiles(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, z: u5, 
     }
 }
 
-fn drawRoutes(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, routes: []const Route) void {
+fn drawRoutes(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, area: [4]f64, routes: []const Route) void {
     const center = project(c.center);
     const k = c.scale();
+    // Lines are cut to the layer (plus a margin for their width): zoomed in, a route can reach
+    // a hundred thousand points beyond it, and drawing that costs every platform dearly.
+    const margin = 64.0;
+    const box: [4]f64 = .{ side / 2 + area[0] - margin, side / 2 + area[1] - margin, side / 2 + area[2] + margin, side / 2 + area[3] + margin };
     for (routes, 0..) |r, i| {
-        const pts = ui.arena().alloc([2]f32, r.points.len) catch return;
-        for (r.points, pts) |p, *out| {
+        var pts: std.ArrayList([2]f32) = .empty;
+        var prev: ?[2]f64 = null;
+        var open = false; // the last point written ends a visible piece
+        for (r.points) |p| {
             const w = project(p);
-            out.* = .{ @floatCast((w.x - center.x) * k + side / 2), @floatCast((w.y - center.y) * k + side / 2) };
+            const cur: [2]f64 = .{ (w.x - center.x) * k + side / 2, (w.y - center.y) * k + side / 2 };
+            defer prev = cur;
+            const from = prev orelse {
+                if (inBox(cur, box)) {
+                    pts.append(ui.arena(), f32x2(cur)) catch return;
+                    open = true;
+                }
+                continue;
+            };
+            const seg = clipSegment(from, cur, box) orelse {
+                open = false;
+                continue;
+            };
+            if (!open) {
+                if (pts.items.len > 0) pts.append(ui.arena(), zui.icon.gap) catch return;
+                pts.append(ui.arena(), f32x2(seg[0])) catch return;
+            }
+            pts.append(ui.arena(), f32x2(seg[1])) catch return;
+            // Leaving the box: the next visible piece starts a new sub-path.
+            open = seg[1][0] == cur[0] and seg[1][1] == cur[1];
         }
-        ui.path(pts, .{ .color = r.color.withAlpha(r.opacity), .width = r.width, .dash = r.dash }, .{
+        if (pts.items.len < 2) continue;
+        ui.path(pts.items, .{ .color = r.color.withAlpha(r.opacity), .width = r.width, .dash = r.dash }, .{
             .position = .absolute,
             .inset = .{ .start = 0, .top = 0 },
             .width = .{ .px = @floatCast(side) },
             .height = .{ .px = @floatCast(side) },
         }, zui.key(i + 2_000_000));
     }
+}
+
+fn f32x2(p: [2]f64) [2]f32 {
+    return .{ @floatCast(p[0]), @floatCast(p[1]) };
+}
+
+fn inBox(p: [2]f64, b: [4]f64) bool {
+    return p[0] >= b[0] and p[0] <= b[2] and p[1] >= b[1] and p[1] <= b[3];
+}
+
+/// The part of segment a-b inside box b (Liang-Barsky), or null.
+fn clipSegment(a: [2]f64, b: [2]f64, box: [4]f64) ?[2][2]f64 {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    var t0: f64 = 0;
+    var t1: f64 = 1;
+    const tests = [_][2]f64{ .{ -dx, a[0] - box[0] }, .{ dx, box[2] - a[0] }, .{ -dy, a[1] - box[1] }, .{ dy, box[3] - a[1] } };
+    for (tests) |pq| {
+        const p = pq[0];
+        const q = pq[1];
+        if (p == 0) {
+            if (q < 0) return null;
+            continue;
+        }
+        const r = q / p;
+        if (p < 0) {
+            if (r > t1) return null;
+            t0 = @max(t0, r);
+        } else {
+            if (r < t0) return null;
+            t1 = @min(t1, r);
+        }
+    }
+    return .{ .{ a[0] + t0 * dx, a[1] + t0 * dy }, .{ a[0] + t1 * dx, a[1] + t1 * dy } };
+}
+
+test clipSegment {
+    const box: [4]f64 = .{ 0, 0, 100, 100 };
+    try testing.expectEqual([2][2]f64{ .{ 0, 50 }, .{ 100, 50 } }, clipSegment(.{ -50, 50 }, .{ 150, 50 }, box).?);
+    try testing.expect(clipSegment(.{ -50, -50 }, .{ -10, 150 }, box) == null);
+    try testing.expectEqual([2][2]f64{ .{ 10, 10 }, .{ 20, 20 } }, clipSegment(.{ 10, 10 }, .{ 20, 20 }, box).?);
 }
 
 pub fn tileUrl(arena: std.mem.Allocator, template: []const u8, z: u5, x: i64, y: i64) ![]const u8 {
@@ -575,6 +855,70 @@ test "fast pinching far out and back in does not drift" {
     const start = (View{ .camera = .{ .center = .{ .lat = 33.51, .lng = 36.28 }, .zoom = s.camera.zoom, .pitch = 50 }, .width = 411, .height = 914 }).toMap(205.5, 300).?;
     try testing.expectApproxEqAbs(start.lat, under.lat, 0.05);
     try testing.expectApproxEqAbs(start.lng, under.lng, 0.05);
+}
+
+test "the footprint reaches exactly the screen's edges" {
+    for ([_]f64{ 0, 30, 60 }) |pitch| {
+        const v: View = .{ .camera = .{ .center = .{ .lat = 33.51, .lng = 36.28 }, .zoom = 15, .pitch = pitch }, .width = 412, .height = 915 };
+        const fp = v.footprint();
+        const t = std.math.degreesToRadians(pitch);
+        // Project the footprint's top and bottom edge centres back to the screen.
+        for ([_][2]f64{ .{ fp.top, 0 }, .{ fp.bottom, 915 } }) |edge| {
+            const ly = edge[0];
+            const s = v.perspective() / (v.perspective() - ly * @sin(t));
+            try testing.expectApproxEqAbs(edge[1], 457.5 + ly * @cos(t) * s, 1e-6);
+        }
+        // Sideways at the top: the screen's corner.
+        const s_top = v.perspective() / (v.perspective() - fp.top * @sin(t));
+        try testing.expectApproxEqAbs(@as(f64, 206), fp.half_width * s_top, 1e-6);
+        // The near edge never comes close to the eye.
+        try testing.expect(fp.bottom * @sin(t) < 0.5 * v.perspective());
+    }
+}
+
+test "a tap is reported; a drag is not" {
+    var s: State = .{ .camera = .{ .center = .{ .lat = 33.51, .lng = 36.28 }, .zoom = 15 } };
+    s.setViewport(400, 800);
+    _ = s.handle(.{ .kind = .down, .id = 1, .x = 100, .y = 200, .time_ms = 0 });
+    const tap = s.handle(.{ .kind = .up, .id = 1, .x = 102, .y = 201, .time_ms = 120 });
+    try testing.expectEqual([2]f64{ 102, 201 }, tap.tap.?);
+    _ = s.handle(.{ .kind = .down, .id = 1, .x = 100, .y = 200, .time_ms = 1000 });
+    _ = s.handle(.{ .kind = .move, .id = 1, .x = 160, .y = 200, .time_ms = 1050 });
+    try testing.expect(s.handle(.{ .kind = .up, .id = 1, .x = 160, .y = 200, .time_ms = 1300 }).tap == null);
+}
+
+test "flyTo arrives exactly, whatever the frame rate" {
+    for ([_]f64{ 16.6, 8.3 }) |frame| {
+        var s: State = .{ .camera = .{ .center = .{ .lat = 33.51, .lng = 36.28 }, .zoom = 14 } };
+        s.setViewport(400, 800);
+        s.flyTo(.{ .center = .{ .lat = 3.15, .lng = 101.7 }, .zoom = 15, .pitch = 30 }, 1000);
+        var now: f64 = 0;
+        var frames: usize = 0;
+        var lowest: f64 = 99;
+        while (s.step(now)) : (now += frame) {
+            frames += 1;
+            lowest = @min(lowest, s.camera.zoom);
+        }
+        try testing.expectApproxEqAbs(@as(f64, 3.15), s.camera.center.lat, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 15), s.camera.zoom, 1e-9);
+        try testing.expectApproxEqAbs(@as(f64, 30), s.camera.pitch, 1e-9);
+        try testing.expect(lowest < 10); // flew high between the two cities
+        try testing.expectApproxEqAbs(1000 / frame, @as(f64, @floatFromInt(frames)), 2);
+    }
+}
+
+test "fitBounds shows every point inside the padding" {
+    var s: State = .{ .camera = .{ .center = .{ .lat = 0, .lng = 0 }, .zoom = 3 } };
+    s.setViewport(400, 800);
+    const pts = [_]LatLng{ .{ .lat = 33.50, .lng = 36.27 }, .{ .lat = 33.52, .lng = 36.31 } };
+    s.fitBounds(&pts, .{ .top = 100, .bottom = 300, .left = 20, .right = 20 }, 300);
+    var now: f64 = 0;
+    while (s.step(now)) now += 16;
+    for (pts) |pt| {
+        const p = s.view().toScreen(pt).?;
+        try testing.expect(p[0] >= 19 and p[0] <= 381);
+        try testing.expect(p[1] >= 99 and p[1] <= 501);
+    }
 }
 
 test "dragging moves the map with the finger" {

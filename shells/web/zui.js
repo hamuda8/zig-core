@@ -8,6 +8,7 @@ const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL
 const POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4, POINTER_WHEEL = 5;
 const SVG = 'http://www.w3.org/2000/svg';
 const EVENT_PRESS_IN = 1, EVENT_PRESS_OUT = 2, EVENT_PRESS = 3;
+const INPUT_FOCUS = 1, INPUT_BLUR = 2, INPUT_SUBMIT = 3;
 const ALIGN = ['left', 'center', 'right'];
 
 const css = (argb) => {
@@ -61,13 +62,14 @@ export async function start(wasmUrl, mount = document.body) {
   measurer.dir = 'auto';
   mount.appendChild(measurer);
 
-  const sendText = (id, s) => {
-    const bytes = encoder.encode(s);
+  // Copies bytes into wasm memory for one call.
+  const withBytes = (bytes, fn) => {
     const ptr = ex.zui_alloc(Math.max(1, bytes.length));
     new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
-    ex.zui_text_event(id, ptr, bytes.length);
-    ex.zui_free(ptr, Math.max(1, bytes.length));
+    try { fn(ptr, bytes.length); } finally { ex.zui_free(ptr, Math.max(1, bytes.length)); }
   };
+  const sendText = (id, s) => withBytes(encoder.encode(s), (p, n) => ex.zui_text_event(id, p, n));
+  let watchId = null;
 
   const imports = {
     zui: {
@@ -88,6 +90,9 @@ export async function start(wasmUrl, mount = document.body) {
           el.style.outline = 'none';
           el.dir = 'auto';
           el.addEventListener('input', () => sendText(id, el.value));
+          el.addEventListener('focus', () => ex.zui_input_event(id, INPUT_FOCUS));
+          el.addEventListener('blur', () => { if (!el._removed) ex.zui_input_event(id, INPUT_BLUR); });
+          el.addEventListener('keydown', (e) => { if (e.key === 'Enter') ex.zui_input_event(id, INPUT_SUBMIT); });
         } else if (kind === KIND_IMAGE) {
           el.draggable = false;
           el.alt = '';
@@ -97,8 +102,7 @@ export async function start(wasmUrl, mount = document.body) {
         } else if (kind === KIND_PATH) {
           el.style.overflow = 'visible';
           el.style.pointerEvents = 'none';
-          el._line = document.createElementNS(SVG, 'polyline');
-          el._line.setAttribute('fill', 'none');
+          el._line = document.createElementNS(SVG, 'path');
           el.appendChild(el._line);
         } else if (kind === KIND_SCROLL || kind === KIND_SCROLL_X) {
           el.style.overflow = 'hidden';
@@ -112,13 +116,19 @@ export async function start(wasmUrl, mount = document.body) {
         views.set(id, el);
       },
       zui_destroy(id) {
-        views.get(id)?.remove();
+        const el = views.get(id);
         views.delete(id);
+        if (!el) return;
+        // Removing a focused input makes the browser report "blur" at once: not news to zui.
+        el._removed = true;
+        el.remove();
       },
       zui_insert(parent, id, index) {
         const p = views.get(parent);
         const box = p._content || p;
         const el = views.get(id);
+        // Already there: moving it would take the focus from an input inside it.
+        if (box.children[index] === el) return;
         if (el.parentNode === box) el.remove();
         box.insertBefore(el, box.children[index] || null);
       },
@@ -187,7 +197,8 @@ export async function start(wasmUrl, mount = document.body) {
         el.style.overflowX = w > parseFloat(el.style.width) ? 'auto' : 'hidden';
         el.style.overflowY = h > parseFloat(el.style.height) ? 'auto' : 'hidden';
       },
-      zui_transform(id, rotate, tilt, perspective) {
+      zui_transform(id, rotate, tilt, perspective, hasOrigin, ox, oy) {
+        views.get(id).style.transformOrigin = hasOrigin ? `${ox}px ${oy}px` : '';
         const parts = [];
         if (perspective > 0) parts.push(`perspective(${perspective}px)`);
         if (tilt) parts.push(`rotateX(${tilt}deg)`);
@@ -224,13 +235,21 @@ export async function start(wasmUrl, mount = document.body) {
         const url = str(ptr, len);
         if (el.getAttribute('src') !== url) el.src = url;
       },
-      zui_path(id, ptr, count, color, width, dashOn, dashOff, round) {
+      zui_path(id, ptr, count, color, width, dashOn, dashOff, round, fill) {
         const line = views.get(id)._line;
-        const f = new Float32Array(memory.buffer, ptr >>> 0, count * 2);
-        let points = '';
-        for (let i = 0; i < count; i++) points += `${f[2 * i].toFixed(1)},${f[2 * i + 1].toFixed(1)} `;
-        line.setAttribute('points', points);
-        line.setAttribute('stroke', css(color));
+        const f = count === 0 ? [] : new Float32Array(memory.buffer, ptr >>> 0, count * 2);
+        // A NaN x starts a new sub-path; filled shapes are closed.
+        let d = '', move = true;
+        for (let i = 0; i < count; i++) {
+          const x = f[2 * i], y = f[2 * i + 1];
+          if (Number.isNaN(x)) { if (fill >>> 24 && d) d += 'Z'; move = true; continue; }
+          d += `${move ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
+          move = false;
+        }
+        if (fill >>> 24 && d) d += 'Z';
+        line.setAttribute('d', d);
+        line.setAttribute('fill', fill >>> 24 ? css(fill) : 'none');
+        line.setAttribute('stroke', width > 0 ? css(color) : 'none');
         line.setAttribute('stroke-width', String(width));
         line.setAttribute('stroke-linecap', round ? 'round' : 'butt');
         line.setAttribute('stroke-linejoin', round ? 'round' : 'miter');
@@ -240,7 +259,49 @@ export async function start(wasmUrl, mount = document.body) {
       zui_request_frame() {
         if (frameRequested) return;
         frameRequested = true;
-        requestAnimationFrame(() => { frameRequested = false; ex.zui_frame(); });
+        requestAnimationFrame((t) => { frameRequested = false; ex.zui_frame(t); });
+      },
+      zui_fetch(id, mptr, mlen, uptr, ulen, bptr, blen, cptr, clen) {
+        const method = str(mptr, mlen), url = str(uptr, ulen);
+        const init = { method };
+        if (blen > 0) {
+          init.body = new Uint8Array(memory.buffer, bptr >>> 0, blen).slice();
+          init.headers = { 'content-type': str(cptr, clen) };
+        }
+        fetch(url, init)
+          .then(async (res) => ({ status: res.status, body: new Uint8Array(await res.arrayBuffer()) }))
+          .catch(() => ({ status: 0, body: new Uint8Array(0) }))
+          .then(({ status, body }) => withBytes(body, (p, n) => ex.zui_fetch_done(id, status, p, n)));
+      },
+      zui_timer(id, ms) {
+        setTimeout(() => ex.zui_timer_done(id), ms);
+      },
+      zui_location(on) {
+        if (!on) {
+          if (watchId !== null) navigator.geolocation?.clearWatch(watchId);
+          watchId = null;
+          return;
+        }
+        if (!navigator.geolocation) return ex.zui_location_error(0);
+        watchId = navigator.geolocation.watchPosition(
+          (p) => ex.zui_location_fix(p.coords.latitude, p.coords.longitude, p.coords.accuracy || 0, p.coords.heading ?? NaN, p.coords.speed ?? NaN),
+          (e) => ex.zui_location_error(e.code === 1 ? 1 : 0),
+          { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 },
+        );
+      },
+      zui_speak(tptr, tlen, lptr, llen) {
+        if (!('speechSynthesis' in window)) return;
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(str(tptr, tlen));
+        u.lang = str(lptr, llen);
+        speechSynthesis.speak(u);
+      },
+      zui_set_link(ptr, len) {
+        const link = str(ptr, len) || location.pathname;
+        if (link !== location.pathname + location.search) history.replaceState(null, '', link);
+      },
+      zui_focus(id) {
+        views.get(id)?.focus();
       },
       zui_root_background(argb) {
         const c = css(argb);
@@ -280,7 +341,8 @@ export async function start(wasmUrl, mount = document.body) {
   const lang = encoder.encode(navigator.language || 'en');
   const langPtr = ex.zui_alloc(lang.length);
   new Uint8Array(memory.buffer, langPtr, lang.length).set(lang);
-  ex.zui_start(innerWidth, innerHeight, dark.matches ? 1 : 0, ...insets(), langPtr, lang.length);
+  const link = encoder.encode(location.pathname + location.search);
+  withBytes(link, (linkPtr, linkLen) => ex.zui_start(innerWidth, innerHeight, dark.matches ? 1 : 0, ...insets(), langPtr, lang.length, linkPtr, linkLen));
   ex.zui_free(langPtr, lang.length);
   addEventListener('resize', () => {
     ex.zui_insets(...insets());

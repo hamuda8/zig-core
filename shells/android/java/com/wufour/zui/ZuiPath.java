@@ -7,33 +7,49 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.view.View;
 
-/** A line through points zui gives (route lines on the map). */
+/** Lines and filled shapes through points zui gives: route lines on the map, icons. */
 public final class ZuiPath extends View {
-    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
+    private boolean hasStroke, hasFill;
 
     public ZuiPath(Context context) {
         super(context);
-        paint.setStyle(Paint.Style.STROKE);
+        stroke.setStyle(Paint.Style.STROKE);
+        fill.setStyle(Paint.Style.FILL);
     }
 
-    /** Points are x, y pairs in points (dp); everything is scaled by `density` here. */
-    void set(float[] points, int color, float width, float dashOn, float dashOff, boolean round, float density) {
+    /** Points are x, y pairs in points (dp), scaled by `density` here; a NaN x starts a new
+     *  sub-path. A fill color with alpha 0 means no fill, a width of 0 no stroke. */
+    void set(float[] points, int color, float width, float dashOn, float dashOff, boolean round, int fillColor, float density) {
         path.reset();
+        boolean move = true;
+        hasFill = (fillColor >>> 24) != 0;
         for (int i = 0; i + 1 < points.length; i += 2) {
+            if (Float.isNaN(points[i])) {
+                if (hasFill && !move) path.close();
+                move = true;
+                continue;
+            }
             float x = points[i] * density, y = points[i + 1] * density;
-            if (i == 0) path.moveTo(x, y); else path.lineTo(x, y);
+            if (move) path.moveTo(x, y); else path.lineTo(x, y);
+            move = false;
         }
-        paint.setColor(color);
-        paint.setStrokeWidth(width * density);
-        paint.setStrokeCap(round ? Paint.Cap.ROUND : Paint.Cap.BUTT);
-        paint.setStrokeJoin(round ? Paint.Join.ROUND : Paint.Join.MITER);
-        paint.setPathEffect(dashOn > 0 ? new DashPathEffect(new float[] {dashOn * density, dashOff * density}, 0) : null);
+        if (hasFill && !move) path.close();
+        fill.setColor(fillColor);
+        hasStroke = width > 0;
+        stroke.setColor(color);
+        stroke.setStrokeWidth(width * density);
+        stroke.setStrokeCap(round ? Paint.Cap.ROUND : Paint.Cap.BUTT);
+        stroke.setStrokeJoin(round ? Paint.Join.ROUND : Paint.Join.MITER);
+        stroke.setPathEffect(dashOn > 0 ? new DashPathEffect(new float[] {dashOn * density, dashOff * density}, 0) : null);
         invalidate();
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
-        canvas.drawPath(path, paint);
+        if (hasFill) canvas.drawPath(path, fill);
+        if (hasStroke) canvas.drawPath(path, stroke);
     }
 }

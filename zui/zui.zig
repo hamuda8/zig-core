@@ -31,6 +31,14 @@ pub const Env = runtime.Env;
 pub const Insets = runtime.Insets;
 pub const Event = runtime.Event;
 pub const Pointer = runtime.Pointer;
+pub const Fx = runtime.Fx;
+pub const icon = @import("icon.zig");
+pub const Icon = icon.Icon;
+pub const Request = runtime.Request;
+pub const Response = runtime.Response;
+pub const Location = runtime.Location;
+pub const Method = runtime.Method;
+pub const InputEvent = runtime.InputEvent;
 pub const Transform = style.Transform;
 pub const Path = tree.Path;
 pub const Ui = runtime.Ui;
@@ -76,6 +84,7 @@ test {
     _ = tree;
     _ = reconcile;
     _ = host;
+    _ = icon;
 }
 
 /// Writes a line to the platform's log: logcat on Android, stderr (the device log) on iOS,

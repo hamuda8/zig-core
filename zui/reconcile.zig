@@ -109,24 +109,30 @@ pub fn Reconciler(comptime H: type) type {
             const used = a.alloc(bool, old_kids.items.len) catch return;
             @memset(used, false);
 
-            // Match each new child: by key when it has one, otherwise by position and kind.
+            // Match each new child: by key when it has one; otherwise with the next old child of
+            // the same kind, in order. So a node appearing before others (a list opening above a
+            // search field) does not rebuild them, and an input keeps its focus. Siblings of the
+            // same kind that come and go need keys.
             var new_kids: std.ArrayList(u32) = .empty;
             var match: std.ArrayList(u32) = .empty;
             it = new.children(ni);
-            var pos: usize = 0;
-            while (it.next()) |c| : (pos += 1) {
+            var next_unkeyed: usize = 0;
+            while (it.next()) |c| {
                 new_kids.append(a, c) catch return;
                 const n = new.nodes.items[c];
                 var found: u32 = none;
-                for (old_kids.items, 0..) |oc, k| {
+                const from: usize = if (n.key == 0) next_unkeyed else 0;
+                for (old_kids.items[from..], from..) |oc, k| {
                     if (used[k]) continue;
                     const o = old.nodes.items[oc];
                     if (o.kind != n.kind or o.key != n.key) continue;
-                    if (n.key == 0 and k != pos) continue;
                     found = @intCast(k);
                     break;
                 }
-                if (found != none) used[found] = true;
+                if (found != none) {
+                    used[found] = true;
+                    if (n.key == 0) next_unkeyed = found + 1;
+                }
                 match.append(a, found) catch return;
             }
 
@@ -309,6 +315,39 @@ test "changed text is updated in place; keyed children move instead of being rec
     try build(&a, &.{"two"}, true);
     r.run(&b, &a, .{});
     try testing.expectEqualStrings("destroy 2\n", RecordingHost.log.items);
+}
+
+test "a node opening above unkeyed siblings does not rebuild them (an input keeps its focus)" {
+    defer RecordingHost.deinit();
+    var a = Tree.init(testing.allocator);
+    defer a.deinit();
+    var b = Tree.init(testing.allocator);
+    defer b.deinit();
+    var r: Reconciler(RecordingHost) = .{ .gpa = testing.allocator };
+    defer r.ids.free.deinit(testing.allocator);
+
+    // [title, row[input]]  →  [title, list, row[input]]
+    _ = try a.open(.{ .kind = .view, .style = .{} });
+    _ = try a.add(.{ .kind = .text, .style = .{}, .text = "Maps" });
+    _ = try a.open(.{ .kind = .view, .style = .{} });
+    _ = try a.add(.{ .kind = .input, .style = .{} });
+    a.close();
+    a.close();
+    r.run(null, &a, .{});
+
+    RecordingHost.reset();
+    _ = try b.open(.{ .kind = .view, .style = .{} });
+    _ = try b.add(.{ .kind = .text, .style = .{}, .text = "Maps" });
+    _ = try b.open(.{ .kind = .scroll, .style = .{} });
+    b.close();
+    _ = try b.open(.{ .kind = .view, .style = .{} });
+    _ = try b.add(.{ .kind = .input, .style = .{} });
+    b.close();
+    b.close();
+    r.run(&a, &b, .{});
+    try testing.expect(std.mem.indexOf(u8, RecordingHost.log.items, "destroy") == null);
+    try testing.expect(std.mem.indexOf(u8, RecordingHost.log.items, "create") != null); // only the list
+    try testing.expect(std.mem.indexOf(u8, RecordingHost.log.items, "create 5 view") == null);
 }
 
 test "right-to-left flips text alignment" {

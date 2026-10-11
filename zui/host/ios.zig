@@ -15,8 +15,18 @@ extern "UIKit" var NSForegroundColorAttributeName: id;
 extern "UIKit" var NSParagraphStyleAttributeName: id;
 extern "UIKit" var NSBaselineOffsetAttributeName: id;
 
-/// UIControlEventEditingChanged
+/// UIControlEventEditingChanged, ...DidBegin, ...DidEnd, ...DidEndOnExit (return key).
 const editing_changed: usize = 1 << 17;
+const editing_began: usize = 1 << 16;
+const editing_ended: usize = 1 << 18;
+const editing_return: usize = 1 << 19;
+
+/// The runtime's entry points, for callbacks that arrive from C (GCD, NSURLSession, ...).
+var rt: struct {
+    fetch_done: *const fn (u32, u16, []const u8) void,
+    timer_done: *const fn (u32) void,
+    location: *const fn (zui.Location) void,
+} = undefined;
 /// NSStringDrawingUsesLineFragmentOrigin
 const uses_line_fragment_origin: isize = 1;
 /// UIUserInterfaceStyleDark
@@ -29,6 +39,10 @@ var views: std.ArrayList(id) = .empty;
 /// Scroll views put their children in a content view.
 var contents: std.ArrayList(id) = .empty;
 var pressables: std.ArrayList(bool) = .empty;
+/// Each view's frame and transform origin: on iOS the origin (anchor point) also decides where
+/// `center` puts the view, so both are applied together.
+var frames: std.ArrayList(zui.Rect) = .empty;
+var origins: std.ArrayList(?[2]f32) = .empty;
 /// Views that report raw pointer events (gestures).
 var pointers: std.ArrayList(bool) = .empty;
 /// The URL each image view should show (allocator-owned), so a late download for an old URL is
@@ -119,6 +133,9 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
     slot(&pressables, i);
     slot(&pointers, i);
     slot(&image_urls, i);
+    slot(&frames, i);
+    slot(&origins, i);
+    origins.items[i] = null;
     const v: id = switch (kind) {
         .image => blk: {
             const iv = objc.new("UIImageView");
@@ -141,6 +158,9 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
             const t = objc.new("UITextField");
             const add = objc.msgSend(*const fn (id, objc.SEL, id, objc.SEL, usize) callconv(.c) void);
             add(t, objc.sel("addTarget:action:forControlEvents:"), target, objc.sel("changed:"), editing_changed);
+            add(t, objc.sel("addTarget:action:forControlEvents:"), target, objc.sel("began:"), editing_began);
+            add(t, objc.sel("addTarget:action:forControlEvents:"), target, objc.sel("ended:"), editing_ended);
+            add(t, objc.sel("addTarget:action:forControlEvents:"), target, objc.sel("submitted:"), editing_return);
             break :blk t;
         },
         .scroll, .scroll_x => blk: {
@@ -169,18 +189,35 @@ pub fn destroy(i: u32) void {
 }
 
 pub fn insert(parent: u32, i: u32, index: u32) void {
+    const p = container(parent);
+    const v = view(i);
+    // Already there: moving it could take the focus from a text field inside it.
+    const subviews = objc.send(p, "subviews");
+    if (index < objc.sendInt(subviews, "count")) {
+        const at = objc.msgSend(*const fn (id, objc.SEL, usize) callconv(.c) id)(subviews, objc.sel("objectAtIndex:"), index);
+        if (at == v) return;
+    }
     const f = objc.msgSend(*const fn (id, objc.SEL, id, isize) callconv(.c) void);
-    f(container(parent), objc.sel("insertSubview:atIndex:"), view(i), @intCast(index));
+    f(p, objc.sel("insertSubview:atIndex:"), v, @intCast(index));
 }
 
 /// Bounds and centre rather than frame: a view with a 3D transform (the map layer) has no
 /// well-defined frame.
 pub fn frame(i: u32, r: zui.Rect) void {
+    if (i < frames.items.len) frames.items[i] = r;
+    place(i, r);
+}
+
+fn place(i: u32, r: zui.Rect) void {
     const v = view(i);
+    const o: ?[2]f32 = if (i < origins.items.len) origins.items[i] else null;
+    const ox = if (o) |p| p[0] else r.w / 2;
+    const oy = if (o) |p| p[1] else r.h / 2;
+    const set_point = objc.msgSend(*const fn (id, objc.SEL, objc.CGPoint) callconv(.c) void);
+    set_point(objc.send(v, "layer"), objc.sel("setAnchorPoint:"), .{ .x = if (r.w > 0) ox / r.w else 0.5, .y = if (r.h > 0) oy / r.h else 0.5 });
     const set_bounds = objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void);
     set_bounds(v, objc.sel("setBounds:"), .{ .w = r.w, .h = r.h });
-    const set_center = objc.msgSend(*const fn (id, objc.SEL, objc.CGPoint) callconv(.c) void);
-    set_center(v, objc.sel("setCenter:"), .{ .x = r.x + r.w / 2, .y = r.y + r.h / 2 });
+    set_point(v, objc.sel("setCenter:"), .{ .x = r.x + ox, .y = r.y + oy });
 }
 
 pub fn box(i: u32, b: zui.Box) void {
@@ -256,6 +293,12 @@ pub fn exportEntry(comptime App: type) void {
         var started = false;
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
+            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent };
+            objc.defineClass("ZuiLocation", "NSObject", &.{"CLLocationManagerDelegate"}, &.{
+                .{ "locationManager:didUpdateLocations:", @ptrCast(&locationUpdated), "v@:@@" },
+                .{ "locationManager:didFailWithError:", @ptrCast(&locationFailed), "v@:@@" },
+                .{ "locationManagerDidChangeAuthorization:", @ptrCast(&locationAuthorization), "v@:@" },
+            });
             objc.defineClass("ZuiAppDelegate", "UIResponder", &.{"UIApplicationDelegate"}, &.{});
             objc.defineClass("ZuiSceneDelegate", "UIResponder", &.{"UIWindowSceneDelegate"}, &.{
                 .{ "scene:willConnectToSession:options:", @ptrCast(&sceneWillConnect), "v@:@@@" },
@@ -275,6 +318,9 @@ pub fn exportEntry(comptime App: type) void {
             objc.addClassMethod("ZuiPathView", "layerClass", @ptrCast(&shapeLayerClass), "#@:");
             objc.defineClass("ZuiTarget", "NSObject", &.{}, &.{
                 .{ "changed:", @ptrCast(&textChanged), "v@:@" },
+                .{ "began:", @ptrCast(&inputBegan), "v@:@" },
+                .{ "ended:", @ptrCast(&inputEnded), "v@:@" },
+                .{ "submitted:", @ptrCast(&inputSubmitted), "v@:@" },
                 .{ "frame:", @ptrCast(&displayFrame), "v@:@" },
             });
             return UIApplicationMain(argc, argv, null, objc.nsString("ZuiAppDelegate"));
@@ -331,7 +377,28 @@ pub fn exportEntry(comptime App: type) void {
         fn displayFrame(_: id, _: objc.SEL, link: id) callconv(.c) void {
             // Paused until the app asks for the next frame.
             objc.sendVoidBool(link, "setPaused:", true);
-            R.frame();
+            const seconds = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) f64)(link, objc.sel("timestamp"));
+            R.frame(seconds * 1000);
+        }
+
+        fn inputBegan(_: id, _: objc.SEL, field: id) callconv(.c) void {
+            R.inputEvent(tagOf(field), .focus);
+        }
+        fn inputEnded(_: id, _: objc.SEL, field: id) callconv(.c) void {
+            R.inputEvent(tagOf(field), .blur);
+        }
+        fn inputSubmitted(_: id, _: objc.SEL, field: id) callconv(.c) void {
+            R.inputEvent(tagOf(field), .submit);
+        }
+
+        fn fetchDone(i: u32, status: u16, body: []const u8) void {
+            R.fetchDone(i, status, body);
+        }
+        fn timerDone(i: u32) void {
+            R.timerDone(i);
+        }
+        fn locationEvent(l: zui.Location) void {
+            R.locationEvent(l);
         }
 
         fn wantsPointers(i: u32) bool {
@@ -344,11 +411,11 @@ pub fn exportEntry(comptime App: type) void {
             const all = objc.send(touches, "allObjects");
             const n: usize = @intCast(objc.sendInt(all, "count"));
             const at = objc.msgSend(*const fn (id, objc.SEL, usize) callconv(.c) id);
-            const location = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) objc.CGPoint);
+            const location_in = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) objc.CGPoint);
             const timestamp = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) f64);
             for (0..n) |k| {
                 const touch = at(all, objc.sel("objectAtIndex:"), k);
-                const p = location(touch, objc.sel("locationInView:"), self);
+                const p = location_in(touch, objc.sel("locationInView:"), self);
                 R.pointerEvent(i, .{
                     .kind = kind,
                     .id = touchId(touch, kind),
@@ -452,6 +519,10 @@ fn mul(x: [16]f64, y: [16]f64) [16]f64 {
 }
 
 pub fn transform(i: u32, t: zui.Transform) void {
+    if (i < origins.items.len and !std.meta.eql(origins.items[i], t.origin)) {
+        origins.items[i] = t.origin;
+        place(i, frames.items[i]);
+    }
     const set = objc.msgSend(*const fn (id, objc.SEL, CATransform3D) callconv(.c) void);
     set(objc.send(view(i), "layer"), objc.sel("setTransform:"), transformMatrix(t));
 }
@@ -535,6 +606,7 @@ extern "CoreGraphics" fn CGPathCreateMutable() CGPath;
 extern "CoreGraphics" fn CGPathMoveToPoint(path: CGPath, m: ?*const anyopaque, x: CGFloat, y: CGFloat) void;
 extern "CoreGraphics" fn CGPathAddLineToPoint(path: CGPath, m: ?*const anyopaque, x: CGFloat, y: CGFloat) void;
 extern "CoreGraphics" fn CGPathRelease(path: CGPath) void;
+extern "CoreGraphics" fn CGPathCloseSubpath(path: CGPath) void;
 extern "QuartzCore" var kCALineCapRound: id;
 extern "QuartzCore" var kCALineCapButt: id;
 extern "QuartzCore" var kCALineJoinRound: id;
@@ -544,12 +616,23 @@ pub fn path(i: u32, p: zui.Path) void {
     const layer = objc.send(view(i), "layer");
     const cg = CGPathCreateMutable();
     defer CGPathRelease(cg);
-    for (p.points, 0..) |pt, k| {
-        if (k == 0) CGPathMoveToPoint(cg, null, pt[0], pt[1]) else CGPathAddLineToPoint(cg, null, pt[0], pt[1]);
+    const filled = p.fill >> 24 != 0;
+    // A NaN x starts a new sub-path; filled shapes are closed.
+    var move = true;
+    for (p.points) |pt| {
+        if (std.math.isNan(pt[0])) {
+            if (filled and !move) CGPathCloseSubpath(cg);
+            move = true;
+            continue;
+        }
+        if (move) CGPathMoveToPoint(cg, null, pt[0], pt[1]) else CGPathAddLineToPoint(cg, null, pt[0], pt[1]);
+        move = false;
     }
+    if (filled and !move) CGPathCloseSubpath(cg);
     const set_ptr = objc.msgSend(*const fn (id, objc.SEL, ?*anyopaque) callconv(.c) void);
     set_ptr(layer, objc.sel("setPath:"), cg);
-    set_ptr(layer, objc.sel("setStrokeColor:"), @ptrCast(objc.send(color(p.color), "CGColor")));
+    set_ptr(layer, objc.sel("setFillColor:"), if (filled) @ptrCast(objc.send(color(p.fill), "CGColor")) else null);
+    set_ptr(layer, objc.sel("setStrokeColor:"), if (p.width > 0) @ptrCast(objc.send(color(p.color), "CGColor")) else null);
     objc.sendVoidFloat(layer, "setLineWidth:", p.width);
     objc.sendVoid1(layer, "setLineCap:", if (p.round) kCALineCapRound else kCALineCapButt);
     objc.sendVoid1(layer, "setLineJoin:", if (p.round) kCALineJoinRound else kCALineJoinMiter);
@@ -573,6 +656,154 @@ pub fn requestFrame() void {
         add(display_link, objc.sel("addToRunLoop:forMode:"), objc.send(objc.class("NSRunLoop"), "mainRunLoop"), NSRunLoopCommonModes);
     }
     objc.sendVoidBool(display_link, "setPaused:", false);
+}
+
+// ---- Effects: network, timers, location, speech ---------------------------------------------
+
+/// The completion handler NSURLSession calls: a block whose capture is the request id.
+const FetchBlock = extern struct {
+    header: objc.BlockHeader,
+    request: u32,
+};
+const fetch_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(FetchBlock) };
+
+const FetchResult = struct { request: u32, status: u16, body: []u8 };
+
+pub fn fetch(i: u32, method: []const u8, url: []const u8, body: []const u8, content_type: []const u8) void {
+    const s = objc.nsString(url);
+    defer objc.release(s);
+    const nsurl = objc.send1(objc.class("NSURL"), "URLWithString:", s);
+    if (nsurl == null) return rt.fetch_done(i, 0, "");
+    const req = objc.send1(objc.class("NSMutableURLRequest"), "requestWithURL:", nsurl);
+    const m = objc.nsString(method);
+    defer objc.release(m);
+    objc.sendVoid1(req, "setHTTPMethod:", m);
+    if (body.len > 0) {
+        const data = objc.msgSend(*const fn (id, objc.SEL, [*]const u8, usize) callconv(.c) id)(objc.class("NSData"), objc.sel("dataWithBytes:length:"), body.ptr, body.len);
+        objc.sendVoid1(req, "setHTTPBody:", data);
+        const ct = objc.nsString(content_type);
+        defer objc.release(ct);
+        const field = objc.nsString("Content-Type");
+        defer objc.release(field);
+        objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(req, objc.sel("setValue:forHTTPHeaderField:"), ct, field);
+    }
+    const block = zui.allocator.create(FetchBlock) catch return rt.fetch_done(i, 0, "");
+    block.* = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&fetchCompleted), .descriptor = &fetch_descriptor }, .request = i };
+    const session = objc.send(objc.class("NSURLSession"), "sharedSession");
+    const task = objc.msgSend(*const fn (id, objc.SEL, id, *FetchBlock) callconv(.c) id)(session, objc.sel("dataTaskWithRequest:completionHandler:"), req, block);
+    objc.sendVoid(task, "resume");
+}
+
+/// On NSURLSession's queue: copies the answer and hands it to the main thread.
+fn fetchCompleted(block: *FetchBlock, data: id, response: id, err: id) callconv(.c) void {
+    defer zui.allocator.destroy(block);
+    var status: u16 = 0;
+    if (err == null and response != null) status = @intCast(@max(0, @min(objc.sendInt(response, "statusCode"), 999)));
+    var body: []u8 = &.{};
+    if (data != null) {
+        const n: usize = @intCast(objc.sendInt(data, "length"));
+        const bytes = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*]const u8)(data, objc.sel("bytes"));
+        if (bytes) |b| body = zui.allocator.dupe(u8, b[0..n]) catch &.{};
+    }
+    const result = zui.allocator.create(FetchResult) catch return;
+    result.* = .{ .request = block.request, .status = status, .body = body };
+    dispatch_async_f(@ptrCast(&_dispatch_main_q), result, fetchDelivered);
+}
+
+fn fetchDelivered(ctx: ?*anyopaque) callconv(.c) void {
+    const r: *FetchResult = @ptrCast(@alignCast(ctx));
+    defer {
+        zui.allocator.free(r.body);
+        zui.allocator.destroy(r);
+    }
+    rt.fetch_done(r.request, r.status, r.body);
+}
+
+extern "c" fn dispatch_time(when: u64, delta: i64) u64;
+extern "c" fn dispatch_after_f(when: u64, queue: Queue, context: ?*anyopaque, work: *const fn (?*anyopaque) callconv(.c) void) void;
+
+pub fn timer(i: u32, ms: u32) void {
+    dispatch_after_f(dispatch_time(0, @as(i64, ms) * std.time.ns_per_ms), @ptrCast(&_dispatch_main_q), @ptrFromInt(@as(usize, i) + 1), timerFired);
+}
+
+fn timerFired(ctx: ?*anyopaque) callconv(.c) void {
+    rt.timer_done(@intCast(@intFromPtr(ctx) - 1));
+}
+
+var location_manager: id = null;
+var location_delegate: id = null;
+var location_on = false;
+
+const CLLocationCoordinate2D = extern struct { lat: f64, lng: f64 };
+
+pub fn location(on: bool) void {
+    location_on = on;
+    if (location_manager == null) {
+        location_manager = objc.new("CLLocationManager");
+        location_delegate = objc.new("ZuiLocation");
+        objc.sendVoid1(location_manager, "setDelegate:", location_delegate);
+        objc.sendVoidFloat(location_manager, "setDesiredAccuracy:", -1); // kCLLocationAccuracyBest
+    }
+    if (!on) return objc.sendVoid(location_manager, "stopUpdatingLocation");
+    // Not determined yet: ask; the answer arrives in locationManagerDidChangeAuthorization.
+    if (objc.sendInt(location_manager, "authorizationStatus") == 0) return objc.sendVoid(location_manager, "requestWhenInUseAuthorization");
+    locationAuthorization(location_delegate, null, location_manager);
+}
+
+fn locationAuthorization(_: id, _: objc.SEL, manager: id) callconv(.c) void {
+    if (!location_on) return;
+    switch (objc.sendInt(manager, "authorizationStatus")) {
+        0 => {},
+        1, 2 => rt.location(.denied), // restricted, denied
+        else => objc.sendVoid(manager, "startUpdatingLocation"),
+    }
+}
+
+fn locationUpdated(_: id, _: objc.SEL, _: id, locations: id) callconv(.c) void {
+    const l = objc.send(locations, "lastObject");
+    if (l == null) return;
+    const c = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) CLLocationCoordinate2D)(l, objc.sel("coordinate"));
+    const double = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) f64);
+    const course = double(l, objc.sel("course"));
+    const speed = double(l, objc.sel("speed"));
+    rt.location(.{ .fix = .{
+        .lat = c.lat,
+        .lng = c.lng,
+        .accuracy = @floatCast(double(l, objc.sel("horizontalAccuracy"))),
+        .heading = if (course >= 0) @floatCast(course) else null,
+        .speed = if (speed >= 0) @floatCast(speed) else null,
+    } });
+}
+
+fn locationFailed(_: id, _: objc.SEL, _: id, err: id) callconv(.c) void {
+    // kCLErrorLocationUnknown (0) is temporary: updates keep coming.
+    switch (objc.sendInt(err, "code")) {
+        0 => {},
+        1 => rt.location(.denied),
+        else => rt.location(.unavailable),
+    }
+}
+
+var synthesizer: id = null;
+
+pub fn speak(text_: []const u8, lang: []const u8) void {
+    if (synthesizer == null) synthesizer = objc.new("AVSpeechSynthesizer");
+    _ = objc.msgSend(*const fn (id, objc.SEL, isize) callconv(.c) bool)(synthesizer, objc.sel("stopSpeakingAtBoundary:"), 0);
+    const s = objc.nsString(text_);
+    defer objc.release(s);
+    const utterance = objc.send1(objc.class("AVSpeechUtterance"), "speechUtteranceWithString:", s);
+    const l = objc.nsString(lang);
+    defer objc.release(l);
+    const voice = objc.send1(objc.class("AVSpeechSynthesisVoice"), "voiceWithLanguage:", l);
+    if (voice != null) objc.sendVoid1(utterance, "setVoice:", voice);
+    objc.sendVoid1(synthesizer, "speakUtterance:", utterance);
+}
+
+/// Kept for sharing; iOS apps have no address bar.
+pub fn setLink(_: []const u8) void {}
+
+pub fn focus(i: u32) void {
+    _ = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) bool)(view(i), objc.sel("becomeFirstResponder"));
 }
 
 test transformMatrix {

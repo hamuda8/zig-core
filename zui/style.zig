@@ -94,6 +94,9 @@ pub const Style = struct {
     tilt: f32 = 0,
     /// Distance of the eye for `tilt`, in points; 0 for none.
     perspective: f32 = 0,
+    /// The point rotate and tilt turn around, in points from the view's top-left (the eye
+    /// looks at it too); null is the centre.
+    origin: ?[2]f32 = null,
     /// Hide what children draw outside this view.
     clip: bool = false,
     /// Lay the children out left to right even in right-to-left languages (a map, a chart).
@@ -104,9 +107,10 @@ pub const Transform = struct {
     rotate: f32 = 0,
     tilt: f32 = 0,
     perspective: f32 = 0,
+    origin: ?[2]f32 = null,
 
     pub fn of(s: Style) Transform {
-        return .{ .rotate = s.rotate, .tilt = s.tilt, .perspective = s.perspective };
+        return .{ .rotate = s.rotate, .tilt = s.tilt, .perspective = s.perspective, .origin = s.origin };
     }
 };
 

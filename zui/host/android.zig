@@ -28,6 +28,12 @@ var methods: struct {
     image: jni.jmethodID,
     path: jni.jmethodID,
     request_frame: jni.jmethodID,
+    fetch: jni.jmethodID,
+    timer: jni.jmethodID,
+    location: jni.jmethodID,
+    speak: jni.jmethodID,
+    set_link: jni.jmethodID,
+    focus: jni.jmethodID,
 } = undefined;
 
 fn bind(e: *jni.Env) void {
@@ -50,12 +56,18 @@ fn bind(e: *jni.Env) void {
         .{ "root_background", "rootBackground", "(I)V" },
         .{ "commit", "commit", "()V" },
         .{ "measure", "measure", "(Ljava/lang/String;FIFZIF)J" },
-        .{ "transform", "transform", "(IFFF)V" },
+        .{ "transform", "transform", "(IFFFZFF)V" },
         .{ "clip", "clip", "(IZ)V" },
         .{ "pointer", "pointer", "(IZ)V" },
         .{ "image", "image", "(ILjava/lang/String;)V" },
-        .{ "path", "path", "(I[FIFFFZ)V" },
+        .{ "path", "path", "(I[FIFFFZI)V" },
         .{ "request_frame", "requestFrame", "()V" },
+        .{ "fetch", "fetch", "(ILjava/lang/String;Ljava/lang/String;[BLjava/lang/String;)V" },
+        .{ "timer", "timer", "(II)V" },
+        .{ "location", "location", "(Z)V" },
+        .{ "speak", "speak", "(Ljava/lang/String;Ljava/lang/String;)V" },
+        .{ "set_link", "setLink", "(Ljava/lang/String;)V" },
+        .{ "focus", "focus", "(I)V" },
     }) |m| @field(methods, m[0]) = f.GetStaticMethodID(e, class, m[1], m[2]);
 }
 
@@ -170,10 +182,12 @@ fn javaString(s: jni.jstring, buf: []u8) []const u8 {
 pub fn exportEntry(comptime App: type) void {
     const R = zui.runtime.Runtime(App, @This());
     const Entry = struct {
-        fn start(e: *jni.Env, _: jni.jclass, w: f32, h: f32, is_dark: jni.jboolean, top: f32, right: f32, bottom: f32, left: f32, lang: jni.jstring) callconv(.c) void {
+        fn start(e: *jni.Env, _: jni.jclass, w: f32, h: f32, is_dark: jni.jboolean, top: f32, right: f32, bottom: f32, left: f32, lang: jni.jstring, link: jni.jstring) callconv(.c) void {
             bind(e);
             var buf: [32]u8 = undefined;
-            R.start(zui.allocator, .{ .width = w, .height = h, .dark = is_dark != 0, .safe = .{ .top = top, .right = right, .bottom = bottom, .left = left } }, javaString(lang, &buf));
+            var link_buf: [2048]u8 = undefined;
+            const owned = zui.allocator.dupe(u8, if (link != null) javaString(link, &link_buf) else "") catch "";
+            R.start(zui.allocator, .{ .width = w, .height = h, .dark = is_dark != 0, .safe = .{ .top = top, .right = right, .bottom = bottom, .left = left }, .link = owned }, javaString(lang, &buf));
         }
         fn resize(e: *jni.Env, _: jni.jclass, w: f32, h: f32) callconv(.c) void {
             bind(e);
@@ -195,9 +209,40 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.pointerEvent(@intCast(id), .{ .kind = std.enums.fromInt(zui.Pointer.Kind, @as(u8, @intCast(kind))) orelse return, .id = @bitCast(pid), .x = x, .y = y, .time_ms = time_ms });
         }
-        fn frame(e: *jni.Env, _: jni.jclass) callconv(.c) void {
+        fn frame(e: *jni.Env, _: jni.jclass, time_ns: jni.jlong) callconv(.c) void {
             bind(e);
-            R.frame();
+            R.frame(@as(f64, @floatFromInt(time_ns)) / 1e6);
+        }
+        fn fetchDone(e: *jni.Env, _: jni.jclass, id: jni.jint, status: jni.jint, body: jni.jobject) callconv(.c) void {
+            bind(e);
+            const f = e.functions;
+            const n: usize = if (body != null) @intCast(f.GetArrayLength(e, body)) else 0;
+            const buf = zui.allocator.alloc(u8, n) catch return R.fetchDone(@bitCast(id), 0, "");
+            defer zui.allocator.free(buf);
+            if (n > 0) f.GetByteArrayRegion(e, body, 0, @intCast(n), buf.ptr);
+            R.fetchDone(@bitCast(id), @intCast(@max(0, @min(status, 999))), buf);
+        }
+        fn timerDone(e: *jni.Env, _: jni.jclass, id: jni.jint) callconv(.c) void {
+            bind(e);
+            R.timerDone(@bitCast(id));
+        }
+        fn locationFix(e: *jni.Env, _: jni.jclass, lat: f64, lng: f64, accuracy: f32, heading: f32, speed: f32) callconv(.c) void {
+            bind(e);
+            R.locationEvent(.{ .fix = .{
+                .lat = lat,
+                .lng = lng,
+                .accuracy = accuracy,
+                .heading = if (std.math.isNan(heading)) null else heading,
+                .speed = if (std.math.isNan(speed)) null else speed,
+            } });
+        }
+        fn locationError(e: *jni.Env, _: jni.jclass, denied: jni.jboolean) callconv(.c) void {
+            bind(e);
+            R.locationEvent(if (denied != 0) .denied else .unavailable);
+        }
+        fn inputEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint) callconv(.c) void {
+            bind(e);
+            R.inputEvent(@bitCast(id), std.enums.fromInt(zui.InputEvent, @as(u8, @intCast(kind))) orelse return);
         }
         fn textEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, s: jni.jstring) callconv(.c) void {
             bind(e);
@@ -213,6 +258,11 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.textEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeText" });
     @export(&Entry.pointerEvent, .{ .name = "Java_com_wufour_zui_Zui_nativePointer" });
     @export(&Entry.frame, .{ .name = "Java_com_wufour_zui_Zui_nativeFrame" });
+    @export(&Entry.fetchDone, .{ .name = "Java_com_wufour_zui_Zui_nativeFetchDone" });
+    @export(&Entry.timerDone, .{ .name = "Java_com_wufour_zui_Zui_nativeTimer" });
+    @export(&Entry.locationFix, .{ .name = "Java_com_wufour_zui_Zui_nativeLocation" });
+    @export(&Entry.locationError, .{ .name = "Java_com_wufour_zui_Zui_nativeLocationError" });
+    @export(&Entry.inputEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeInput" });
 }
 
 extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
@@ -227,7 +277,8 @@ pub fn log(line: []const u8) void {
 }
 
 pub fn transform(id: u32, t: zui.Transform) void {
-    call(methods.transform, &.{ int(id), float(t.rotate), float(t.tilt), float(t.perspective) });
+    const o = t.origin orelse [2]f32{ 0, 0 };
+    call(methods.transform, &.{ int(id), float(t.rotate), float(t.tilt), float(t.perspective), boolean(t.origin != null), float(o[0]), float(o[1]) });
 }
 pub fn clip(id: u32, on: bool) void {
     call(methods.clip, &.{ int(id), boolean(on) });
@@ -246,7 +297,41 @@ pub fn path(id: u32, p: zui.Path) void {
     const arr = f.NewFloatArray(env, n);
     defer f.DeleteLocalRef(env, arr);
     f.SetFloatArrayRegion(env, arr, 0, n, @ptrCast(p.points.ptr));
-    call(methods.path, &.{ int(id), object(arr), int(p.color), float(p.width), float(p.dash[0]), float(p.dash[1]), boolean(p.round) });
+    call(methods.path, &.{ int(id), object(arr), int(p.color), float(p.width), float(p.dash[0]), float(p.dash[1]), boolean(p.round), int(p.fill) });
+}
+pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, content_type: []const u8) void {
+    const f = env.functions;
+    const jm = newString(method);
+    defer f.DeleteLocalRef(env, jm);
+    const ju = newString(url);
+    defer f.DeleteLocalRef(env, ju);
+    const jc = newString(content_type);
+    defer f.DeleteLocalRef(env, jc);
+    const jb = f.NewByteArray(env, @intCast(body.len));
+    defer f.DeleteLocalRef(env, jb);
+    if (body.len > 0) f.SetByteArrayRegion(env, jb, 0, @intCast(body.len), body.ptr);
+    call(methods.fetch, &.{ int(id), object(jm), object(ju), object(jb), object(jc) });
+}
+pub fn timer(id: u32, ms: u32) void {
+    call(methods.timer, &.{ int(id), int(ms) });
+}
+pub fn location(on: bool) void {
+    call(methods.location, &.{boolean(on)});
+}
+pub fn speak(s: []const u8, lang: []const u8) void {
+    const js = newString(s);
+    defer env.functions.DeleteLocalRef(env, js);
+    const jl = newString(lang);
+    defer env.functions.DeleteLocalRef(env, jl);
+    call(methods.speak, &.{ object(js), object(jl) });
+}
+pub fn setLink(s: []const u8) void {
+    const js = newString(s);
+    defer env.functions.DeleteLocalRef(env, js);
+    call(methods.set_link, &.{object(js)});
+}
+pub fn focus(id: u32) void {
+    call(methods.focus, &.{int(id)});
 }
 pub fn requestFrame() void {
     call(methods.request_frame, &.{});

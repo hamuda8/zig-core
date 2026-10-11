@@ -24,6 +24,17 @@ pub const View = struct {
 
 /// Set when the app asked for a frame; `Driver.frame` delivers it.
 pub var frame_requested = false;
+/// The test clock for frames, in milliseconds.
+pub var clock_ms: f64 = 0;
+
+/// Requests the app made and the test has not answered yet.
+pub const PendingFetch = struct { id: u32, method: []const u8, url: []u8, body: []u8 };
+pub var fetches: std.ArrayList(PendingFetch) = .empty;
+pub var timers: std.ArrayList(struct { id: u32, ms: u32 }) = .empty;
+pub var location_on = false;
+pub var spoken: std.ArrayList(u8) = .empty;
+pub var link: std.ArrayList(u8) = .empty;
+pub var focused: u32 = 0;
 
 const gpa = std.heap.page_allocator;
 pub var views: std.AutoArrayHashMapUnmanaged(u32, View) = .empty;
@@ -84,6 +95,26 @@ pub fn path(id: u32, p: zui.Path) void {
 pub fn requestFrame() void {
     frame_requested = true;
 }
+pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, _: []const u8) void {
+    fetches.append(gpa, .{ .id = id, .method = method, .url = gpa.dupe(u8, url) catch return, .body = gpa.dupe(u8, body) catch return }) catch {};
+}
+pub fn timer(id: u32, ms: u32) void {
+    timers.append(gpa, .{ .id = id, .ms = ms }) catch {};
+}
+pub fn location(on: bool) void {
+    location_on = on;
+}
+pub fn speak(s: []const u8, _: []const u8) void {
+    spoken.clearRetainingCapacity();
+    spoken.appendSlice(gpa, s) catch {};
+}
+pub fn setLink(s: []const u8) void {
+    link.clearRetainingCapacity();
+    link.appendSlice(gpa, s) catch {};
+}
+pub fn focus(id: u32) void {
+    focused = id;
+}
 pub fn rootBackground(argb: u32) void {
     root_background = argb;
 }
@@ -101,8 +132,13 @@ pub fn Driver(comptime App: type) type {
         pub const R = zui.runtime.Runtime(App, Self);
 
         pub fn start(width: f32, height: f32) void {
+            startWith(width, height, "");
+        }
+
+        /// Starts as if opened with `link_` (web: path and query).
+        pub fn startWith(width: f32, height: f32, link_: []const u8) void {
             reset();
-            R.start(std.heap.page_allocator, .{ .width = width, .height = height }, "en");
+            R.start(std.heap.page_allocator, .{ .width = width, .height = height, .link = link_ }, "en");
         }
 
         pub fn reset() void {
@@ -111,6 +147,61 @@ pub fn Driver(comptime App: type) type {
                 v.placeholder.deinit(gpa);
             }
             views.clearRetainingCapacity();
+            for (fetches.items) |f| {
+                gpa.free(f.url);
+                gpa.free(f.body);
+            }
+            fetches.clearRetainingCapacity();
+            timers.clearRetainingCapacity();
+            location_on = false;
+            spoken.clearRetainingCapacity();
+            link.clearRetainingCapacity();
+            frame_requested = false;
+        }
+
+        /// Answers the oldest pending request whose URL contains `part`. Returns false if none.
+        pub fn respond(part: []const u8, status: u16, body: []const u8) bool {
+            for (fetches.items, 0..) |f, i| {
+                if (std.mem.indexOf(u8, f.url, part) == null) continue;
+                const done = fetches.orderedRemove(i);
+                defer {
+                    gpa.free(done.url);
+                    gpa.free(done.body);
+                }
+                R.fetchDone(done.id, status, body);
+                return true;
+            }
+            return false;
+        }
+
+        /// URL of the oldest pending request containing `part`, if any.
+        pub fn pending(part: []const u8) ?[]const u8 {
+            for (fetches.items) |f| if (std.mem.indexOf(u8, f.url, part) != null) return f.url;
+            return null;
+        }
+
+        /// Fires every pending timer.
+        pub fn runTimers() void {
+            while (timers.items.len > 0) {
+                const t = timers.orderedRemove(0);
+                R.timerDone(t.id);
+            }
+        }
+
+        /// A position fix from the "device".
+        pub fn locate(lat: f64, lng: f64) void {
+            R.locationEvent(.{ .fix = .{ .lat = lat, .lng = lng, .accuracy = 5 } });
+        }
+
+        /// Focus, blur or enter on the input whose placeholder is `placeholder`.
+        pub fn inputEvent(placeholder: []const u8, kind: zui.InputEvent) !void {
+            var it = views.iterator();
+            while (it.next()) |e| {
+                if (e.value_ptr.kind == .input and std.mem.eql(u8, e.value_ptr.placeholder.items, placeholder)) {
+                    return R.inputEvent(e.key_ptr.*, kind);
+                }
+            }
+            return error.NoSuchInput;
         }
 
         /// Id of the text view showing exactly `s`, or 0.
@@ -163,7 +254,8 @@ pub fn Driver(comptime App: type) type {
         pub fn frame() bool {
             if (!frame_requested) return false;
             frame_requested = false;
-            R.frame();
+            clock_ms += 16;
+            R.frame(clock_ms);
             return true;
         }
 

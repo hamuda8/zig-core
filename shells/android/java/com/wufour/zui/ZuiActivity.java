@@ -23,6 +23,7 @@ public final class ZuiActivity extends Activity {
         Zui.activity = this;
         Zui.density = getResources().getDisplayMetrics().density;
         Zui.dark = isDark(getResources().getConfiguration());
+        if (getIntent() != null && getIntent().getData() != null) Zui.link = getIntent().getDataString();
         // Disk cache for downloaded images (map tiles), kept across launches.
         try {
             HttpResponseCache.install(new File(getCacheDir(), "http"), 100L * 1024 * 1024);
@@ -54,6 +55,14 @@ public final class ZuiActivity extends Activity {
             return insets;
         });
         setContentView(root);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        if (code != Zui.LOCATION_REQUEST) return;
+        boolean granted = false;
+        for (int r : results) granted |= r == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        Zui.locationPermission(granted);
     }
 
     @Override
