@@ -276,27 +276,11 @@ pub const Options = struct {
 pub const tls = struct {
     pub const Server = @import("tls/Server.zig");
     pub const cert = @import("tls/cert.zig");
+    pub const acme = @import("tls/acme.zig");
 };
 
-/// The certificates HTTPS connections use. Replaceable while serving (certificate renewal):
-/// connections already open keep the set they started with.
-pub const CertStore = struct {
-    mutex: Io.Mutex = .init,
-    certificates: []const tls.cert.Certificate,
-
-    pub fn get(s: *CertStore, io: Io) []const tls.cert.Certificate {
-        s.mutex.lockUncancelable(io);
-        defer s.mutex.unlock(io);
-        return s.certificates;
-    }
-
-    /// The old set is not freed: open connections may still be using it.
-    pub fn set(s: *CertStore, io: Io, certificates: []const tls.cert.Certificate) void {
-        s.mutex.lockUncancelable(io);
-        defer s.mutex.unlock(io);
-        s.certificates = certificates;
-    }
-};
+/// The certificates HTTPS connections use (see `tls.cert.CertStore`).
+pub const CertStore = tls.cert.CertStore;
 
 /// Accepts connections until canceled; each connection runs as its own task.
 pub fn serve(io: Io, gpa: std.mem.Allocator, options: Options) !void {
@@ -398,6 +382,27 @@ fn handle(io: Io, arena: std.mem.Allocator, request: *std.http.Server.Request, o
     return !ctx.close_connection;
 }
 
+/// Challenge answers for `redirectToHttps` (set when ACME is in use).
+pub var acme_challenges: ?*tls.acme.Challenges = null;
+
+/// For the port-80 server: answers ACME HTTP-01 challenges, and sends everything else to the
+/// same address over HTTPS (301).
+pub fn redirectToHttps(ctx: *Context) !void {
+    const prefix = "/.well-known/acme-challenge/";
+    if (std.mem.startsWith(u8, ctx.path, prefix)) {
+        var buf: [512]u8 = undefined;
+        const answer = if (acme_challenges) |c| c.get(ctx.io, ctx.path[prefix.len..], &buf) else null;
+        if (answer) |a| return ctx.send(.ok, "application/octet-stream", a);
+        return ctx.fail(.not_found, "Not found");
+    }
+    const host_header = ctx.header("host") orelse return ctx.fail(.bad_request, "Missing host");
+    // Drop a port (":80"), keep IPv6 brackets intact.
+    const host = if (std.mem.lastIndexOfScalar(u8, host_header, ':')) |i| (if (std.mem.indexOfScalar(u8, host_header[i..], ']') == null) host_header[0..i] else host_header) else host_header;
+    const query = if (ctx.query.len > 0) "?" else "";
+    try ctx.setHeader("location", try std.fmt.allocPrint(ctx.arena, "https://{s}{s}{s}{s}", .{ host, ctx.path, query, ctx.query }));
+    return ctx.send(.moved_permanently, "text/plain; charset=utf-8", "");
+}
+
 /// Serves files under `root` for the request path (or `ctx.param("path")` if the route has a
 /// `*path`). Directories serve `index.html`. With `spa_fallback`, unknown paths without a file
 /// extension serve `index.html` too (client-side routing).
@@ -455,4 +460,5 @@ pub fn contentType(path: []const u8) []const u8 {
 test {
     _ = @import("test.zig");
     _ = tls.Server;
+    _ = tls.acme;
 }

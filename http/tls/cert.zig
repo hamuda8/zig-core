@@ -33,6 +33,26 @@ pub const Certificate = struct {
     }
 };
 
+/// The certificates HTTPS connections use. Replaceable while serving (certificate renewal):
+/// connections already open keep the set they started with.
+pub const CertStore = struct {
+    mutex: std.Io.Mutex = .init,
+    certificates: []const Certificate,
+
+    pub fn get(s: *CertStore, io: std.Io) []const Certificate {
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        return s.certificates;
+    }
+
+    /// The old set is not freed: open connections may still be using it.
+    pub fn set(s: *CertStore, io: std.Io, certificates: []const Certificate) void {
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        s.certificates = certificates;
+    }
+};
+
 /// A certificate chain and key from PEM text. The key may be SEC1 ("EC PRIVATE KEY") or PKCS#8
 /// ("PRIVATE KEY"), P-256 only.
 pub fn loadPem(arena: std.mem.Allocator, chain_pem: []const u8, key_pem: []const u8) !Certificate {
@@ -348,4 +368,90 @@ test "self-signed certificate parses, verifies its own signature and matches its
     try writePem(&key_pem.writer, "PRIVATE KEY", &pkcs8);
     const loaded = try loadPem(a, out.written(), key_pem.written());
     try testing.expect(loaded.matches("maps.wufour.com"));
+}
+
+/// A PKCS#10 certificate signing request (DER) for `names`, as ACME's finalize step wants it.
+pub fn csr(gpa: std.mem.Allocator, key: KeyPair, names: []const []const u8) ![]u8 {
+    var info: Der = .{ .gpa = gpa };
+    defer info.buf.deinit(gpa);
+    defer info.open.deinit(gpa);
+    try info.begin(0x30);
+    try info.uint(&.{0}); // version
+    try info.commonName(names[0]);
+    try info.publicKey(key.public_key);
+    try info.begin(0xA0); // [0] attributes
+    try info.begin(0x30);
+    try info.oid(&oid_extension_request);
+    try info.begin(0x31);
+    try info.begin(0x30);
+    try info.subjectAltNames(names);
+    try info.end();
+    try info.end();
+    try info.end();
+    try info.end();
+    try info.end();
+
+    var req: Der = .{ .gpa = gpa };
+    defer req.open.deinit(gpa);
+    errdefer req.buf.deinit(gpa);
+    try req.signed(info.written(), key);
+    return req.buf.toOwnedSlice(gpa);
+}
+
+/// The private key as SEC1 PEM ("EC PRIVATE KEY"), which `loadPem` and openssl read.
+pub fn writeKeyPem(w: *std.Io.Writer, gpa: std.mem.Allocator, key: KeyPair) !void {
+    var d: Der = .{ .gpa = gpa };
+    defer d.buf.deinit(gpa);
+    defer d.open.deinit(gpa);
+    try d.begin(0x30);
+    try d.uint(&.{1});
+    try d.value(0x04, &key.secret_key.toBytes());
+    try d.begin(0xA0);
+    try d.oid(&oid_prime256v1);
+    try d.end();
+    try d.begin(0xA1);
+    try d.bitString(&key.public_key.toUncompressedSec1());
+    try d.end();
+    try d.end();
+    try writePem(w, "EC PRIVATE KEY", d.written());
+}
+
+/// A key pair from SEC1 or PKCS#8 PEM text.
+pub fn loadKeyPem(arena: std.mem.Allocator, key_pem: []const u8) !KeyPair {
+    var it = PemIterator{ .text = key_pem };
+    while (try it.next(arena)) |block| {
+        const secret = if (std.mem.eql(u8, block.label, "EC PRIVATE KEY"))
+            try sec1Secret(block.der)
+        else if (std.mem.eql(u8, block.label, "PRIVATE KEY"))
+            try pkcs8Secret(block.der)
+        else
+            continue;
+        return KeyPair.fromSecretKey(try Ecdsa.SecretKey.fromBytes(secret));
+    }
+    return error.NoPrivateKey;
+}
+
+test "key PEM round trip and CSR structure" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const key = KeyPair.generate(testing.io);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try writeKeyPem(&out.writer, a, key);
+    const back = try loadKeyPem(a, out.written());
+    try testing.expectEqual(key.secret_key.toBytes(), back.secret_key.toBytes());
+
+    const req = try csr(a, key, &.{ "maps.wufour.com", "www.maps.wufour.com" });
+    // SEQUENCE { CertificationRequestInfo, AlgorithmIdentifier, BIT STRING }
+    const outer = try readTlv(req, 0);
+    try testing.expectEqual(@as(u8, 0x30), outer.tag);
+    try testing.expectEqual(req.len, outer.end);
+    try testing.expect(std.mem.indexOf(u8, req, "www.maps.wufour.com") != null);
+    // The signature covers the info block and verifies with the public key.
+    const info = try readTlv(outer.value, 0);
+    const algo = try readTlv(outer.value, info.end);
+    const sig = try readTlv(outer.value, algo.end);
+    const info_der = outer.value[0..info.end];
+    const s = try Ecdsa.Signature.fromDer(sig.value[1..]);
+    try s.verify(info_der, key.public_key);
 }

@@ -6,6 +6,8 @@ Zig code shared by Reseal, Maps and Turf, and the build steps every app gets thr
 |---|---|
 | `zui/` | UI framework. One app source shows real native views: DOM on the web, `android.view.View` through JNI, `UIView` through the Objective-C runtime |
 | `zui/platform/` | Hand-written bindings: `jni.zig` (generated once from the NDK's `jni.h` by `tools/gen_jni.js`), `objc.zig` |
+| `http/` | HTTP server for the app servers: router, JSON, static files, WebSocket, server-sent events. `http/tls/`: our TLS 1.3 server, certificates, and the ACME (Let's Encrypt) client |
+| `mongo/` | MongoDB driver: BSON, OP_MSG, connection pool, SCRAM-SHA-256, collections and cursors |
 | `shells/` | The fixed per-platform entry points: `web/zui.js` and `android/.../ZuiActivity.java`. They never change per screen |
 | `tools/` | `apk.zig` packages and signs APKs without Gradle; `zip.zig` writes the archive with page-aligned native libraries |
 | `toolchain.zon` | Where the Android SDK, NDK and JDK live on this machine |
@@ -30,3 +32,9 @@ Run from an app folder (`Maps`, `Turf`, `Reseal`):
 | `zig build test` | Client tests (headless host) and server tests |
 
 Add `-Doptimize=ReleaseSmall` for release-size builds. `zig build test` here runs the zig-core tests.
+
+## Tests
+
+`zig build test` runs everything. The MongoDB tests use a local server on 127.0.0.1:27017 when one is
+running (throwaway database `zigcore_test`) and are skipped otherwise. The TLS tests connect std's
+verifying TLS client to our server; the key schedule is checked against RFC 8448.

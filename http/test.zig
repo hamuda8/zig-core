@@ -245,3 +245,37 @@ fn runTlsServer(router: *const http.Router, store: *http.CertStore) anyerror!voi
         .tls = store,
     });
 }
+
+test "port 80: ACME challenges are answered, everything else redirects to HTTPS" {
+    var challenges: http.tls.acme.Challenges = .{ .gpa = testing.allocator };
+    defer {
+        var it = challenges.map.iterator();
+        while (it.next()) |e| {
+            testing.allocator.free(e.key_ptr.*);
+            testing.allocator.free(e.value_ptr.*);
+        }
+        challenges.map.deinit(testing.allocator);
+    }
+    try challenges.put(io, "tok123", "tok123.thumb");
+    http.acme_challenges = &challenges;
+    defer http.acme_challenges = null;
+
+    var router: http.Router = .init(testing.allocator);
+    defer router.deinit();
+    router.fallback = http.redirectToHttps;
+    var server = try startServer(&router);
+    defer _ = server.cancel(io) catch {};
+
+    const a = testing.allocator;
+    var res = try roundTrip(a, "GET /.well-known/acme-challenge/tok123 HTTP/1.1\r\nhost: maps.wufour.com\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "200 OK");
+    try expectContains(res, "tok123.thumb");
+    a.free(res);
+    res = try roundTrip(a, "GET /.well-known/acme-challenge/nope HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "404 Not Found");
+    a.free(res);
+    res = try roundTrip(a, "GET /map?lat=1 HTTP/1.1\r\nhost: maps.wufour.com:80\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "301 Moved Permanently");
+    try expectContains(res, "location: https://maps.wufour.com/map?lat=1");
+    a.free(res);
+}
