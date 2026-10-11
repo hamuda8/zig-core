@@ -13,6 +13,7 @@
         "http",
         "mongo",
         "env",
+        "geo",
         "tools",
         "toolchain.zon",
     },
