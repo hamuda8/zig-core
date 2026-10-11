@@ -28,6 +28,8 @@ const js = struct {
     extern "zui" fn zui_focus(id: u32) void;
     extern "zui" fn zui_image_filter(id: u32, saturate: f32, contrast: f32, brightness: f32) void;
     extern "zui" fn zui_post(ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_copy(ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_open_url(ptr: [*]const u8, len: usize, new_window: u32) void;
     extern "zui" fn zui_socket_open(id: u32, ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_socket_send(id: u32, ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_socket_close(id: u32) void;
@@ -98,6 +100,12 @@ pub fn imageFilter(id: u32, f: zui.ImageFilter) void {
 }
 pub fn focus(id: u32) void {
     js.zui_focus(id);
+}
+pub fn copy(text_: []const u8) void {
+    js.zui_copy(text_.ptr, text_.len);
+}
+pub fn openUrl(url: []const u8, new_window: bool) void {
+    js.zui_open_url(url.ptr, url.len, @intFromBool(new_window));
 }
 pub fn post(json: []const u8) void {
     js.zui_post(json.ptr, json.len);

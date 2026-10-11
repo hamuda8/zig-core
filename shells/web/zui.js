@@ -316,6 +316,13 @@ export async function start(wasm, mount = document.body, options = {}) {
       zui_focus(id) {
         views.get(id)?.focus();
       },
+      zui_copy(ptr, len) {
+        navigator.clipboard?.writeText(str(ptr, len)).catch(() => {});
+      },
+      zui_open_url(ptr, len, newWindow) {
+        const url = str(ptr, len);
+        if (newWindow) window.open(url, '_blank', 'noopener'); else location.href = url;
+      },
       zui_post(ptr, len) {
         if (options.onPost) return options.onPost(str(ptr, len));
         if (window.parent === window) return;

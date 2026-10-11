@@ -35,6 +35,8 @@ var methods: struct {
     set_link: jni.jmethodID,
     focus: jni.jmethodID,
     image_filter: jni.jmethodID,
+    copy: jni.jmethodID,
+    open_url: jni.jmethodID,
 } = undefined;
 
 fn bind(e: *jni.Env) void {
@@ -70,6 +72,8 @@ fn bind(e: *jni.Env) void {
         .{ "set_link", "setLink", "(Ljava/lang/String;)V" },
         .{ "focus", "focus", "(I)V" },
         .{ "image_filter", "imageFilter", "(I[F)V" },
+        .{ "copy", "copy", "(Ljava/lang/String;)V" },
+        .{ "open_url", "openUrl", "(Ljava/lang/String;)V" },
     }) |m| @field(methods, m[0]) = f.GetStaticMethodID(e, class, m[1], m[2]);
 }
 
@@ -340,6 +344,16 @@ pub fn imageFilter(id: u32, f: zui.ImageFilter) void {
     defer e.DeleteLocalRef(env, arr);
     e.SetFloatArrayRegion(env, arr, 0, 20, &m);
     call(methods.image_filter, &.{ int(id), object(arr) });
+}
+pub fn copy(s: []const u8) void {
+    const js = newString(s);
+    defer env.functions.DeleteLocalRef(env, js);
+    call(methods.copy, &.{object(js)});
+}
+pub fn openUrl(url: []const u8, _: bool) void {
+    const js = newString(url);
+    defer env.functions.DeleteLocalRef(env, js);
+    call(methods.open_url, &.{object(js)});
 }
 pub fn focus(id: u32) void {
     call(methods.focus, &.{int(id)});

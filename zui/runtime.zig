@@ -115,6 +115,8 @@ pub fn Fx(comptime Msg: type) type {
             open_socket: *const fn ([]const u8, *const fn (SocketEvent) Msg) u32,
             send_socket: *const fn (u32, []const u8) void,
             close_socket: *const fn (u32) void,
+            copy: *const fn ([]const u8) void,
+            open_url: *const fn ([]const u8, bool) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -166,6 +168,17 @@ pub fn Fx(comptime Msg: type) type {
 
         pub fn closeSocket(fx: Self, socket: u32) void {
             fx.vt.close_socket(socket);
+        }
+
+        /// Puts `text` on the clipboard.
+        pub fn copy(fx: Self, text: []const u8) void {
+            fx.vt.copy(text);
+        }
+
+        /// Opens an address: in place of this page (web) or in the browser / the app that
+        /// handles it; `new_window` opens a new tab on the web.
+        pub fn openUrl(fx: Self, url: []const u8, new_window: bool) void {
+            fx.vt.open_url(url, new_window);
         }
     };
 }
@@ -396,7 +409,17 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .open_socket = fxOpenSocket,
             .send_socket = fxSendSocket,
             .close_socket = fxCloseSocket,
+            .copy = fxCopy,
+            .open_url = fxOpenUrl,
         };
+
+        fn fxCopy(text: []const u8) void {
+            H.copy(text);
+        }
+
+        fn fxOpenUrl(url: []const u8, new_window: bool) void {
+            H.openUrl(url, new_window);
+        }
         var sockets: std.AutoHashMapUnmanaged(u32, *const fn (SocketEvent) Msg) = .empty;
 
         fn fxPost(json: []const u8) void {

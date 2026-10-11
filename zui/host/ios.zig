@@ -611,8 +611,8 @@ pub fn image(i: u32, url: []const u8) void {
     if (cached != null) return;
 
     const job = zui.allocator.create(ImageJob) catch return;
-    const copy = zui.allocator.dupe(u8, url) catch return zui.allocator.destroy(job);
-    job.* = .{ .id = i, .url = copy, .filter = f };
+    const owned_url = zui.allocator.dupe(u8, url) catch return zui.allocator.destroy(job);
+    job.* = .{ .id = i, .url = owned_url, .filter = f };
     dispatch_async_f(dispatch_get_global_queue(0, 0), job, download);
 }
 
@@ -875,3 +875,19 @@ pub fn post(_: []const u8) void {}
 pub fn openSocket(_: u32, _: []const u8) void {}
 pub fn sendSocket(_: u32, _: []const u8) void {}
 pub fn closeSocket(_: u32) void {}
+
+pub fn copy(s: []const u8) void {
+    const str = objc.nsString(s);
+    defer objc.release(str);
+    objc.sendVoid1(objc.send(objc.class("UIPasteboard"), "generalPasteboard"), "setString:", str);
+}
+
+pub fn openUrl(url: []const u8, _: bool) void {
+    const s = objc.nsString(url);
+    defer objc.release(s);
+    const u = objc.send1(objc.class("NSURL"), "URLWithString:", s);
+    if (u == null) return;
+    const app = objc.send(objc.class("UIApplication"), "sharedApplication");
+    const empty = objc.send(objc.class("NSDictionary"), "dictionary");
+    objc.msgSend(*const fn (id, objc.SEL, id, id, ?*anyopaque) callconv(.c) void)(app, objc.sel("openURL:options:completionHandler:"), u, empty, null);
+}

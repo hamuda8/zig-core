@@ -592,6 +592,19 @@ public final class Zui {
         v.setColorFilter(identity ? null : new android.graphics.ColorMatrixColorFilter(m));
     }
 
+    static void copy(String text) {
+        android.content.ClipboardManager c = (android.content.ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+        c.setPrimaryClip(android.content.ClipData.newPlainText("", text));
+    }
+
+    static void openUrl(String url) {
+        try {
+            activity.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)));
+        } catch (Exception ignored) {
+            // nothing on the phone opens it
+        }
+    }
+
     static void focus(int id) {
         View v = views.get(id);
         if (v == null) return;

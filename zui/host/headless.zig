@@ -36,6 +36,8 @@ pub var spoken: std.ArrayList(u8) = .empty;
 pub var link: std.ArrayList(u8) = .empty;
 pub var focused: u32 = 0;
 pub var posted: std.ArrayList(u8) = .empty;
+pub var clipboard: std.ArrayList(u8) = .empty;
+pub var opened: std.ArrayList(u8) = .empty;
 pub var socket_url: std.ArrayList(u8) = .empty;
 pub var socket_id: u32 = 0;
 
@@ -130,6 +132,14 @@ pub fn openSocket(id: u32, url: []const u8) void {
     socket_url.appendSlice(gpa, url) catch {};
 }
 pub fn sendSocket(_: u32, _: []const u8) void {}
+pub fn copy(value: []const u8) void {
+    clipboard.clearRetainingCapacity();
+    clipboard.appendSlice(gpa, value) catch {};
+}
+pub fn openUrl(url: []const u8, _: bool) void {
+    opened.clearRetainingCapacity();
+    opened.appendSlice(gpa, url) catch {};
+}
 pub fn closeSocket(_: u32) void {
     socket_id = 0;
 }
@@ -175,6 +185,8 @@ pub fn Driver(comptime App: type) type {
             spoken.clearRetainingCapacity();
             link.clearRetainingCapacity();
             posted.clearRetainingCapacity();
+            clipboard.clearRetainingCapacity();
+            opened.clearRetainingCapacity();
             socket_url.clearRetainingCapacity();
             socket_id = 0;
             frame_requested = false;
