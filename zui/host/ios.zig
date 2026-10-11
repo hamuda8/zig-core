@@ -157,7 +157,9 @@ pub fn frame(i: u32, r: zui.Rect) void {
 
 pub fn box(i: u32, b: zui.Box) void {
     const v = view(i);
-    objc.sendVoid1(v, "setBackgroundColor:", if (b.background >> 24 == 0) null else color(b.background));
+    // A transparent color, never nil: opaque views such as UILabel fill a nil background black.
+    objc.sendVoid1(v, "setBackgroundColor:", if (b.background >> 24 == 0) objc.send(objc.class("UIColor"), "clearColor") else color(b.background));
+    objc.sendVoidBool(v, "setOpaque:", false);
     const layer = objc.send(v, "layer");
     objc.sendVoidFloat(layer, "setCornerRadius:", b.radius);
     objc.sendVoidFloat(layer, "setBorderWidth:", b.border_width);
