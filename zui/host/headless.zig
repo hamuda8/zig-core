@@ -119,9 +119,10 @@ pub fn setLink(s: []const u8) void {
 pub fn focus(id: u32) void {
     focused = id;
 }
+/// Every message the app posted, one per line.
 pub fn post(json: []const u8) void {
-    posted.clearRetainingCapacity();
     posted.appendSlice(gpa, json) catch {};
+    posted.append(gpa, 10) catch {}; // newline
 }
 pub fn openSocket(id: u32, url: []const u8) void {
     socket_id = id;

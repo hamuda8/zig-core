@@ -3,6 +3,12 @@
 // everything visible is decided in Zig.
 //
 // The page sets the fonts with CSS variables: --zui-font and --zui-mono.
+//
+// start(wasm, mount, options): the app fills the window (mount = document.body), or, inside any
+// other element, fills that element and leaves the page alone (its address, its background):
+// a library on someone else's page. `wasm` is a URL or a compiled WebAssembly.Module (several
+// maps on a page compile once). options.onPost receives the app's fx.post messages (else they
+// go to the parent page); the returned send(json) reaches the app's hostMessage.
 
 const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4, KIND_IMAGE = 5, KIND_PATH = 6;
 const POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4, POINTER_WHEEL = 5;
@@ -40,7 +46,8 @@ function setMaxLines(el, n) {
   }
 }
 
-export async function start(wasmUrl, mount = document.body) {
+export async function start(wasm, mount = document.body, options = {}) {
+  const embedded = mount !== document.body;
   let ex, memory;
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -48,7 +55,8 @@ export async function start(wasmUrl, mount = document.body) {
   const str = (ptr, len) => (len === 0 ? '' : decoder.decode(new Uint8Array(memory.buffer, ptr >>> 0, len)));
 
   const root = document.createElement('div');
-  root.style.cssText = 'position:fixed;inset:0;overflow:hidden;';
+  root.style.cssText = embedded ? 'position:absolute;inset:0;overflow:hidden;' : 'position:fixed;inset:0;overflow:hidden;';
+  if (embedded && getComputedStyle(mount).position === 'static') mount.style.position = 'relative';
   mount.replaceChildren(root);
   const sheet = document.createElement('style');
   sheet.textContent = 'input::placeholder{color:var(--zui-placeholder);opacity:1}';
@@ -298,6 +306,7 @@ export async function start(wasmUrl, mount = document.body) {
         speechSynthesis.speak(u);
       },
       zui_set_link(ptr, len) {
+        if (embedded) return;
         const link = str(ptr, len) || location.pathname;
         if (link !== location.pathname + location.search) history.replaceState(null, '', link);
       },
@@ -308,6 +317,7 @@ export async function start(wasmUrl, mount = document.body) {
         views.get(id)?.focus();
       },
       zui_post(ptr, len) {
+        if (options.onPost) return options.onPost(str(ptr, len));
         if (window.parent === window) return;
         try { window.parent.postMessage(JSON.parse(str(ptr, len)), '*'); } catch {}
       },
@@ -332,7 +342,7 @@ export async function start(wasmUrl, mount = document.body) {
       zui_root_background(argb) {
         const c = css(argb);
         root.style.background = c;
-        document.documentElement.style.background = c;
+        if (!embedded) document.documentElement.style.background = c;
       },
       zui_log(ptr, len) {
         console.error(str(ptr, len));
@@ -350,7 +360,9 @@ export async function start(wasmUrl, mount = document.body) {
     },
   };
 
-  const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), imports);
+  const instance = wasm instanceof WebAssembly.Module
+    ? await WebAssembly.instantiate(wasm, imports)
+    : (await WebAssembly.instantiateStreaming(fetch(wasm), imports)).instance;
   ex = instance.exports;
   memory = ex.memory;
 
@@ -359,6 +371,7 @@ export async function start(wasmUrl, mount = document.body) {
   probe.style.cssText = 'position:fixed;visibility:hidden;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);';
   mount.appendChild(probe);
   const insets = () => {
+    if (embedded) return [0, 0, 0, 0];
     const s = getComputedStyle(probe);
     return [s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft].map(parseFloat);
   };
@@ -367,20 +380,42 @@ export async function start(wasmUrl, mount = document.body) {
   const lang = encoder.encode(navigator.language || 'en');
   const langPtr = ex.zui_alloc(lang.length);
   new Uint8Array(memory.buffer, langPtr, lang.length).set(lang);
-  const link = encoder.encode(location.pathname + location.search);
-  withBytes(link, (linkPtr, linkLen) => ex.zui_start(innerWidth, innerHeight, dark.matches ? 1 : 0, ...insets(), langPtr, lang.length, linkPtr, linkLen));
+  const size = () => (embedded ? [mount.clientWidth, mount.clientHeight] : [innerWidth, innerHeight]);
+  const isDark = () => (options.dark ?? dark.matches) ? 1 : 0;
+  const link = encoder.encode(options.link ?? (embedded ? '' : location.pathname + location.search));
+  withBytes(link, (linkPtr, linkLen) => ex.zui_start(...size(), isDark(), ...insets(), langPtr, lang.length, linkPtr, linkLen));
   ex.zui_free(langPtr, lang.length);
-  addEventListener('resize', () => {
+  const onResize = () => {
     ex.zui_insets(...insets());
-    ex.zui_resize(innerWidth, innerHeight);
-  });
-  dark.addEventListener('change', () => ex.zui_dark(dark.matches ? 1 : 0));
-  // Messages from the page this one is embedded in.
-  addEventListener('message', (e) => {
+    ex.zui_resize(...size());
+  };
+  let observer = null;
+  if (embedded) {
+    observer = new ResizeObserver(onResize);
+    observer.observe(mount);
+  } else addEventListener('resize', onResize);
+  const onDark = () => ex.zui_dark(isDark());
+  dark.addEventListener('change', onDark);
+  const send = (text) => withBytes(encoder.encode(text), (p, n) => ex.zui_host_message(p, n));
+  // Messages from the page this one is embedded in (an iframe).
+  const onMessage = (e) => {
     if (e.source !== window.parent || window.parent === window) return;
     let text;
     try { text = typeof e.data === 'string' ? e.data : JSON.stringify(e.data); } catch { return; }
-    withBytes(encoder.encode(text), (p, n) => ex.zui_host_message(p, n));
-  });
-  return instance;
+    send(text);
+  };
+  if (!embedded) addEventListener('message', onMessage);
+  return {
+    instance,
+    send,
+    destroy() {
+      observer?.disconnect();
+      removeEventListener('resize', onResize);
+      removeEventListener('message', onMessage);
+      dark.removeEventListener('change', onDark);
+      if (watchId !== null) navigator.geolocation?.clearWatch(watchId);
+      for (const s of sockets.values()) s.close();
+      mount.replaceChildren();
+    },
+  };
 }

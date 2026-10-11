@@ -173,6 +173,11 @@ pub const State = struct {
     animation: ?Animation = null,
     /// Time of the last frame that moved the camera, for frame-rate independent motion.
     frame_ms: ?f64 = null,
+    /// What the fingers and wheel may do (a library map is flat and north-up; a preview is still).
+    can_pan: bool = true,
+    can_zoom: bool = true,
+    can_rotate: bool = true,
+    can_tilt: bool = true,
     /// Where and when the current single-finger touch began, for taps.
     touch_start: ?struct { x: f64, y: f64, ms: i64, moved: bool, many: bool } = null,
 
@@ -292,6 +297,7 @@ pub const State = struct {
         const y: f64 = p.y;
         switch (p.kind) {
             .wheel => {
+                if (!s.can_zoom) return .{};
                 s.animation = null;
                 s.zoomAround(x, y, s.camera.zoom - p.wheel / 300);
                 return .{};
@@ -320,14 +326,14 @@ pub const State = struct {
                 };
                 if (s.count() == 2) {
                     s.movePinch();
-                } else if (s.last) |l| {
+                } else if (s.last) |l| if (s.can_pan) {
                     const dt: f64 = @floatFromInt(@max(1, p.time_ms - s.last_ms));
                     s.velocity = .{ (x - l[0]) / dt, (y - l[1]) / dt };
                     s.last_ms = p.time_ms;
                     // The map point under the finger stays under it (exact when tilted too).
                     if (s.view().toWorld(l[0], l[1])) |held| s.keepUnder(held, x, y);
                     s.last = .{ x, y };
-                }
+                };
             },
             .up, .cancel => {
                 const was = s.count();
@@ -434,16 +440,16 @@ pub const State = struct {
             const turned = @abs(std.math.radiansToDegrees(angleDiff(angle, p.angle)));
             if (moved > 12 or stretched > 12 or turned > 6) {
                 const flat = @abs(f[1].y - f[0].y) < 0.6 * @abs(f[1].x - f[0].x);
-                p.tilting = flat and moved > stretched and turned < 8;
+                p.tilting = s.can_tilt and flat and moved > stretched and turned < 8;
             }
         }
         if (p.tilting == true) {
             s.camera.pitch = std.math.clamp(p.pitch - (my - p.mid_y) * 0.4, 0, max_pitch);
             return;
         }
-        s.camera.zoom = std.math.clamp(p.zoom + std.math.log2(@max(1, dist) / p.distance), s.minZoom(), max_zoom);
-        s.camera.bearing = @mod(p.bearing + std.math.radiansToDegrees(angleDiff(angle, p.angle)), 360);
-        s.keepUnder(p.anchor, mx, my);
+        if (s.can_zoom) s.camera.zoom = std.math.clamp(p.zoom + std.math.log2(@max(1, dist) / p.distance), s.minZoom(), max_zoom);
+        if (s.can_rotate) s.camera.bearing = @mod(p.bearing + std.math.radiansToDegrees(angleDiff(angle, p.angle)), 360);
+        if (s.can_pan or s.can_zoom) s.keepUnder(p.anchor, mx, my);
     }
 };
 

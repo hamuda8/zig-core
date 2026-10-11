@@ -72,6 +72,8 @@ pub fn build(b: *std.Build) void {
     }
 }
 
+pub const WebExtra = struct { name: []const u8, root: std.Build.LazyPath };
+
 pub const AppOptions = struct {
     /// Short lowercase name: "maps", "turf", "reseal". Used for file names.
     name: []const u8,
@@ -87,6 +89,9 @@ pub const AppOptions = struct {
     android_min_sdk: u32 = 26,
     /// Build-time settings for the client, imported as "app_config" (server address, ...).
     client_config: ?*std.Build.Module = null,
+    /// More wasm modules for the web build (zig-out/web/<name>.wasm), with the client's imports:
+    /// e.g. a library that other sites load.
+    web_extra: []const WebExtra = &.{},
     optimize: std.builtin.OptimizeMode,
 };
 
@@ -139,6 +144,17 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
         wasm.entry = .disabled;
         wasm.rdynamic = true;
         const step = b.step("web", "Build the web app into zig-out/web");
+        for (opts.web_extra) |extra| {
+            var o = opts;
+            o.client = extra.root;
+            const lib = b.addExecutable(.{
+                .name = extra.name,
+                .root_module = client(b, o, zui, b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding })),
+            });
+            lib.entry = .disabled;
+            lib.rdynamic = true;
+            step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = "web" } } }).step);
+        }
         step.dependOn(&b.addInstallArtifact(wasm, .{ .dest_dir = .{ .override = .{ .custom = "web" } } }).step);
         step.dependOn(&b.addInstallFileWithDir(core.path("shells/web/zui.js"), .{ .custom = "web" }, "zui.js").step);
         step.dependOn(&b.addInstallDirectory(.{ .source_dir = opts.web, .install_dir = .{ .custom = "web" }, .install_subdir = "" }).step);
@@ -300,6 +316,11 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
     {
         const step = b.step("test", "Run client and server tests");
         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = client(b, opts, zui, b.graph.host) })).step);
+        for (opts.web_extra) |extra| {
+            var o = opts;
+            o.client = extra.root;
+            step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = client(b, o, zui, b.graph.host) })).step);
+        }
         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_module(b, opts, b.graph.host) })).step);
     }
 }
