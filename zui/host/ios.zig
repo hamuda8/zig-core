@@ -720,7 +720,7 @@ const fetch_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(FetchBlock) };
 
 const FetchResult = struct { request: u32, status: u16, body: []u8 };
 
-pub fn fetch(i: u32, method: []const u8, url: []const u8, body: []const u8, content_type: []const u8) void {
+pub fn fetch(i: u32, method: []const u8, url: []const u8, body: []const u8, content_type: []const u8, headers: []const u8) void {
     const s = objc.nsString(url);
     defer objc.release(s);
     const nsurl = objc.send1(objc.class("NSURL"), "URLWithString:", s);
@@ -737,6 +737,15 @@ pub fn fetch(i: u32, method: []const u8, url: []const u8, body: []const u8, cont
         const field = objc.nsString("Content-Type");
         defer objc.release(field);
         objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(req, objc.sel("setValue:forHTTPHeaderField:"), ct, field);
+    }
+    var lines = std.mem.tokenizeScalar(u8, headers, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.indexOf(u8, line, ": ") orelse continue;
+        const name = objc.nsString(line[0..at]);
+        defer objc.release(name);
+        const value = objc.nsString(line[at + 2 ..]);
+        defer objc.release(value);
+        objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(req, objc.sel("setValue:forHTTPHeaderField:"), value, name);
     }
     const block = zui.allocator.create(FetchBlock) catch return rt.fetch_done(i, 0, "");
     block.* = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&fetchCompleted), .descriptor = &fetch_descriptor }, .request = i };
@@ -890,4 +899,77 @@ pub fn openUrl(url: []const u8, _: bool) void {
     const app = objc.send(objc.class("UIApplication"), "sharedApplication");
     const empty = objc.send(objc.class("NSDictionary"), "dictionary");
     objc.msgSend(*const fn (id, objc.SEL, id, id, ?*anyopaque) callconv(.c) void)(app, objc.sel("openURL:options:completionHandler:"), u, empty, null);
+}
+
+// ---- Storage: NSUserDefaults; secure values in the Keychain ----
+
+extern "Security" fn SecItemCopyMatching(query: id, result: *id) i32;
+extern "Security" fn SecItemAdd(attributes: id, result: ?*id) i32;
+extern "Security" fn SecItemDelete(query: id) i32;
+extern "Security" var kSecClass: id;
+extern "Security" var kSecClassGenericPassword: id;
+extern "Security" var kSecAttrService: id;
+extern "Security" var kSecAttrAccount: id;
+extern "Security" var kSecValueData: id;
+extern "Security" var kSecReturnData: id;
+extern "Security" var kSecAttrAccessible: id;
+extern "Security" var kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly: id;
+extern "CoreFoundation" var kCFBooleanTrue: id;
+
+fn nsDict(keys: []const id, values: []const id) id {
+    const make = objc.msgSend(*const fn (id, objc.SEL, [*]const id, [*]const id, usize) callconv(.c) id);
+    return make(objc.class("NSDictionary"), objc.sel("dictionaryWithObjects:forKeys:count:"), values.ptr, keys.ptr, keys.len);
+}
+
+fn keychainQuery(account: id) [3][2]id {
+    const service = objc.send1(objc.class("NSString"), "stringWithUTF8String:", @ptrCast(@constCast("zui")));
+    return .{ .{ kSecClass, kSecClassGenericPassword }, .{ kSecAttrService, service }, .{ kSecAttrAccount, account } };
+}
+
+fn nsData(bytes: []const u8) id {
+    return objc.msgSend(*const fn (id, objc.SEL, [*]const u8, usize) callconv(.c) id)(objc.class("NSData"), objc.sel("dataWithBytes:length:"), bytes.ptr, bytes.len);
+}
+
+fn utf8Of(s: id, a: std.mem.Allocator) ?[]u8 {
+    const p = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(s, objc.sel("UTF8String")) orelse return null;
+    return a.dupe(u8, std.mem.span(p)) catch null;
+}
+
+pub fn storageGet(a: std.mem.Allocator, key: []const u8, secure: bool) ?[]u8 {
+    const k = objc.nsString(key);
+    defer objc.release(k);
+    if (!secure) {
+        const v = objc.send1(objc.send(objc.class("NSUserDefaults"), "standardUserDefaults"), "stringForKey:", k);
+        return if (v != null) utf8Of(v, a) else null;
+    }
+    const q = keychainQuery(k);
+    const query = nsDict(&.{ q[0][0], q[1][0], q[2][0], kSecReturnData }, &.{ q[0][1], q[1][1], q[2][1], kCFBooleanTrue });
+    var data: id = null;
+    if (SecItemCopyMatching(query, &data) != 0 or data == null) return null;
+    defer objc.release(data);
+    const n: usize = @intCast(objc.sendInt(data, "length"));
+    const bytes = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*]const u8)(data, objc.sel("bytes")) orelse return null;
+    return a.dupe(u8, bytes[0..n]) catch null;
+}
+
+pub fn storageSet(key: []const u8, value: []const u8, secure: bool) void {
+    const k = objc.nsString(key);
+    defer objc.release(k);
+    if (!secure) {
+        const v = objc.nsString(value);
+        defer objc.release(v);
+        objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(objc.send(objc.class("NSUserDefaults"), "standardUserDefaults"), objc.sel("setObject:forKey:"), v, k);
+        return;
+    }
+    const q = keychainQuery(k);
+    _ = SecItemDelete(nsDict(&.{ q[0][0], q[1][0], q[2][0] }, &.{ q[0][1], q[1][1], q[2][1] }));
+    _ = SecItemAdd(nsDict(&.{ q[0][0], q[1][0], q[2][0], kSecValueData, kSecAttrAccessible }, &.{ q[0][1], q[1][1], q[2][1], nsData(value), kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly }), null);
+}
+
+pub fn storageRemove(key: []const u8, secure: bool) void {
+    const k = objc.nsString(key);
+    defer objc.release(k);
+    if (!secure) return objc.sendVoid1(objc.send(objc.class("NSUserDefaults"), "standardUserDefaults"), "removeObjectForKey:", k);
+    const q = keychainQuery(k);
+    _ = SecItemDelete(nsDict(&.{ q[0][0], q[1][0], q[2][0] }, &.{ q[0][1], q[1][1], q[2][1] }));
 }

@@ -270,17 +270,37 @@ export async function start(wasm, mount = document.body, options = {}) {
         frameRequested = true;
         requestAnimationFrame((t) => { frameRequested = false; ex.zui_frame(t); });
       },
-      zui_fetch(id, mptr, mlen, uptr, ulen, bptr, blen, cptr, clen) {
+      zui_fetch(id, mptr, mlen, uptr, ulen, bptr, blen, cptr, clen, hptr, hlen) {
         const method = str(mptr, mlen), url = str(uptr, ulen);
-        const init = { method };
+        const init = { method, headers: {} };
+        for (const line of str(hptr, hlen).split('\n')) {
+          const at = line.indexOf(': ');
+          if (at > 0) init.headers[line.slice(0, at)] = line.slice(at + 2);
+        }
         if (blen > 0) {
           init.body = new Uint8Array(memory.buffer, bptr >>> 0, blen).slice();
-          init.headers = { 'content-type': str(cptr, clen) };
+          init.headers['content-type'] = str(cptr, clen);
         }
         fetch(url, init)
           .then(async (res) => ({ status: res.status, body: new Uint8Array(await res.arrayBuffer()) }))
           .catch(() => ({ status: 0, body: new Uint8Array(0) }))
           .then(({ status, body }) => withBytes(body, (p, n) => ex.zui_fetch_done(id, status, p, n)));
+      },
+      zui_storage_get(kptr, klen, outLen) {
+        let v = null;
+        try { v = localStorage.getItem('zui:' + str(kptr, klen)); } catch {}
+        if (v === null) return 0;
+        const bytes = encoder.encode(v);
+        const p = ex.zui_alloc(Math.max(1, bytes.length));
+        new Uint8Array(memory.buffer, p, bytes.length).set(bytes);
+        new Uint32Array(memory.buffer, outLen, 1)[0] = bytes.length;
+        return p;
+      },
+      zui_storage_set(kptr, klen, vptr, vlen) {
+        try { localStorage.setItem('zui:' + str(kptr, klen), str(vptr, vlen)); } catch {}
+      },
+      zui_storage_remove(kptr, klen) {
+        try { localStorage.removeItem('zui:' + str(kptr, klen)); } catch {}
       },
       zui_timer(id, ms) {
         setTimeout(() => ex.zui_timer_done(id), ms);

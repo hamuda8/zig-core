@@ -48,6 +48,8 @@ pub const Request = struct {
     method: Method = .GET,
     body: []const u8 = "",
     content_type: []const u8 = "application/json",
+    /// Extra headers, e.g. .{ "authorization", "Bearer ..." }.
+    headers: []const [2][]const u8 = &.{},
     /// Comes back in the response: which request this answers (e.g. to ignore an older,
     /// slower answer once a newer request was made).
     tag: u32 = 0,
@@ -452,7 +454,11 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         fn fxFetch(req: Request, done: *const fn (Response) Msg) void {
             const id = newId();
             fetches.put(gpa, id, .{ .done = done, .tag = req.tag }) catch return;
-            H.fetch(id, @tagName(req.method), req.url, req.body, req.content_type);
+            // Headers travel as one "name: value\n" block (the same on every host).
+            var block: std.ArrayList(u8) = .empty;
+            defer block.deinit(gpa);
+            for (req.headers) |h| block.print(gpa, "{s}: {s}\n", .{ h[0], h[1] }) catch {};
+            H.fetch(id, @tagName(req.method), req.url, req.body, req.content_type, block.items);
         }
 
         fn fxAfter(ms: u32, msg: Msg) void {

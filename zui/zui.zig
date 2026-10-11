@@ -32,6 +32,7 @@ pub const Insets = runtime.Insets;
 pub const Event = runtime.Event;
 pub const Pointer = runtime.Pointer;
 pub const Fx = runtime.Fx;
+pub const storage = @import("storage.zig");
 pub const icon = @import("icon.zig");
 pub const Icon = icon.Icon;
 pub const Request = runtime.Request;

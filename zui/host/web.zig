@@ -20,7 +20,10 @@ const js = struct {
     extern "zui" fn zui_pointer_listen(id: u32, on: u32) void;
     extern "zui" fn zui_image(id: u32, ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_path(id: u32, points: [*]const [2]f32, count: usize, color: u32, width: f32, dash_on: f32, dash_off: f32, round: u32, fill: u32) void;
-    extern "zui" fn zui_fetch(id: u32, method: [*]const u8, method_len: usize, url: [*]const u8, url_len: usize, body: [*]const u8, body_len: usize, ctype: [*]const u8, ctype_len: usize) void;
+    extern "zui" fn zui_fetch(id: u32, method: [*]const u8, method_len: usize, url: [*]const u8, url_len: usize, body: [*]const u8, body_len: usize, ctype: [*]const u8, ctype_len: usize, headers: [*]const u8, headers_len: usize) void;
+    extern "zui" fn zui_storage_get(key: [*]const u8, key_len: usize, out_len: *usize) ?[*]u8;
+    extern "zui" fn zui_storage_set(key: [*]const u8, key_len: usize, value: [*]const u8, value_len: usize) void;
+    extern "zui" fn zui_storage_remove(key: [*]const u8, key_len: usize) void;
     extern "zui" fn zui_timer(id: u32, ms: u32) void;
     extern "zui" fn zui_location(on: u32) void;
     extern "zui" fn zui_speak(text: [*]const u8, text_len: usize, lang: [*]const u8, lang_len: usize) void;
@@ -80,8 +83,21 @@ pub fn image(id: u32, url: []const u8) void {
 pub fn path(id: u32, p: zui.Path) void {
     js.zui_path(id, p.points.ptr, p.points.len, p.color, p.width, p.dash[0], p.dash[1], @intFromBool(p.round), p.fill);
 }
-pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, content_type: []const u8) void {
-    js.zui_fetch(id, method.ptr, method.len, url.ptr, url.len, body.ptr, body.len, content_type.ptr, content_type.len);
+pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, content_type: []const u8, headers: []const u8) void {
+    js.zui_fetch(id, method.ptr, method.len, url.ptr, url.len, body.ptr, body.len, content_type.ptr, content_type.len, headers.ptr, headers.len);
+}
+/// The value comes back in memory the shim got from zui_alloc.
+pub fn storageGet(a: std.mem.Allocator, key: []const u8, _: bool) ?[]u8 {
+    var len: usize = 0;
+    const p = js.zui_storage_get(key.ptr, key.len, &len) orelse return null;
+    defer zui.allocator.free(p[0..@max(len, 1)]);
+    return a.dupe(u8, p[0..len]) catch null;
+}
+pub fn storageSet(key: []const u8, value: []const u8, _: bool) void {
+    js.zui_storage_set(key.ptr, key.len, value.ptr, value.len);
+}
+pub fn storageRemove(key: []const u8, _: bool) void {
+    js.zui_storage_remove(key.ptr, key.len);
 }
 pub fn timer(id: u32, ms: u32) void {
     js.zui_timer(id, ms);

@@ -28,7 +28,9 @@ pub var frame_requested = false;
 pub var clock_ms: f64 = 0;
 
 /// Requests the app made and the test has not answered yet.
-pub const PendingFetch = struct { id: u32, method: []const u8, url: []u8, body: []u8 };
+pub const PendingFetch = struct { id: u32, method: []const u8, url: []u8, body: []u8, headers: []u8 = &.{} };
+/// The device storage.
+pub var stored: std.StringHashMapUnmanaged([]u8) = .empty;
 pub var fetches: std.ArrayList(PendingFetch) = .empty;
 pub var timers: std.ArrayList(struct { id: u32, ms: u32 }) = .empty;
 pub var location_on = false;
@@ -101,8 +103,23 @@ pub fn path(id: u32, p: zui.Path) void {
 pub fn requestFrame() void {
     frame_requested = true;
 }
-pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, _: []const u8) void {
-    fetches.append(gpa, .{ .id = id, .method = method, .url = gpa.dupe(u8, url) catch return, .body = gpa.dupe(u8, body) catch return }) catch {};
+pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, _: []const u8, headers: []const u8) void {
+    fetches.append(gpa, .{ .id = id, .method = method, .url = gpa.dupe(u8, url) catch return, .body = gpa.dupe(u8, body) catch return, .headers = gpa.dupe(u8, headers) catch return }) catch {};
+}
+pub fn storageGet(a: std.mem.Allocator, key: []const u8, _: bool) ?[]u8 {
+    const v = stored.get(key) orelse return null;
+    return a.dupe(u8, v) catch null;
+}
+pub fn storageSet(key: []const u8, value: []const u8, _: bool) void {
+    const gop = stored.getOrPut(gpa, key) catch return;
+    if (gop.found_existing) gpa.free(gop.value_ptr.*) else gop.key_ptr.* = gpa.dupe(u8, key) catch return;
+    gop.value_ptr.* = gpa.dupe(u8, value) catch return;
+}
+pub fn storageRemove(key: []const u8, _: bool) void {
+    if (stored.fetchRemove(key)) |kv| {
+        gpa.free(kv.key);
+        gpa.free(kv.value);
+    }
 }
 pub fn timer(id: u32, ms: u32) void {
     timers.append(gpa, .{ .id = id, .ms = ms }) catch {};

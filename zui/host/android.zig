@@ -37,6 +37,9 @@ var methods: struct {
     image_filter: jni.jmethodID,
     copy: jni.jmethodID,
     open_url: jni.jmethodID,
+    storage_get: jni.jmethodID,
+    storage_set: jni.jmethodID,
+    storage_remove: jni.jmethodID,
 } = undefined;
 
 fn bind(e: *jni.Env) void {
@@ -65,7 +68,10 @@ fn bind(e: *jni.Env) void {
         .{ "image", "image", "(ILjava/lang/String;)V" },
         .{ "path", "path", "(I[FIFFFZI)V" },
         .{ "request_frame", "requestFrame", "()V" },
-        .{ "fetch", "fetch", "(ILjava/lang/String;Ljava/lang/String;[BLjava/lang/String;)V" },
+        .{ "fetch", "fetch", "(ILjava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;)V" },
+        .{ "storage_get", "storageGet", "(Ljava/lang/String;Z)Ljava/lang/String;" },
+        .{ "storage_set", "storageSet", "(Ljava/lang/String;Ljava/lang/String;Z)V" },
+        .{ "storage_remove", "storageRemove", "(Ljava/lang/String;Z)V" },
         .{ "timer", "timer", "(II)V" },
         .{ "location", "location", "(Z)V" },
         .{ "speak", "speak", "(Ljava/lang/String;Ljava/lang/String;)V" },
@@ -305,8 +311,10 @@ pub fn path(id: u32, p: zui.Path) void {
     f.SetFloatArrayRegion(env, arr, 0, n, @ptrCast(p.points.ptr));
     call(methods.path, &.{ int(id), object(arr), int(p.color), float(p.width), float(p.dash[0]), float(p.dash[1]), boolean(p.round), int(p.fill) });
 }
-pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, content_type: []const u8) void {
+pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, content_type: []const u8, headers: []const u8) void {
     const f = env.functions;
+    const jh = newString(headers);
+    defer f.DeleteLocalRef(env, jh);
     const jm = newString(method);
     defer f.DeleteLocalRef(env, jm);
     const ju = newString(url);
@@ -316,7 +324,32 @@ pub fn fetch(id: u32, method: []const u8, url: []const u8, body: []const u8, con
     const jb = f.NewByteArray(env, @intCast(body.len));
     defer f.DeleteLocalRef(env, jb);
     if (body.len > 0) f.SetByteArrayRegion(env, jb, 0, @intCast(body.len), body.ptr);
-    call(methods.fetch, &.{ int(id), object(jm), object(ju), object(jb), object(jc) });
+    call(methods.fetch, &.{ int(id), object(jm), object(ju), object(jb), object(jc), object(jh) });
+}
+pub fn storageGet(a: std.mem.Allocator, key: []const u8, secure: bool) ?[]u8 {
+    const f = env.functions;
+    const jk = newString(key);
+    defer f.DeleteLocalRef(env, jk);
+    const args = [_]jni.jvalue{ object(jk), boolean(secure) };
+    const v = f.CallStaticObjectMethodA(env, class, methods.storage_get, &args);
+    check();
+    if (v == null) return null;
+    defer f.DeleteLocalRef(env, v);
+    const buf = a.alloc(u8, 4096) catch return null;
+    const s = javaString(v, buf);
+    return a.realloc(buf, s.len) catch buf[0..s.len];
+}
+pub fn storageSet(key: []const u8, value: []const u8, secure: bool) void {
+    const jk = newString(key);
+    defer env.functions.DeleteLocalRef(env, jk);
+    const jv = newString(value);
+    defer env.functions.DeleteLocalRef(env, jv);
+    call(methods.storage_set, &.{ object(jk), object(jv), boolean(secure) });
+}
+pub fn storageRemove(key: []const u8, secure: bool) void {
+    const jk = newString(key);
+    defer env.functions.DeleteLocalRef(env, jk);
+    call(methods.storage_remove, &.{ object(jk), boolean(secure) });
 }
 pub fn timer(id: u32, ms: u32) void {
     call(methods.timer, &.{ int(id), int(ms) });

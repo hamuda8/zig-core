@@ -472,7 +472,7 @@ public final class Zui {
 
     // ---- Effects: network, timers, location, speech ----
 
-    static void fetch(int id, String method, String url, byte[] body, String contentType) {
+    static void fetch(int id, String method, String url, byte[] body, String contentType, String headers) {
         network.execute(() -> {
             int status = 0;
             byte[] out = new byte[0];
@@ -481,6 +481,10 @@ public final class Zui {
                 c.setConnectTimeout(15000);
                 c.setReadTimeout(30000);
                 c.setRequestMethod(method);
+                for (String line : headers.split("\n")) {
+                    int at = line.indexOf(": ");
+                    if (at > 0) c.setRequestProperty(line.substring(0, at), line.substring(at + 2));
+                }
                 if (body.length > 0) {
                     c.setDoOutput(true);
                     c.setRequestProperty("Content-Type", contentType);
@@ -590,6 +594,63 @@ public final class Zui {
         ImageView v = (ImageView) views.get(id);
         boolean identity = m[0] == 1 && m[6] == 1 && m[12] == 1 && m[1] == 0 && m[4] == 0;
         v.setColorFilter(identity ? null : new android.graphics.ColorMatrixColorFilter(m));
+    }
+
+    // ---- Storage: SharedPreferences; secure values encrypted with an Android Keystore key ----
+
+    static android.content.SharedPreferences prefs() {
+        return activity.getSharedPreferences("zui", Context.MODE_PRIVATE);
+    }
+
+    static javax.crypto.SecretKey keystoreKey() throws Exception {
+        java.security.KeyStore ks = java.security.KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        if (!ks.containsAlias("zui")) {
+            javax.crypto.KeyGenerator g = javax.crypto.KeyGenerator.getInstance(android.security.keystore.KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+            g.init(new android.security.keystore.KeyGenParameterSpec.Builder("zui",
+                    android.security.keystore.KeyProperties.PURPOSE_ENCRYPT | android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .build());
+            g.generateKey();
+        }
+        return ((java.security.KeyStore.SecretKeyEntry) ks.getEntry("zui", null)).getSecretKey();
+    }
+
+    static String storageGet(String key, boolean secure) {
+        String v = prefs().getString((secure ? "s:" : "p:") + key, null);
+        if (v == null || !secure) return v;
+        try {
+            byte[] all = android.util.Base64.decode(v, android.util.Base64.NO_WRAP);
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.DECRYPT_MODE, keystoreKey(), new javax.crypto.spec.GCMParameterSpec(128, all, 0, 12));
+            return new String(c.doFinal(all, 12, all.length - 12), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null; // the key changed (device restored elsewhere): sign in again
+        }
+    }
+
+    static void storageSet(String key, String value, boolean secure) {
+        String stored = value;
+        if (secure) {
+            try {
+                javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+                c.init(javax.crypto.Cipher.ENCRYPT_MODE, keystoreKey());
+                byte[] iv = c.getIV();
+                byte[] ct = c.doFinal(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                byte[] all = new byte[iv.length + ct.length];
+                System.arraycopy(iv, 0, all, 0, iv.length);
+                System.arraycopy(ct, 0, all, iv.length, ct.length);
+                stored = android.util.Base64.encodeToString(all, android.util.Base64.NO_WRAP);
+            } catch (Exception e) {
+                return; // never store a secret in the clear
+            }
+        }
+        prefs().edit().putString((secure ? "s:" : "p:") + key, stored).apply();
+    }
+
+    static void storageRemove(String key, boolean secure) {
+        prefs().edit().remove((secure ? "s:" : "p:") + key).apply();
     }
 
     static void copy(String text) {
