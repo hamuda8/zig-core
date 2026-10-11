@@ -17,6 +17,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     _ = b.addModule("zui", .{ .root_source_file = b.path("zui/zui.zig") });
+    _ = b.addModule("http", .{ .root_source_file = b.path("http/http.zig") });
+    _ = b.addModule("mongo", .{ .root_source_file = b.path("mongo/mongo.zig") });
 
     // Host tool that packages APKs; apps reach it through `addApp`.
     b.installArtifact(b.addExecutable(.{
@@ -39,7 +41,7 @@ pub fn build(b: *std.Build) void {
     }));
 
     const test_step = b.step("test", "Run zig-core tests");
-    for ([_][]const u8{ "zui/zui.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
+    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
@@ -81,6 +83,8 @@ const ios_targets = [_]struct { dir: []const u8, query: std.Target.Query }{
     .{ .dir = "device", .query = .{ .cpu_arch = .aarch64, .os_tag = .ios } },
     .{ .dir = "simulator", .query = .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .simulator } },
 };
+
+var server_core: *std.Build.Dependency = undefined;
 
 /// Adds the steps `web`, `android`, `ios`, `ios-sim-app`, `server`, `server-linux`, `serve`,
 /// `strings` and `test`.
@@ -221,9 +225,13 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
 
     // Server: a native build for development, and the Linux build for the Proxmox host.
     const server_name = b.fmt("{s}-server", .{opts.name});
+    server_core = core;
     const server_module = struct {
         fn module(bb: *std.Build, o: AppOptions, target: std.Build.ResolvedTarget) *std.Build.Module {
-            return bb.createModule(.{ .root_source_file = o.server, .target = target, .optimize = o.optimize });
+            return bb.createModule(.{ .root_source_file = o.server, .target = target, .optimize = o.optimize, .imports = &.{
+                .{ .name = "http", .module = server_core.module("http") },
+                .{ .name = "mongo", .module = server_core.module("mongo") },
+            } });
         }
     }.module;
     {

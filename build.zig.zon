@@ -9,6 +9,8 @@
         "build.zig.zon",
         "zui",
         "shells",
+        "http",
+        "mongo",
         "tools",
         "toolchain.zon",
     },
