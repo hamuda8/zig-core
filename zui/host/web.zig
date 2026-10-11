@@ -26,6 +26,11 @@ const js = struct {
     extern "zui" fn zui_speak(text: [*]const u8, text_len: usize, lang: [*]const u8, lang_len: usize) void;
     extern "zui" fn zui_set_link(ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_focus(id: u32) void;
+    extern "zui" fn zui_image_filter(id: u32, saturate: f32, contrast: f32, brightness: f32) void;
+    extern "zui" fn zui_post(ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_socket_open(id: u32, ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_socket_send(id: u32, ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_socket_close(id: u32) void;
     extern "zui" fn zui_request_frame() void;
     extern "zui" fn zui_measure(ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, max_width: f32, out: *[2]f32) void;
 };
@@ -88,8 +93,23 @@ pub fn speak(s: []const u8, lang: []const u8) void {
 pub fn setLink(s: []const u8) void {
     js.zui_set_link(s.ptr, s.len);
 }
+pub fn imageFilter(id: u32, f: zui.ImageFilter) void {
+    js.zui_image_filter(id, f.saturate, f.contrast, f.brightness);
+}
 pub fn focus(id: u32) void {
     js.zui_focus(id);
+}
+pub fn post(json: []const u8) void {
+    js.zui_post(json.ptr, json.len);
+}
+pub fn openSocket(id: u32, url: []const u8) void {
+    js.zui_socket_open(id, url.ptr, url.len);
+}
+pub fn sendSocket(id: u32, message: []const u8) void {
+    js.zui_socket_send(id, message.ptr, message.len);
+}
+pub fn closeSocket(id: u32) void {
+    js.zui_socket_close(id);
 }
 pub fn requestFrame() void {
     js.zui_request_frame();
@@ -150,6 +170,12 @@ pub fn exportEntry(comptime App: type) void {
         fn locationError(denied: u32) callconv(.c) void {
             R.locationEvent(if (denied != 0) .denied else .unavailable);
         }
+        fn socketEvent(id: u32, kind: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.socketEvent(id, std.enums.fromInt(zui.SocketEvent.Kind, kind) orelse return, ptr[0..len]);
+        }
+        fn hostMessage(ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.hostMessage(ptr[0..len]);
+        }
         fn inputEvent(id: u32, kind: u32) callconv(.c) void {
             R.inputEvent(id, std.enums.fromInt(zui.InputEvent, kind) orelse return);
         }
@@ -174,6 +200,8 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.locationFix, .{ .name = "zui_location_fix" });
     @export(&Entry.locationError, .{ .name = "zui_location_error" });
     @export(&Entry.inputEvent, .{ .name = "zui_input_event" });
+    @export(&Entry.socketEvent, .{ .name = "zui_socket_event" });
+    @export(&Entry.hostMessage, .{ .name = "zui_host_message" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });
     @export(&Entry.free, .{ .name = "zui_free" });
 }

@@ -86,6 +86,17 @@ pub const Location = union(enum) {
 
 pub const InputEvent = enum(u8) { focus = 1, blur = 2, submit = 3 };
 
+/// Something that happened on a WebSocket opened with `fx.openSocket`.
+pub const SocketEvent = struct {
+    kind: Kind,
+    /// The socket (as `openSocket` returned it).
+    socket: u32,
+    /// A text message (`.message`), only valid during `update`.
+    data: []const u8 = "",
+
+    pub const Kind = enum(u8) { open = 1, message = 2, closed = 3 };
+};
+
 /// What `update` may ask of the platform. Each result arrives later as a message.
 pub fn Fx(comptime Msg: type) type {
     return struct {
@@ -100,6 +111,10 @@ pub fn Fx(comptime Msg: type) type {
             speak: *const fn ([]const u8) void,
             set_link: *const fn ([]const u8) void,
             focus: *const fn (u64) void,
+            post: *const fn ([]const u8) void,
+            open_socket: *const fn ([]const u8, *const fn (SocketEvent) Msg) u32,
+            send_socket: *const fn (u32, []const u8) void,
+            close_socket: *const fn (u32) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -132,6 +147,25 @@ pub fn Fx(comptime Msg: type) type {
         /// Puts the cursor in the input with this key (after the next draw).
         pub fn focus(fx: Self, input_key: u64) void {
             fx.vt.focus(input_key);
+        }
+
+        /// A JSON message to the page that embeds this one (web: postMessage to the parent).
+        /// Its answers arrive through the app's `hostMessage`.
+        pub fn post(fx: Self, json: []const u8) void {
+            fx.vt.post(json);
+        }
+
+        /// Opens a WebSocket; its events come back through `on`. Returns its id.
+        pub fn openSocket(fx: Self, url: []const u8, on: *const fn (SocketEvent) Msg) u32 {
+            return fx.vt.open_socket(url, on);
+        }
+
+        pub fn sendSocket(fx: Self, socket: u32, text: []const u8) void {
+            fx.vt.send_socket(socket, text);
+        }
+
+        pub fn closeSocket(fx: Self, socket: u32) void {
+            fx.vt.close_socket(socket);
         }
     };
 }
@@ -358,7 +392,31 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .speak = fxSpeak,
             .set_link = fxSetLink,
             .focus = fxFocus,
+            .post = fxPost,
+            .open_socket = fxOpenSocket,
+            .send_socket = fxSendSocket,
+            .close_socket = fxCloseSocket,
         };
+        var sockets: std.AutoHashMapUnmanaged(u32, *const fn (SocketEvent) Msg) = .empty;
+
+        fn fxPost(json: []const u8) void {
+            H.post(json);
+        }
+
+        fn fxOpenSocket(url: []const u8, on: *const fn (SocketEvent) Msg) u32 {
+            const id = newId();
+            sockets.put(gpa, id, on) catch return 0;
+            H.openSocket(id, url);
+            return id;
+        }
+
+        fn fxSendSocket(id: u32, text: []const u8) void {
+            H.sendSocket(id, text);
+        }
+
+        fn fxCloseSocket(id: u32) void {
+            if (sockets.remove(id)) H.closeSocket(id);
+        }
         const fx: Fx(Msg) = .{ .vt = &vtable };
 
         fn newId() u32 {
@@ -519,6 +577,19 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         pub fn timerDone(id: u32) void {
             const msg = (timers.fetchRemove(id) orelse return).value;
             if (started) dispatch(msg);
+        }
+
+        pub fn socketEvent(id: u32, kind: SocketEvent.Kind, data: []const u8) void {
+            const on = sockets.get(id) orelse return;
+            if (kind == .closed) _ = sockets.remove(id);
+            if (started) dispatch(on(.{ .kind = kind, .socket = id, .data = data }));
+        }
+
+        /// A message from the embedding page; the app turns it into a Msg with
+        /// `pub fn hostMessage(json: []const u8) ?Msg`.
+        pub fn hostMessage(json: []const u8) void {
+            if (!started or !@hasDecl(App, "hostMessage")) return;
+            if (App.hostMessage(json)) |m| dispatch(m);
         }
 
         pub fn locationEvent(l: Location) void {

@@ -191,7 +191,12 @@ pub fn Reconciler(comptime H: type) type {
                 .input => if (text_changed or !std.mem.eql(u8, o.?.placeholder, n.placeholder))
                     H.input(id, n.text, n.placeholder, font, color, al),
                 .scroll, .scroll_x => if (o == null or !std.meta.eql(o.?.content, n.content)) H.content(id, n.content),
-                .image => if (o == null or !std.mem.eql(u8, o.?.text, n.text)) H.image(id, n.text),
+                .image => {
+                    if (o == null or !std.mem.eql(u8, o.?.text, n.text)) H.image(id, n.text);
+                    const f = n.style.image_filter;
+                    const was: st.ImageFilter = if (o) |old| old.style.image_filter else .{};
+                    if (!std.meta.eql(f, was) or (o == null and !f.isIdentity())) H.imageFilter(id, f);
+                },
                 .path => if (n.path) |p| {
                     const same = if (o) |old| (if (old.path) |op| op.eql(p) else false) else false;
                     if (!same) H.path(id, p);
@@ -261,6 +266,7 @@ pub const RecordingHost = struct {
     pub fn image(id: u32, url: []const u8) void {
         write("image {d} {s}", .{ id, url });
     }
+    pub fn imageFilter(_: u32, _: st.ImageFilter) void {}
     pub fn path(id: u32, p: tree_mod.Path) void {
         write("path {d} {d}", .{ id, p.points.len });
     }

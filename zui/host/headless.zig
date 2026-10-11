@@ -35,6 +35,9 @@ pub var location_on = false;
 pub var spoken: std.ArrayList(u8) = .empty;
 pub var link: std.ArrayList(u8) = .empty;
 pub var focused: u32 = 0;
+pub var posted: std.ArrayList(u8) = .empty;
+pub var socket_url: std.ArrayList(u8) = .empty;
+pub var socket_id: u32 = 0;
 
 const gpa = std.heap.page_allocator;
 pub var views: std.AutoArrayHashMapUnmanaged(u32, View) = .empty;
@@ -89,6 +92,7 @@ pub fn image(id: u32, url: []const u8) void {
     v.text.clearRetainingCapacity();
     v.text.appendSlice(gpa, url) catch {};
 }
+pub fn imageFilter(_: u32, _: zui.ImageFilter) void {}
 pub fn path(id: u32, p: zui.Path) void {
     if (views.getPtr(id)) |v| v.path_points = p.points.len;
 }
@@ -114,6 +118,19 @@ pub fn setLink(s: []const u8) void {
 }
 pub fn focus(id: u32) void {
     focused = id;
+}
+pub fn post(json: []const u8) void {
+    posted.clearRetainingCapacity();
+    posted.appendSlice(gpa, json) catch {};
+}
+pub fn openSocket(id: u32, url: []const u8) void {
+    socket_id = id;
+    socket_url.clearRetainingCapacity();
+    socket_url.appendSlice(gpa, url) catch {};
+}
+pub fn sendSocket(_: u32, _: []const u8) void {}
+pub fn closeSocket(_: u32) void {
+    socket_id = 0;
 }
 pub fn rootBackground(argb: u32) void {
     root_background = argb;
@@ -156,6 +173,9 @@ pub fn Driver(comptime App: type) type {
             location_on = false;
             spoken.clearRetainingCapacity();
             link.clearRetainingCapacity();
+            posted.clearRetainingCapacity();
+            socket_url.clearRetainingCapacity();
+            socket_id = 0;
             frame_requested = false;
         }
 

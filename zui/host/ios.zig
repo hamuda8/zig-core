@@ -49,6 +49,9 @@ var pointers: std.ArrayList(bool) = .empty;
 /// dropped.
 var image_urls: std.ArrayList(?[]u8) = .empty;
 var image_cache: id = null;
+/// Each image view's colour filter (map tiles), applied to its pictures as they load.
+var filters: std.ArrayList(zui.ImageFilter) = .empty;
+var ci_context: id = null;
 var display_link: id = null;
 var root: id = null;
 var target: id = null;
@@ -135,6 +138,8 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
     slot(&image_urls, i);
     slot(&frames, i);
     slot(&origins, i);
+    slot(&filters, i);
+    filters.items[i] = .{};
     origins.items[i] = null;
     const v: id = switch (kind) {
         .image => blk: {
@@ -542,7 +547,50 @@ extern "c" fn dispatch_async_f(queue: Queue, context: ?*anyopaque, work: *const 
 /// What `dispatch_get_main_queue()` returns (a macro in the C headers).
 extern "c" var _dispatch_main_q: u8;
 
-const ImageJob = struct { id: u32, url: []u8, image: id = null };
+const ImageJob = struct { id: u32, url: []u8, image: id = null, filter: zui.ImageFilter = .{} };
+
+pub fn imageFilter(i: u32, f: zui.ImageFilter) void {
+    if (i < filters.items.len) filters.items[i] = f;
+}
+
+/// The cache key: the URL, plus the filter when there is one.
+fn cacheKey(url: []const u8, f: zui.ImageFilter, buf: []u8) []const u8 {
+    if (f.isIdentity()) return url;
+    return std.fmt.bufPrint(buf, "{s}#{d}/{d}/{d}", .{ url, f.saturate, f.contrast, f.brightness }) catch url;
+}
+
+/// `img` through CIColorMatrix (+1 retained), on any thread.
+fn filtered(img: id, f: zui.ImageFilter) id {
+    const m = f.matrix();
+    const cg = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?*anyopaque)(img, objc.sel("CGImage")) orelse return objc.send(img, "retain");
+    const ci = objc.msgSend(*const fn (id, objc.SEL, ?*anyopaque) callconv(.c) id)(objc.class("CIImage"), objc.sel("imageWithCGImage:"), cg);
+    const name = objc.nsString("CIColorMatrix");
+    defer objc.release(name);
+    const filter = objc.send1(objc.class("CIFilter"), "filterWithName:", name);
+    const set = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void);
+    const vec = objc.msgSend(*const fn (id, objc.SEL, CGFloat, CGFloat, CGFloat, CGFloat) callconv(.c) id);
+    const keys = [_][]const u8{ "inputRVector", "inputGVector", "inputBVector", "inputAVector" };
+    const image_key = objc.nsString("inputImage");
+    defer objc.release(image_key);
+    set(filter, objc.sel("setValue:forKey:"), ci, image_key);
+    for (keys, 0..) |k, r| {
+        const key = objc.nsString(k);
+        defer objc.release(key);
+        set(filter, objc.sel("setValue:forKey:"), vec(objc.class("CIVector"), objc.sel("vectorWithX:Y:Z:W:"), m[r * 5], m[r * 5 + 1], m[r * 5 + 2], m[r * 5 + 3]), key);
+    }
+    const bias = objc.nsString("inputBiasVector");
+    defer objc.release(bias);
+    set(filter, objc.sel("setValue:forKey:"), vec(objc.class("CIVector"), objc.sel("vectorWithX:Y:Z:W:"), m[4], m[9], m[14], 0), bias);
+    const out = objc.send(filter, "outputImage");
+    if (ci_context == null) ci_context = objc.send(objc.send(objc.class("CIContext"), "context"), "retain");
+    const extent = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) objc.CGRect)(ci, objc.sel("extent"));
+    const made = objc.msgSend(*const fn (id, objc.SEL, id, objc.CGRect) callconv(.c) ?*anyopaque)(ci_context, objc.sel("createCGImage:fromRect:"), out, extent) orelse return objc.send(img, "retain");
+    defer CGImageRelease(made);
+    const result = objc.msgSend(*const fn (id, objc.SEL, ?*anyopaque) callconv(.c) id)(objc.class("UIImage"), objc.sel("imageWithCGImage:"), made);
+    return objc.send(result, "retain");
+}
+
+extern "CoreGraphics" fn CGImageRelease(image: ?*anyopaque) void;
 
 /// Shows the picture at `url`: from memory if seen before, else downloaded on a background
 /// queue and applied on the main queue if the view still wants that URL. Downloads go through
@@ -554,7 +602,9 @@ pub fn image(i: u32, url: []const u8) void {
     }
     image_urls.items[i] = zui.allocator.dupe(u8, url) catch null;
     if (image_cache == null) image_cache = objc.new("NSCache");
-    const key = objc.nsString(url);
+    const f = filters.items[i];
+    var kb: [600]u8 = undefined;
+    const key = objc.nsString(cacheKey(url, f, &kb));
     defer objc.release(key);
     const cached = objc.send1(image_cache, "objectForKey:", key);
     objc.sendVoid1(view(i), "setImage:", cached);
@@ -562,7 +612,7 @@ pub fn image(i: u32, url: []const u8) void {
 
     const job = zui.allocator.create(ImageJob) catch return;
     const copy = zui.allocator.dupe(u8, url) catch return zui.allocator.destroy(job);
-    job.* = .{ .id = i, .url = copy };
+    job.* = .{ .id = i, .url = copy, .filter = f };
     dispatch_async_f(dispatch_get_global_queue(0, 0), job, download);
 }
 
@@ -577,7 +627,7 @@ fn download(ctx: ?*anyopaque) callconv(.c) void {
         const data = objc.send1(objc.class("NSData"), "dataWithContentsOfURL:", url);
         if (data != null) {
             const img = objc.send1(objc.class("UIImage"), "imageWithData:", data);
-            if (img != null) job.image = objc.send(img, "retain");
+            if (img != null) job.image = if (job.filter.isIdentity()) objc.send(img, "retain") else filtered(img, job.filter);
         }
     }
     objc.release(pool);
@@ -592,7 +642,8 @@ fn applyImage(ctx: ?*anyopaque) callconv(.c) void {
         zui.allocator.destroy(job);
     }
     const img = job.image orelse return;
-    const key = objc.nsString(job.url);
+    var kb: [600]u8 = undefined;
+    const key = objc.nsString(cacheKey(job.url, job.filter, &kb));
     defer objc.release(key);
     const set = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void);
     set(image_cache, objc.sel("setObject:forKey:"), img, key);
@@ -817,3 +868,10 @@ test transformMatrix {
     // Perspective: m34 = -1/d.
     try std.testing.expectApproxEqAbs(@as(f64, -0.001), transformMatrix(.{ .perspective = 1000 }).m[11], 1e-12);
 }
+
+// Web-only for now: there is no embedding page, and WebSockets on the phones come with Reseal's
+// chat (a client written for each platform); until then a socket reports itself closed.
+pub fn post(_: []const u8) void {}
+pub fn openSocket(_: u32, _: []const u8) void {}
+pub fn sendSocket(_: u32, _: []const u8) void {}
+pub fn closeSocket(_: u32) void {}

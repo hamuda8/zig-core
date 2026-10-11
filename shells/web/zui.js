@@ -70,6 +70,7 @@ export async function start(wasmUrl, mount = document.body) {
   };
   const sendText = (id, s) => withBytes(encoder.encode(s), (p, n) => ex.zui_text_event(id, p, n));
   let watchId = null;
+  const sockets = new Map();
 
   const imports = {
     zui: {
@@ -300,8 +301,33 @@ export async function start(wasmUrl, mount = document.body) {
         const link = str(ptr, len) || location.pathname;
         if (link !== location.pathname + location.search) history.replaceState(null, '', link);
       },
+      zui_image_filter(id, s, c, b) {
+        views.get(id).style.filter = s === 1 && c === 1 && b === 1 ? '' : `saturate(${s}) contrast(${c}) brightness(${b})`;
+      },
       zui_focus(id) {
         views.get(id)?.focus();
+      },
+      zui_post(ptr, len) {
+        if (window.parent === window) return;
+        try { window.parent.postMessage(JSON.parse(str(ptr, len)), '*'); } catch {}
+      },
+      zui_socket_open(id, ptr, len) {
+        let url = str(ptr, len);
+        // Relative to the page, as fetch() is.
+        if (url.startsWith('/')) url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + url;
+        const s = new WebSocket(url);
+        sockets.set(id, s);
+        s.onopen = () => ex.zui_socket_event(id, 1, 0, 0);
+        s.onmessage = (e) => { if (typeof e.data === 'string') withBytes(encoder.encode(e.data), (p, n) => ex.zui_socket_event(id, 2, p, n)); };
+        s.onclose = () => { sockets.delete(id); ex.zui_socket_event(id, 3, 0, 0); };
+      },
+      zui_socket_send(id, ptr, len) {
+        const s = sockets.get(id);
+        if (s && s.readyState === 1) s.send(str(ptr, len));
+      },
+      zui_socket_close(id) {
+        sockets.get(id)?.close();
+        sockets.delete(id);
       },
       zui_root_background(argb) {
         const c = css(argb);
@@ -349,5 +375,12 @@ export async function start(wasmUrl, mount = document.body) {
     ex.zui_resize(innerWidth, innerHeight);
   });
   dark.addEventListener('change', () => ex.zui_dark(dark.matches ? 1 : 0));
+  // Messages from the page this one is embedded in.
+  addEventListener('message', (e) => {
+    if (e.source !== window.parent || window.parent === window) return;
+    let text;
+    try { text = typeof e.data === 'string' ? e.data : JSON.stringify(e.data); } catch { return; }
+    withBytes(encoder.encode(text), (p, n) => ex.zui_host_message(p, n));
+  });
   return instance;
 }

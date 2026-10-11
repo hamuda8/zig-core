@@ -585,6 +585,13 @@ public final class Zui {
         link = l;
     }
 
+    /** The image's colour matrix (CSS saturate/contrast/brightness, computed in Zig). */
+    static void imageFilter(int id, float[] m) {
+        ImageView v = (ImageView) views.get(id);
+        boolean identity = m[0] == 1 && m[6] == 1 && m[12] == 1 && m[1] == 0 && m[4] == 0;
+        v.setColorFilter(identity ? null : new android.graphics.ColorMatrixColorFilter(m));
+    }
+
     static void focus(int id) {
         View v = views.get(id);
         if (v == null) return;

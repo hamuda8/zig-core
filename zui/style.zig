@@ -99,8 +99,42 @@ pub const Style = struct {
     origin: ?[2]f32 = null,
     /// Hide what children draw outside this view.
     clip: bool = false,
+    /// Colour adjustment of an image (the map tiles' look), the same on every platform.
+    image_filter: ImageFilter = .{},
     /// Lay the children out left to right even in right-to-left languages (a map, a chart).
     no_mirror: bool = false,
+};
+
+/// CSS's saturate(), contrast() and brightness(), in that order. The web uses CSS itself;
+/// Android and iOS apply `matrix()`, the same arithmetic as one colour matrix.
+pub const ImageFilter = struct {
+    saturate: f32 = 1,
+    contrast: f32 = 1,
+    brightness: f32 = 1,
+
+    pub fn isIdentity(f: ImageFilter) bool {
+        return f.saturate == 1 and f.contrast == 1 and f.brightness == 1;
+    }
+
+    /// Rows R, G, B, A; columns R, G, B, A, offset (offset on a 0-1 scale).
+    pub fn matrix(f: ImageFilter) [20]f32 {
+        const s = f.saturate;
+        // saturate() (Filter Effects spec), then contrast (c·x + (1-c)/2), then brightness (b·x).
+        const sat = [3][3]f32{
+            .{ 0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s },
+            .{ 0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s },
+            .{ 0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s },
+        };
+        const k = f.brightness * f.contrast;
+        const offset = f.brightness * (0.5 - 0.5 * f.contrast);
+        var m: [20]f32 = @splat(0);
+        for (0..3) |r| {
+            for (0..3) |c| m[r * 5 + c] = sat[r][c] * k;
+            m[r * 5 + 4] = offset;
+        }
+        m[18] = 1; // alpha unchanged
+        return m;
+    }
 };
 
 pub const Transform = struct {

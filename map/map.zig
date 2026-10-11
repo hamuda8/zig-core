@@ -512,6 +512,10 @@ pub const Marker = struct {
     border_color: zui.Color = zui.Color.white,
     border_width: f32 = 2,
     outline: ?zui.Color = null,
+    /// A disc of this colour behind the icon (a tracked vehicle): the icon is drawn at
+    /// `icon_size` in its middle.
+    badge: ?zui.Color = null,
+    icon_size: f32 = 24,
     key: u64 = 0,
 };
 
@@ -532,6 +536,9 @@ pub fn Options(comptime Msg: type) type {
         markers: []const Marker = &.{},
         attribution: []const u8 = "© OpenStreetMap",
         background: zui.Color = zui.Color.hex("#e5e3df"),
+        /// The tiles' look: Maps-js's "Wufour Official MapLibre Adjustments"
+        /// (`filter: saturate(0.5) contrast(0.9) brightness(1.2)` on the map canvas).
+        tile_filter: zui.ImageFilter = .{ .saturate = 0.5, .contrast = 0.9, .brightness = 1.2 },
     };
 }
 
@@ -575,9 +582,9 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
     // Two coarser levels underneath: usually already loaded (they were on screen moments ago,
     // or cover a wide area with few tiles), so a new level appears over a picture, never gray.
     const level = tileLevel(c.zoom);
-    if (level >= 3) drawTiles(Msg, ui, c, side, area, level - 3, o.tile_url);
-    if (level >= 1) drawTiles(Msg, ui, c, side, area, level - 1, o.tile_url);
-    drawTiles(Msg, ui, c, side, area, level, o.tile_url);
+    if (level >= 3) drawTiles(Msg, ui, c, side, area, level - 3, o.tile_url, o.tile_filter);
+    if (level >= 1) drawTiles(Msg, ui, c, side, area, level - 1, o.tile_url, o.tile_filter);
+    drawTiles(Msg, ui, c, side, area, level, o.tile_url, o.tile_filter);
     drawRoutes(Msg, ui, c, side, area, o.routes);
     ui.end();
     ui.end();
@@ -607,7 +614,18 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
             }, .{ .key = k +% 1 });
             ui.end();
         }
-        if (m.image) |url| {
+        if (m.badge) |disc| {
+            var b = style;
+            b.background = disc;
+            b.radius = half;
+            b.border_width = 1;
+            b.border_color = zui.Color.hex("#0000001f");
+            b.align_items = .center;
+            b.justify = .center;
+            ui.begin(b, .{ .key = k });
+            if (m.icon) |ic| ui.icon(ic, m.icon_size, m.color, .{}, 0);
+            ui.end();
+        } else if (m.image) |url| {
             ui.image(url, style, k);
         } else if (m.icon) |ic| {
             if (m.outline) |ring| ui.iconOutlined(ic, m.size, m.color, ring, m.border_width, style, k) else ui.icon(ic, m.size, m.color, style, k);
@@ -650,7 +668,7 @@ fn visibleArea(half_w: f64, top: f64, bottom: f64, bearing: f64) [4]f64 {
 }
 
 /// The tiles of level `z` covering `area` of the layer, scaled to the camera's zoom.
-fn drawTiles(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, area: [4]f64, z: u5, url_template: []const u8) void {
+fn drawTiles(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, area: [4]f64, z: u5, url_template: []const u8, filter: zui.ImageFilter) void {
     const n: i64 = @as(i64, 1) << z;
     const k = std.math.pow(f64, 2, c.zoom - @as(f64, @floatFromInt(z))); // on-screen size of a tile pixel
     const center = project(c.center);
@@ -679,6 +697,7 @@ fn drawTiles(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, area: [
                 .inset = .{ .start = @floatCast(left), .top = @floatCast(top) },
                 .width = .{ .px = @floatCast(right - left) },
                 .height = .{ .px = @floatCast(bottom - top) },
+                .image_filter = filter,
             }, zui.key(@as(u64, z) << 58 | @as(u64, @bitCast(tx & 0x1fffffff)) << 29 | @as(u64, @intCast(ty))));
         }
     }

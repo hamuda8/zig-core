@@ -34,6 +34,7 @@ var methods: struct {
     speak: jni.jmethodID,
     set_link: jni.jmethodID,
     focus: jni.jmethodID,
+    image_filter: jni.jmethodID,
 } = undefined;
 
 fn bind(e: *jni.Env) void {
@@ -68,6 +69,7 @@ fn bind(e: *jni.Env) void {
         .{ "speak", "speak", "(Ljava/lang/String;Ljava/lang/String;)V" },
         .{ "set_link", "setLink", "(Ljava/lang/String;)V" },
         .{ "focus", "focus", "(I)V" },
+        .{ "image_filter", "imageFilter", "(I[F)V" },
     }) |m| @field(methods, m[0]) = f.GetStaticMethodID(e, class, m[1], m[2]);
 }
 
@@ -330,9 +332,25 @@ pub fn setLink(s: []const u8) void {
     defer env.functions.DeleteLocalRef(env, js);
     call(methods.set_link, &.{object(js)});
 }
+pub fn imageFilter(id: u32, f: zui.ImageFilter) void {
+    var m = f.matrix();
+    for ([_]usize{ 4, 9, 14 }) |i| m[i] *= 255;
+    const e = env.functions;
+    const arr = e.NewFloatArray(env, 20);
+    defer e.DeleteLocalRef(env, arr);
+    e.SetFloatArrayRegion(env, arr, 0, 20, &m);
+    call(methods.image_filter, &.{ int(id), object(arr) });
+}
 pub fn focus(id: u32) void {
     call(methods.focus, &.{int(id)});
 }
 pub fn requestFrame() void {
     call(methods.request_frame, &.{});
 }
+
+// Web-only for now: there is no embedding page, and WebSockets on the phones come with Reseal's
+// chat (a client written for each platform); until then a socket reports itself closed.
+pub fn post(_: []const u8) void {}
+pub fn openSocket(_: u32, _: []const u8) void {}
+pub fn sendSocket(_: u32, _: []const u8) void {}
+pub fn closeSocket(_: u32) void {}
