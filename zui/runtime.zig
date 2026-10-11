@@ -300,7 +300,9 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             App.view(&state, &ui);
             if (ui.failed) return;
 
-            const s = env.safe;
+            // Inside the safe area, unless the app draws under the system bars itself (a map does)
+            // and keeps its controls clear of them with `env.safe`.
+            const s: Insets = if (@hasDecl(App, "edge_to_edge") and App.edge_to_edge) .{} else env.safe;
             const root_frame: st.Rect = .{ .x = s.left, .y = s.top, .w = @max(0, env.width - s.left - s.right), .h = @max(0, env.height - s.top - s.bottom) };
             layout.Engine.run(tree, &H.measure, env.rtl, root_frame) catch return;
             rec.run(if (has_old) &trees[current] else null, tree, .{ .rtl = env.rtl, .pressed = pressed });

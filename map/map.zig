@@ -399,7 +399,7 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
 
     ui.text(o.attribution, .{
         .position = .absolute,
-        .inset = .{ .end = 4, .bottom = 2 },
+        .inset = .{ .end = 4, .bottom = ui.env.safe.bottom + 2 },
         .font_size = 10,
         .color = zui.Color.hex("#334155"),
         .background = zui.Color.hex("#ffffffb3"),

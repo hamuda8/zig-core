@@ -77,6 +77,9 @@ pub const AppOptions = struct {
     optimize: std.builtin.OptimizeMode,
 };
 
+/// The fixed Android shim (shells/android/java/com/wufour/zui). Listed so the APK rebuilds when one changes.
+const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java" };
+
 const android_abis = [_]struct { abi: []const u8, arch: std.Target.Cpu.Arch }{
     .{ .abi = "arm64-v8a", .arch = .aarch64 },
     .{ .abi = "x86_64", .arch = .x86_64 },
@@ -148,6 +151,9 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
             run.addFileArg(opts.android_manifest);
             run.addArg("--java");
             run.addDirectoryArg(core.path("shells/android/java"));
+            // The cache does not look inside a directory argument, so each source is also an input:
+            // without this, a Java-only change leaves the old APK in place.
+            for (android_java) |f| run.addFileInput(core.path(b.fmt("shells/android/java/com/wufour/zui/{s}", .{f})));
             const sysroot = b.pathJoin(&.{ sdk, "ndk", ndk_version, "toolchains", "llvm", "prebuilt", ndk_host, "sysroot" });
             for (android_abis) |a| {
                 const triple = b.fmt("{t}-linux-android", .{a.arch});

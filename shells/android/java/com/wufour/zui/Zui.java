@@ -307,7 +307,10 @@ public final class Zui {
         View v = views.get(id);
         v.setRotation(rotate);
         v.setRotationX(tilt);
-        if (perspective > 0) v.setCameraDistance(perspective * density);
+        // setCameraDistance is not in pixels: View divides it by densityDpi and the renderer's
+        // camera works in units of 72 px. So `perspective` dp is perspective * density px, times
+        // densityDpi / 72.
+        if (perspective > 0) v.setCameraDistance(perspective * density * (density * 160f) / 72f);
     }
 
     static void clip(int id, boolean on) {
