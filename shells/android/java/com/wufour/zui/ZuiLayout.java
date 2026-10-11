@@ -19,7 +19,6 @@ public final class ZuiLayout extends ViewGroup {
 
     public ZuiLayout(Context context) {
         super(context);
-        setClipChildren(false);
     }
 
     @Override
@@ -39,6 +38,8 @@ public final class ZuiLayout extends ViewGroup {
 
     @Override
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        // Each child gets exactly its zui frame. It is measured here again when needed, so a view
+        // added after this container was measured is never left at size 0.
         for (int i = 0; i < getChildCount(); i++) {
             View c = getChildAt(i);
             ViewGroup.LayoutParams lp = c.getLayoutParams();
@@ -47,14 +48,19 @@ public final class ZuiLayout extends ViewGroup {
                 x = ((Params) lp).x;
                 y = ((Params) lp).y;
             }
-            c.layout(x, y, x + c.getMeasuredWidth(), y + c.getMeasuredHeight());
+            int w = Math.max(0, lp.width), h = Math.max(0, lp.height);
+            if (c.getMeasuredWidth() != w || c.getMeasuredHeight() != h || c.isLayoutRequested()) {
+                c.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY));
+            }
+            c.layout(x, y, x + w, y + h);
         }
     }
 
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
-        if (isRoot) Zui.rootSized(w, h);
+        // Not during this layout pass: zui creates and moves views in response.
+        if (isRoot) post(() -> Zui.rootSized(w, h));
     }
 
     @Override

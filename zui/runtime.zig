@@ -239,6 +239,9 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             presses = ui.presses.items;
             changes = ui.changes.items;
 
+            // One layout pass for all of this frame's changes, on hosts that need to be told.
+            if (@hasDecl(H, "commit")) H.commit();
+
             const bg = if (ui.background) |c| c.argb() else 0;
             if (bg != background or !has_old) {
                 background = bg;

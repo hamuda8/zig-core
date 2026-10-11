@@ -67,7 +67,7 @@ public final class Zui {
         insetRight = right / density;
         insetBottom = bottom / density;
         insetLeft = left / density;
-        if (started) nativeInsets(insetTop, insetRight, insetBottom, insetLeft);
+        if (started) root.post(() -> nativeInsets(insetTop, insetRight, insetBottom, insetLeft));
     }
 
     static void darkChanged(boolean isDark) {
@@ -261,6 +261,12 @@ public final class Zui {
         p.width = Math.round(w * density);
         p.height = Math.round(h * density);
         c.setLayoutParams(p);
+    }
+
+    /** End of a zui frame: lay out everything that changed in one pass. */
+    static void commit() {
+        root.requestLayout();
+        root.invalidate();
     }
 
     static void rootBackground(int argb) {

@@ -20,6 +20,7 @@ var methods: struct {
     input: jni.jmethodID,
     content: jni.jmethodID,
     root_background: jni.jmethodID,
+    commit: jni.jmethodID,
     measure: jni.jmethodID,
 } = undefined;
 
@@ -41,6 +42,7 @@ fn bind(e: *jni.Env) void {
         .{ "input", "input", "(ILjava/lang/String;Ljava/lang/String;FIFZII)V" },
         .{ "content", "content", "(IFF)V" },
         .{ "root_background", "rootBackground", "(I)V" },
+        .{ "commit", "commit", "()V" },
         .{ "measure", "measure", "(Ljava/lang/String;FIFZIF)J" },
     }) |m| @field(methods, m[0]) = f.GetStaticMethodID(e, class, m[1], m[2]);
 }
@@ -119,6 +121,9 @@ pub fn input(id: u32, value: []const u8, placeholder: []const u8, f: zui.Font, c
 }
 pub fn content(id: u32, s: zui.Size) void {
     call(methods.content, &.{ int(id), float(s.w), float(s.h) });
+}
+pub fn commit() void {
+    call(methods.commit, &.{});
 }
 pub fn rootBackground(argb: u32) void {
     call(methods.root_background, &.{int(argb)});
