@@ -117,6 +117,8 @@ pub fn imageFilter(id: u32, f: zui.ImageFilter) void {
 pub fn focus(id: u32) void {
     js.zui_focus(id);
 }
+/// A web page cannot follow the position with the screen off.
+pub fn backgroundLocation(_: bool, _: []const u8, _: []const u8) void {}
 pub fn copy(text_: []const u8) void {
     js.zui_copy(text_.ptr, text_.len);
 }

@@ -119,6 +119,7 @@ pub fn Fx(comptime Msg: type) type {
             close_socket: *const fn (u32) void,
             copy: *const fn ([]const u8) void,
             open_url: *const fn ([]const u8, bool) void,
+            background_location: *const fn (bool, []const u8, []const u8) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -170,6 +171,14 @@ pub fn Fx(comptime Msg: type) type {
 
         pub fn closeSocket(fx: Self, socket: u32) void {
             fx.vt.close_socket(socket);
+        }
+
+        /// Keeps following the position with the screen off (a courier's shift), together with
+        /// watchLocation. Android shows an ongoing notification with `title` and `text` (the
+        /// app declares com.wufour.zui.ZuiLocationService in its manifest); iOS shows its blue
+        /// location indicator (the app lists "location" in UIBackgroundModes). The web cannot.
+        pub fn backgroundLocation(fx: Self, on: bool, title: []const u8, text: []const u8) void {
+            fx.vt.background_location(on, title, text);
         }
 
         /// Puts `text` on the clipboard.
@@ -413,7 +422,12 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .close_socket = fxCloseSocket,
             .copy = fxCopy,
             .open_url = fxOpenUrl,
+            .background_location = fxBackgroundLocation,
         };
+
+        fn fxBackgroundLocation(on: bool, title: []const u8, text: []const u8) void {
+            H.backgroundLocation(on, title, text);
+        }
 
         fn fxCopy(text: []const u8) void {
             H.copy(text);

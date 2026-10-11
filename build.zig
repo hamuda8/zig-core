@@ -96,7 +96,7 @@ pub const AppOptions = struct {
 };
 
 /// The fixed Android shim (shells/android/java/com/wufour/zui). Listed so the APK rebuilds when one changes.
-const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java" };
+const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java" };
 
 const android_abis = [_]struct { abi: []const u8, arch: std.Target.Cpu.Arch }{
     .{ .abi = "arm64-v8a", .arch = .aarch64 },

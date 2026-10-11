@@ -17,6 +17,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import android.Manifest;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -111,6 +112,9 @@ public final class Zui {
     static native void nativeLocation(double lat, double lng, float accuracy, float heading, float speed);
     static native void nativeLocationError(boolean denied);
     static native void nativeInput(int id, int kind);
+    /** kind: 1 open, 2 message (data), 3 closed. */
+    static native void nativeSocket(int id, int kind, String data);
+    static final java.util.HashMap<Integer, ZuiSocket> sockets = new java.util.HashMap<>();
 
     static final int INPUT_FOCUS = 1, INPUT_BLUR = 2, INPUT_SUBMIT = 3;
     /** The address the app was opened with (an App Link), or null. */
@@ -651,6 +655,37 @@ public final class Zui {
 
     static void storageRemove(String key, boolean secure) {
         prefs().edit().remove((secure ? "s:" : "p:") + key).apply();
+    }
+
+    /** The foreground service that keeps the process (and the location listener) alive. */
+    static void backgroundLocation(boolean on, String title, String text) {
+        Intent intent = new Intent(activity, ZuiLocationService.class);
+        if (!on) {
+            activity.stopService(intent);
+            return;
+        }
+        // Android 13+: the ongoing notification needs this permission.
+        if (Build.VERSION.SDK_INT >= 33 && activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 7002);
+        }
+        intent.putExtra("title", title).putExtra("text", text);
+        activity.startForegroundService(intent);
+    }
+
+    static void openSocket(int id, String url) {
+        ZuiSocket s = new ZuiSocket(id, url);
+        sockets.put(id, s);
+        s.start();
+    }
+
+    static void sendSocket(int id, String text) {
+        ZuiSocket s = sockets.get(id);
+        if (s != null) s.sendText(text);
+    }
+
+    static void closeSocket(int id) {
+        ZuiSocket s = sockets.remove(id);
+        if (s != null) s.close();
     }
 
     static void copy(String text) {

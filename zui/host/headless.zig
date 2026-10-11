@@ -149,6 +149,10 @@ pub fn openSocket(id: u32, url: []const u8) void {
     socket_url.appendSlice(gpa, url) catch {};
 }
 pub fn sendSocket(_: u32, _: []const u8) void {}
+pub var background_location = false;
+pub fn backgroundLocation(on: bool, _: []const u8, _: []const u8) void {
+    background_location = on;
+}
 pub fn copy(value: []const u8) void {
     clipboard.clearRetainingCapacity();
     clipboard.appendSlice(gpa, value) catch {};

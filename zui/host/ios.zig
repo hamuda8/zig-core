@@ -26,6 +26,7 @@ var rt: struct {
     fetch_done: *const fn (u32, u16, []const u8) void,
     timer_done: *const fn (u32) void,
     location: *const fn (zui.Location) void,
+    socket: *const fn (u32, zui.SocketEvent.Kind, []const u8) void,
 } = undefined;
 /// NSStringDrawingUsesLineFragmentOrigin
 const uses_line_fragment_origin: isize = 1;
@@ -298,7 +299,12 @@ pub fn exportEntry(comptime App: type) void {
         var started = false;
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
-            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent };
+            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent };
+            objc.defineClass("ZuiSocketDelegate", "NSObject", &.{"NSURLSessionWebSocketDelegate"}, &.{
+                .{ "URLSession:webSocketTask:didOpenWithProtocol:", @ptrCast(&socketOpened), "v@:@@@" },
+                .{ "URLSession:webSocketTask:didCloseWithCode:reason:", @ptrCast(&socketClosed), "v@:@@q@" },
+                .{ "URLSession:task:didCompleteWithError:", @ptrCast(&taskCompleted), "v@:@@@" },
+            });
             objc.defineClass("ZuiLocation", "NSObject", &.{"CLLocationManagerDelegate"}, &.{
                 .{ "locationManager:didUpdateLocations:", @ptrCast(&locationUpdated), "v@:@@" },
                 .{ "locationManager:didFailWithError:", @ptrCast(&locationFailed), "v@:@@" },
@@ -404,6 +410,9 @@ pub fn exportEntry(comptime App: type) void {
         }
         fn locationEvent(l: zui.Location) void {
             R.locationEvent(l);
+        }
+        fn socketEvent(i: u32, kind: zui.SocketEvent.Kind, data: []const u8) void {
+            R.socketEvent(i, kind, data);
         }
 
         fn wantsPointers(i: u32) bool {
@@ -878,12 +887,120 @@ test transformMatrix {
     try std.testing.expectApproxEqAbs(@as(f64, -0.001), transformMatrix(.{ .perspective = 1000 }).m[11], 1e-12);
 }
 
-// Web-only for now: there is no embedding page, and WebSockets on the phones come with Reseal's
-// chat (a client written for each platform); until then a socket reports itself closed.
+/// There is no embedding page on a phone.
 pub fn post(_: []const u8) void {}
-pub fn openSocket(_: u32, _: []const u8) void {}
-pub fn sendSocket(_: u32, _: []const u8) void {}
-pub fn closeSocket(_: u32) void {}
+
+/// Location updates go on with the app in the background (the app lists "location" in
+/// UIBackgroundModes); iOS shows its blue indicator. Title and text are Android's notification.
+pub fn backgroundLocation(on: bool, _: []const u8, _: []const u8) void {
+    if (location_manager == null) {
+        location_manager = objc.new("CLLocationManager");
+        location_delegate = objc.new("ZuiLocation");
+        objc.sendVoid1(location_manager, "setDelegate:", location_delegate);
+    }
+    objc.sendVoidBool(location_manager, "setAllowsBackgroundLocationUpdates:", on);
+    objc.sendVoidBool(location_manager, "setShowsBackgroundLocationIndicator:", on);
+    objc.sendVoidBool(location_manager, "setPausesLocationUpdatesAutomatically:", !on);
+}
+
+// ---- WebSockets: NSURLSessionWebSocketTask, its delegate on the main queue ----
+
+var socket_session: id = null;
+/// zui socket id → task (retained).
+var socket_tasks: std.AutoHashMapUnmanaged(u32, id) = .empty;
+
+fn socketIdOf(task: id) ?u32 {
+    var it = socket_tasks.iterator();
+    while (it.next()) |e| if (e.value_ptr.* == task) return e.key_ptr.*;
+    return null;
+}
+
+/// The handler of receiveMessageWithCompletionHandler: a block capturing the socket id.
+const ReceiveBlock = extern struct { header: objc.BlockHeader, socket: u32 };
+const receive_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(ReceiveBlock) };
+/// sendMessage:completionHandler: needs a handler; nothing to do in it.
+const SendBlock = extern struct { header: objc.BlockHeader };
+const send_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(SendBlock) };
+fn sendDone(_: *SendBlock, _: id) callconv(.c) void {}
+const send_block: SendBlock = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&sendDone), .descriptor = &send_descriptor } };
+
+pub fn openSocket(i: u32, url: []const u8) void {
+    if (socket_session == null) {
+        const config = objc.send(objc.class("NSURLSessionConfiguration"), "defaultSessionConfiguration");
+        const delegate = objc.new("ZuiSocketDelegate");
+        const make = objc.msgSend(*const fn (id, objc.SEL, id, id, id) callconv(.c) id);
+        socket_session = objc.send(make(objc.class("NSURLSession"), objc.sel("sessionWithConfiguration:delegate:delegateQueue:"), config, delegate, objc.send(objc.class("NSOperationQueue"), "mainQueue")), "retain");
+    }
+    const s = objc.nsString(url);
+    defer objc.release(s);
+    const u = objc.send1(objc.class("NSURL"), "URLWithString:", s);
+    if (u == null) return rt.socket(i, .closed, "");
+    const task = objc.send(objc.send1(socket_session, "webSocketTaskWithURL:", u), "retain");
+    socket_tasks.put(zui.allocator, i, task) catch return;
+    objc.sendVoid(task, "resume");
+    receiveNext(i, task);
+}
+
+fn receiveNext(i: u32, task: id) void {
+    const block = zui.allocator.create(ReceiveBlock) catch return;
+    block.* = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&received), .descriptor = &receive_descriptor }, .socket = i };
+    objc.msgSend(*const fn (id, objc.SEL, *ReceiveBlock) callconv(.c) void)(task, objc.sel("receiveMessageWithCompletionHandler:"), block);
+}
+
+/// On the main queue (the session's delegate queue).
+fn received(block: *ReceiveBlock, message: id, err: id) callconv(.c) void {
+    const i = block.socket;
+    zui.allocator.destroy(block);
+    const task = socket_tasks.get(i) orelse return;
+    if (err != null or message == null) return; // didClose / didComplete report the end
+    // NSURLSessionWebSocketMessageTypeString = 1; data messages are taken as UTF-8 text.
+    const string = if (objc.sendInt(message, "type") == 1) objc.send(message, "string") else null;
+    if (string != null) {
+        const p = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(string, objc.sel("UTF8String"));
+        rt.socket(i, .message, if (p) |z| std.mem.span(z) else "");
+    } else {
+        const data = objc.send(message, "data");
+        const n: usize = @intCast(objc.sendInt(data, "length"));
+        const bytes = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*]const u8)(data, objc.sel("bytes"));
+        rt.socket(i, .message, if (bytes) |b| b[0..n] else "");
+    }
+    if (socket_tasks.get(i) == task) receiveNext(i, task);
+}
+
+fn socketOpened(_: id, _: objc.SEL, _: id, task: id, _: id) callconv(.c) void {
+    if (socketIdOf(task)) |i| rt.socket(i, .open, "");
+}
+
+fn socketClosed(_: id, _: objc.SEL, _: id, task: id, _: isize, _: id) callconv(.c) void {
+    socketEnded(task);
+}
+
+fn taskCompleted(_: id, _: objc.SEL, _: id, task: id, _: id) callconv(.c) void {
+    socketEnded(task);
+}
+
+fn socketEnded(task: id) void {
+    const i = socketIdOf(task) orelse return;
+    _ = socket_tasks.remove(i);
+    objc.release(task);
+    rt.socket(i, .closed, "");
+}
+
+pub fn sendSocket(i: u32, message: []const u8) void {
+    const task = socket_tasks.get(i) orelse return;
+    const s = objc.nsString(message);
+    defer objc.release(s);
+    const msg = objc.send1(objc.send(objc.class("NSURLSessionWebSocketMessage"), "alloc"), "initWithString:", s);
+    defer objc.release(msg);
+    objc.msgSend(*const fn (id, objc.SEL, id, *const SendBlock) callconv(.c) void)(task, objc.sel("sendMessage:completionHandler:"), msg, &send_block);
+}
+
+pub fn closeSocket(i: u32) void {
+    const task = socket_tasks.get(i) orelse return;
+    _ = socket_tasks.remove(i);
+    objc.msgSend(*const fn (id, objc.SEL, isize, id) callconv(.c) void)(task, objc.sel("cancelWithCloseCode:reason:"), 1000, null);
+    objc.release(task);
+}
 
 pub fn copy(s: []const u8) void {
     const str = objc.nsString(s);

@@ -40,6 +40,10 @@ var methods: struct {
     storage_get: jni.jmethodID,
     storage_set: jni.jmethodID,
     storage_remove: jni.jmethodID,
+    open_socket: jni.jmethodID,
+    background_location: jni.jmethodID,
+    send_socket: jni.jmethodID,
+    close_socket: jni.jmethodID,
 } = undefined;
 
 fn bind(e: *jni.Env) void {
@@ -72,6 +76,10 @@ fn bind(e: *jni.Env) void {
         .{ "storage_get", "storageGet", "(Ljava/lang/String;Z)Ljava/lang/String;" },
         .{ "storage_set", "storageSet", "(Ljava/lang/String;Ljava/lang/String;Z)V" },
         .{ "storage_remove", "storageRemove", "(Ljava/lang/String;Z)V" },
+        .{ "open_socket", "openSocket", "(ILjava/lang/String;)V" },
+        .{ "background_location", "backgroundLocation", "(ZLjava/lang/String;Ljava/lang/String;)V" },
+        .{ "send_socket", "sendSocket", "(ILjava/lang/String;)V" },
+        .{ "close_socket", "closeSocket", "(I)V" },
         .{ "timer", "timer", "(II)V" },
         .{ "location", "location", "(Z)V" },
         .{ "speak", "speak", "(Ljava/lang/String;Ljava/lang/String;)V" },
@@ -173,6 +181,24 @@ pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
     return .{ .w = @bitCast(@as(u32, @truncate(bits >> 32))), .h = @bitCast(@as(u32, @truncate(bits))) };
 }
 
+/// A Java string of any length as UTF-8, in `buf` (3 bytes per UTF-16 unit is always enough).
+fn javaStringLong(s: jni.jstring, buf: []u8) []const u8 {
+    const f = env.functions;
+    const len: usize = @intCast(f.GetStringLength(env, s));
+    const units = zui.allocator.alloc(u16, len) catch return "";
+    defer zui.allocator.free(units);
+    f.GetStringRegion(env, s, 0, @intCast(len), units.ptr);
+    var out: usize = 0;
+    var it = std.unicode.Utf16LeIterator.init(units);
+    while (it.nextCodepoint() catch null) |cp| {
+        const k = std.unicode.utf8CodepointSequenceLength(cp) catch break;
+        if (out + k > buf.len) break;
+        _ = std.unicode.utf8Encode(cp, buf[out..][0..k]) catch break;
+        out += k;
+    }
+    return buf[0..out];
+}
+
 /// A Java string as UTF-8, in `buf` (cut at whole characters when it does not fit).
 fn javaString(s: jni.jstring, buf: []u8) []const u8 {
     const f = env.functions;
@@ -252,6 +278,17 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.locationEvent(if (denied != 0) .denied else .unavailable);
         }
+        fn socketEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint, data: jni.jstring) callconv(.c) void {
+            bind(e);
+            const k = std.enums.fromInt(zui.SocketEvent.Kind, @as(u8, @intCast(kind))) orelse return;
+            if (data == null) return R.socketEvent(@bitCast(id), k, "");
+            // Messages can be long: the whole text, not a fixed buffer.
+            const f = e.functions;
+            const units: usize = @intCast(f.GetStringLength(e, data));
+            const buf = zui.allocator.alloc(u8, units * 3 + 1) catch return;
+            defer zui.allocator.free(buf);
+            R.socketEvent(@bitCast(id), k, javaStringLong(data, buf));
+        }
         fn inputEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint) callconv(.c) void {
             bind(e);
             R.inputEvent(@bitCast(id), std.enums.fromInt(zui.InputEvent, @as(u8, @intCast(kind))) orelse return);
@@ -275,6 +312,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.locationFix, .{ .name = "Java_com_wufour_zui_Zui_nativeLocation" });
     @export(&Entry.locationError, .{ .name = "Java_com_wufour_zui_Zui_nativeLocationError" });
     @export(&Entry.inputEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeInput" });
+    @export(&Entry.socketEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeSocket" });
 }
 
 extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
@@ -395,9 +433,28 @@ pub fn requestFrame() void {
     call(methods.request_frame, &.{});
 }
 
-// Web-only for now: there is no embedding page, and WebSockets on the phones come with Reseal's
-// chat (a client written for each platform); until then a socket reports itself closed.
+/// There is no embedding page on a phone.
 pub fn post(_: []const u8) void {}
-pub fn openSocket(_: u32, _: []const u8) void {}
-pub fn sendSocket(_: u32, _: []const u8) void {}
-pub fn closeSocket(_: u32) void {}
+
+pub fn backgroundLocation(on: bool, title: []const u8, text_: []const u8) void {
+    const jt = newString(title);
+    defer env.functions.DeleteLocalRef(env, jt);
+    const jx = newString(text_);
+    defer env.functions.DeleteLocalRef(env, jx);
+    call(methods.background_location, &.{ boolean(on), object(jt), object(jx) });
+}
+
+/// WebSockets: ZuiSocket.java (RFC 6455 over the platform's sockets and TLS).
+pub fn openSocket(id: u32, url: []const u8) void {
+    const js = newString(url);
+    defer env.functions.DeleteLocalRef(env, js);
+    call(methods.open_socket, &.{ int(id), object(js) });
+}
+pub fn sendSocket(id: u32, message: []const u8) void {
+    const js = newString(message);
+    defer env.functions.DeleteLocalRef(env, js);
+    call(methods.send_socket, &.{ int(id), object(js) });
+}
+pub fn closeSocket(id: u32) void {
+    call(methods.close_socket, &.{int(id)});
+}
