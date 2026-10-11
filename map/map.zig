@@ -89,6 +89,12 @@ pub const View = struct {
 
     /// The map position under screen point (sx, sy), or null above the horizon.
     pub fn toMap(v: View, sx: f64, sy: f64) ?LatLng {
+        return unproject(v.toWorld(sx, sy) orelse return null);
+    }
+
+    /// Like toMap, in world pixels at zoom 0 and not clamped to the world: beyond the poles too.
+    /// Gestures work in these, since latitude clamps at ±85° and would make them drift.
+    pub fn toWorld(v: View, sx: f64, sy: f64) ?World {
         const c = v.camera;
         const x = sx - v.width / 2;
         const y = sy - v.height / 2;
@@ -104,7 +110,7 @@ pub const View = struct {
         const uy = lx * @sin(b) + ly * @cos(b);
         const cw = project(c.center);
         const k = c.scale();
-        return unproject(.{ .x = cw.x + ux / k, .y = cw.y + uy / k });
+        return .{ .x = cw.x + ux / k, .y = cw.y + uy / k };
     }
 };
 
@@ -127,7 +133,7 @@ pub const State = struct {
 
     const Finger = struct { id: u32, x: f64, y: f64 };
     const Pinch = struct {
-        anchor: LatLng,
+        anchor: World,
         distance: f64,
         angle: f64,
         mid_y: f64,
@@ -145,6 +151,13 @@ pub const State = struct {
     pub fn setViewport(s: *State, width: f64, height: f64) void {
         s.width = width;
         s.height = height;
+    }
+
+    /// Zoomed out no further than the world filling the screen at any bearing: past that there
+    /// is nothing to see, and a flick would fling the map across continents.
+    pub fn minZoom(s: *const State) f64 {
+        const diagonal = @sqrt(s.width * s.width + s.height * s.height);
+        return @max(0, std.math.log2(@max(1, diagonal) / tile_size));
     }
 
     fn count(s: *const State) usize {
@@ -183,15 +196,20 @@ pub const State = struct {
                     s.velocity = .{ (x - l[0]) / dt, (y - l[1]) / dt };
                     s.last_ms = p.time_ms;
                     // The map point under the finger stays under it (exact when tilted too).
-                    if (s.view().toMap(l[0], l[1])) |held| s.keepUnder(held, x, y);
+                    if (s.view().toWorld(l[0], l[1])) |held| s.keepUnder(held, x, y);
                     s.last = .{ x, y };
                 }
             },
             .up, .cancel => {
                 const was = s.count();
-                for (&s.fingers) |*f| if (f.*) |fp| if (fp.id == p.id) {
-                    f.* = null;
-                };
+                const known = for (&s.fingers) |*f| {
+                    if (f.*) |fp| if (fp.id == p.id) {
+                        f.* = null;
+                        break true;
+                    };
+                } else false;
+                // A third finger, which the gesture ignores, lifting.
+                if (!known) return false;
                 s.pinch = null;
                 if (was == 2) {
                     // Keep panning with the finger that is left.
@@ -201,7 +219,13 @@ pub const State = struct {
                     s.velocity = .{ 0, 0 };
                 } else {
                     s.last = null;
-                    const speed = @sqrt(s.velocity[0] * s.velocity[0] + s.velocity[1] * s.velocity[1]);
+                    var speed = @sqrt(s.velocity[0] * s.velocity[0] + s.velocity[1] * s.velocity[1]);
+                    // A flick glides at most a few screens.
+                    const max_speed = 3.0;
+                    if (speed > max_speed) {
+                        s.velocity = .{ s.velocity[0] / speed * max_speed, s.velocity[1] / speed * max_speed };
+                        speed = max_speed;
+                    }
                     if (p.kind == .up and speed > 0.1 and p.time_ms - s.last_ms < 80) {
                         s.gliding = true;
                         return true;
@@ -226,34 +250,29 @@ pub const State = struct {
     /// Moves the map with the finger by (dx, dy) screen points.
     pub fn panBy(s: *State, dx: f64, dy: f64) void {
         const v = s.view();
-        const from = v.toMap(v.width / 2, v.height / 2) orelse return;
-        const to = v.toMap(v.width / 2 - dx, v.height / 2 - dy) orelse return;
-        const fw = project(from);
-        const tw = project(to);
-        const cw = project(s.camera.center);
-        s.camera.center = unproject(.{ .x = cw.x + tw.x - fw.x, .y = std.math.clamp(cw.y + tw.y - fw.y, 0, tile_size) });
-        s.wrap();
+        const from = v.toWorld(v.width / 2, v.height / 2) orelse return;
+        const to = v.toWorld(v.width / 2 - dx, v.height / 2 - dy) orelse return;
+        s.moveCenter(to.x - from.x, to.y - from.y);
     }
 
     /// Zooms keeping the map point under (x, y) under it.
     pub fn zoomAround(s: *State, x: f64, y: f64, zoom: f64) void {
-        const anchor = s.view().toMap(x, y) orelse return;
-        s.camera.zoom = std.math.clamp(zoom, 1, max_zoom);
+        const anchor = s.view().toWorld(x, y) orelse return;
+        s.camera.zoom = std.math.clamp(zoom, s.minZoom(), max_zoom);
         s.keepUnder(anchor, x, y);
     }
 
     /// Moves the centre so that `anchor` is at screen (x, y).
-    fn keepUnder(s: *State, anchor: LatLng, x: f64, y: f64) void {
-        const now_at = s.view().toMap(x, y) orelse return;
-        const a = project(anchor);
-        const n = project(now_at);
-        const cw = project(s.camera.center);
-        s.camera.center = unproject(.{ .x = cw.x + a.x - n.x, .y = std.math.clamp(cw.y + a.y - n.y, 0, tile_size) });
-        s.wrap();
+    fn keepUnder(s: *State, anchor: World, x: f64, y: f64) void {
+        const now_at = s.view().toWorld(x, y) orelse return;
+        s.moveCenter(anchor.x - now_at.x, anchor.y - now_at.y);
     }
 
-    fn wrap(s: *State) void {
-        s.camera.center.lng = @mod(s.camera.center.lng + 180, 360) - 180;
+    /// Shifts the centre by world pixels, wrapping east-west and stopping at the poles.
+    fn moveCenter(s: *State, dx: f64, dy: f64) void {
+        if (!std.math.isFinite(dx) or !std.math.isFinite(dy)) return;
+        const cw = project(s.camera.center);
+        s.camera.center = unproject(.{ .x = @mod(cw.x + dx, tile_size), .y = std.math.clamp(cw.y + dy, 0, tile_size) });
     }
 
     fn fingerPair(s: *const State) ?[2]Finger {
@@ -267,7 +286,7 @@ pub const State = struct {
         const mx = (f[0].x + f[1].x) / 2;
         const my = (f[0].y + f[1].y) / 2;
         s.pinch = .{
-            .anchor = s.view().toMap(mx, my) orelse s.camera.center,
+            .anchor = s.view().toWorld(mx, my) orelse project(s.camera.center),
             .distance = @max(1, std.math.hypot(f[1].x - f[0].x, f[1].y - f[0].y)),
             .angle = std.math.atan2(f[1].y - f[0].y, f[1].x - f[0].x),
             .mid_y = my,
@@ -301,7 +320,7 @@ pub const State = struct {
             s.camera.pitch = std.math.clamp(p.pitch - (my - p.mid_y) * 0.4, 0, max_pitch);
             return;
         }
-        s.camera.zoom = std.math.clamp(p.zoom + std.math.log2(@max(1, dist) / p.distance), 1, max_zoom);
+        s.camera.zoom = std.math.clamp(p.zoom + std.math.log2(@max(1, dist) / p.distance), s.minZoom(), max_zoom);
         s.camera.bearing = @mod(p.bearing + std.math.radiansToDegrees(angleDiff(angle, p.angle)), 360);
         s.keepUnder(p.anchor, mx, my);
     }
@@ -368,7 +387,12 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
         .tilt = @floatCast(c.pitch),
         .perspective = @floatCast(v.perspective()),
     }, .{ .key = zui.key("layer") });
-    drawTiles(Msg, ui, c, side, o.tile_url);
+    // Two coarser levels underneath: usually already loaded (they were on screen moments ago,
+    // or cover a wide area with few tiles), so a new level appears over a picture, never gray.
+    const level = tileLevel(c.zoom);
+    if (level >= 3) drawTiles(Msg, ui, c, side, level - 3, o.tile_url);
+    if (level >= 1) drawTiles(Msg, ui, c, side, level - 1, o.tile_url);
+    drawTiles(Msg, ui, c, side, level, o.tile_url);
     drawRoutes(Msg, ui, c, side, o.routes);
     ui.end();
 
@@ -407,9 +431,12 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
     });
 }
 
-/// Tiles covering the layer, at the zoom level below the camera's, scaled to fit.
-fn drawTiles(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, url_template: []const u8) void {
-    const z: u5 = @intFromFloat(@min(@floor(c.zoom), @as(f64, max_tile_zoom)));
+fn tileLevel(zoom: f64) u5 {
+    return @intFromFloat(std.math.clamp(@floor(zoom), 0, @as(f64, max_tile_zoom)));
+}
+
+/// The tiles of level `z` covering the layer, scaled to the camera's zoom.
+fn drawTiles(comptime Msg: type, ui: *zui.Ui(Msg), c: Camera, side: f64, z: u5, url_template: []const u8) void {
     const n: i64 = @as(i64, 1) << z;
     const k = std.math.pow(f64, 2, c.zoom - @as(f64, @floatFromInt(z))); // on-screen size of a tile pixel
     const center = project(c.center);
@@ -519,6 +546,35 @@ test "pinch zoom keeps the point between the fingers in place" {
     const now = s.view().toScreen(held).?;
     try testing.expectApproxEqAbs(@as(f64, 100), now[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f64, 200), now[1], 1e-6);
+}
+
+test "fast pinching far out and back in does not drift" {
+    var s: State = .{ .camera = .{ .center = .{ .lat = 33.51, .lng = 36.28 }, .zoom = 6, .pitch = 50 } };
+    s.setViewport(411, 914);
+    var t: i64 = 0;
+    for (0..40) |_| {
+        // In and out around a point above the centre, down to zoom 1 where the poles show.
+        _ = s.handle(.{ .kind = .down, .id = 0, .x = 10, .y = 300, .time_ms = t });
+        _ = s.handle(.{ .kind = .down, .id = 1, .x = 401, .y = 300, .time_ms = t });
+        var d: f32 = 391;
+        while (d > 0.02) : (d /= 1.5) {
+            t += 8;
+            _ = s.handle(.{ .kind = .move, .id = 0, .x = 205.5 - d / 2, .y = 300, .time_ms = t });
+            _ = s.handle(.{ .kind = .move, .id = 1, .x = 205.5 + d / 2, .y = 300, .time_ms = t });
+        }
+        while (d < 391) : (d *= 1.5) {
+            t += 8;
+            _ = s.handle(.{ .kind = .move, .id = 0, .x = 205.5 - d / 2, .y = 300, .time_ms = t });
+            _ = s.handle(.{ .kind = .move, .id = 1, .x = 205.5 + d / 2, .y = 300, .time_ms = t });
+        }
+        _ = s.handle(.{ .kind = .up, .id = 0, .x = 10, .y = 300, .time_ms = t });
+        _ = s.handle(.{ .kind = .up, .id = 1, .x = 401, .y = 300, .time_ms = t });
+    }
+    const v = s.view();
+    const under = v.toMap(205.5, 300).?;
+    const start = (View{ .camera = .{ .center = .{ .lat = 33.51, .lng = 36.28 }, .zoom = s.camera.zoom, .pitch = 50 }, .width = 411, .height = 914 }).toMap(205.5, 300).?;
+    try testing.expectApproxEqAbs(start.lat, under.lat, 0.05);
+    try testing.expectApproxEqAbs(start.lng, under.lng, 0.05);
 }
 
 test "dragging moves the map with the finger" {

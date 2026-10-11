@@ -10,8 +10,12 @@ import android.widget.ImageView;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -46,14 +50,27 @@ public final class Zui {
     static final int POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4;
 
     /** Images: decoded bitmaps in memory (1/8 of the heap), downloads on four threads. The HTTP
-     *  cache installed by the activity keeps them on disk across launches. */
+     *  cache installed by the activity keeps them on disk across launches.
+     *
+     *  Downloads run newest first, and one that no view wants any more by the time a thread is
+     *  free is dropped: zooming quickly through a map asks for many tiles that are gone a moment
+     *  later, and they must not delay the ones on screen. */
     static final LruCache<String, Bitmap> bitmaps = new LruCache<String, Bitmap>((int) Math.min(Integer.MAX_VALUE, Runtime.getRuntime().maxMemory() / 8)) {
         @Override
         protected int sizeOf(String key, Bitmap b) {
             return b.getByteCount();
         }
     };
-    static final ExecutorService loader = Executors.newFixedThreadPool(4);
+    static final ThreadPoolExecutor loader = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, new LinkedBlockingDeque<Runnable>() {
+        @Override
+        public boolean offer(Runnable r) {
+            return offerFirst(r);
+        }
+    });
+    /** How many image views want each URL (changed on the UI thread, read by the loader). */
+    static final ConcurrentHashMap<String, Integer> wanted = new ConcurrentHashMap<>();
+    /** Image views waiting for a download, by URL (UI thread only). */
+    static final HashMap<String, ArrayList<ImageView>> waiting = new HashMap<>();
     static boolean frameRequested;
     static final int PRESS_IN = 1, PRESS_OUT = 2, PRESS = 3;
 
@@ -166,6 +183,7 @@ public final class Zui {
         if (v == null) return;
         if (v.getParent() instanceof ViewGroup) ((ViewGroup) v.getParent()).removeView(v);
         views.remove(id);
+        if (v instanceof ImageView && v.getTag() instanceof String) unwant((String) v.getTag());
     }
 
     /** The view children of `id` go into: scroll views hold a content box. */
@@ -353,9 +371,14 @@ public final class Zui {
         });
     }
 
+    static void unwant(String url) {
+        wanted.computeIfPresent(url, (k, n) -> n > 1 ? n - 1 : null);
+    }
+
     static void image(int id, String url) {
         ImageView v = (ImageView) views.get(id);
         if (url.equals(v.getTag())) return;
+        if (v.getTag() instanceof String) unwant((String) v.getTag());
         v.setTag(url);
         Bitmap cached = bitmaps.get(url);
         if (cached != null) {
@@ -363,8 +386,21 @@ public final class Zui {
             return;
         }
         v.setImageDrawable(null);
+        wanted.merge(url, 1, Integer::sum);
+        ArrayList<ImageView> list = waiting.get(url);
+        if (list != null) {
+            list.add(v); // already downloading
+            return;
+        }
+        list = new ArrayList<>();
+        list.add(v);
+        waiting.put(url, list);
         loader.execute(() -> {
             Bitmap b = null;
+            if (!wanted.containsKey(url)) {
+                activity.runOnUiThread(() -> waiting.remove(url));
+                return;
+            }
             try {
                 HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
                 c.setConnectTimeout(10000);
@@ -378,11 +414,14 @@ public final class Zui {
             } catch (Exception ignored) {
                 // Missing tiles stay blank; the map keeps working.
             }
-            if (b == null) return;
             final Bitmap bitmap = b;
-            bitmaps.put(url, bitmap);
+            if (bitmap != null) bitmaps.put(url, bitmap);
             activity.runOnUiThread(() -> {
-                if (url.equals(v.getTag())) v.setImageBitmap(bitmap);
+                ArrayList<ImageView> got = waiting.remove(url);
+                if (bitmap == null || got == null) return;
+                for (ImageView w : got) {
+                    if (url.equals(w.getTag())) w.setImageBitmap(bitmap);
+                }
             });
         });
     }

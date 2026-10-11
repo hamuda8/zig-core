@@ -199,6 +199,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         var presses: []const Binding(Msg) = &.{};
         var pointers: []const Binding(*const fn (Pointer) Msg) = &.{};
         var frame_msg: ?Msg = null;
+        /// The state changed since the screen was last drawn (coalesced pointer moves).
+        var dirty = false;
         var changes: []const Binding(*const fn ([]const u8) Msg) = &.{};
 
         /// `lang` is the system language ("ar", "en-US", ...); the app starts in it when it has a
@@ -265,16 +267,26 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         pub fn pointerEvent(id: u32, p: Pointer) void {
             if (!started) return;
             for (pointers) |b| {
-                if (b.node == id) return dispatch(b.value(p));
+                if (b.node != id) continue;
+                // Moves arrive faster than the screen refreshes (and once per finger): the state
+                // follows every one, the screen once per display frame.
+                if (p.kind != .move) return dispatch(b.value(p));
+                apply(b.value(p));
+                if (!dirty) {
+                    dirty = true;
+                    H.requestFrame();
+                }
+                return;
             }
         }
 
         /// The host's display frame, after `requestFrame`.
         pub fn frame() void {
             if (!started) return;
-            const m = frame_msg orelse return;
+            const m = frame_msg;
             frame_msg = null;
-            dispatch(m);
+            if (m) |msg| apply(msg) else if (!dirty) return;
+            render();
         }
 
         pub fn textEvent(id: u32, text: []const u8) void {
@@ -286,11 +298,17 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
 
         pub fn dispatch(msg: Msg) void {
             // `update(state, msg)`, or `update(state, msg, env)` when it needs the screen size.
-            if (@typeInfo(@TypeOf(App.update)).@"fn".param_types.len == 3) App.update(&state, msg, env) else App.update(&state, msg);
+            apply(msg);
             render();
         }
 
+        /// `update` without drawing.
+        fn apply(msg: Msg) void {
+            if (@typeInfo(@TypeOf(App.update)).@"fn".param_types.len == 3) App.update(&state, msg, env) else App.update(&state, msg);
+        }
+
         fn render() void {
+            dirty = false;
             const next: u1 = if (has_old) current ^ 1 else current;
             const tree = &trees[next];
             tree.reset();
