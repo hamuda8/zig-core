@@ -22,6 +22,12 @@ var methods: struct {
     root_background: jni.jmethodID,
     commit: jni.jmethodID,
     measure: jni.jmethodID,
+    transform: jni.jmethodID,
+    clip: jni.jmethodID,
+    pointer: jni.jmethodID,
+    image: jni.jmethodID,
+    path: jni.jmethodID,
+    request_frame: jni.jmethodID,
 } = undefined;
 
 fn bind(e: *jni.Env) void {
@@ -44,6 +50,12 @@ fn bind(e: *jni.Env) void {
         .{ "root_background", "rootBackground", "(I)V" },
         .{ "commit", "commit", "()V" },
         .{ "measure", "measure", "(Ljava/lang/String;FIFZIF)J" },
+        .{ "transform", "transform", "(IFFF)V" },
+        .{ "clip", "clip", "(IZ)V" },
+        .{ "pointer", "pointer", "(IZ)V" },
+        .{ "image", "image", "(ILjava/lang/String;)V" },
+        .{ "path", "path", "(I[FIFFFZ)V" },
+        .{ "request_frame", "requestFrame", "()V" },
     }) |m| @field(methods, m[0]) = f.GetStaticMethodID(e, class, m[1], m[2]);
 }
 
@@ -179,6 +191,14 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.event(@intCast(id), std.enums.fromInt(zui.Event, kind) orelse return);
         }
+        fn pointerEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint, pid: jni.jint, x: f32, y: f32, time_ms: jni.jlong) callconv(.c) void {
+            bind(e);
+            R.pointerEvent(@intCast(id), .{ .kind = std.enums.fromInt(zui.Pointer.Kind, @as(u8, @intCast(kind))) orelse return, .id = @bitCast(pid), .x = x, .y = y, .time_ms = time_ms });
+        }
+        fn frame(e: *jni.Env, _: jni.jclass) callconv(.c) void {
+            bind(e);
+            R.frame();
+        }
         fn textEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, s: jni.jstring) callconv(.c) void {
             bind(e);
             var buf: [4096]u8 = undefined;
@@ -191,6 +211,8 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.dark, .{ .name = "Java_com_wufour_zui_Zui_nativeDark" });
     @export(&Entry.event, .{ .name = "Java_com_wufour_zui_Zui_nativeEvent" });
     @export(&Entry.textEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeText" });
+    @export(&Entry.pointerEvent, .{ .name = "Java_com_wufour_zui_Zui_nativePointer" });
+    @export(&Entry.frame, .{ .name = "Java_com_wufour_zui_Zui_nativeFrame" });
 }
 
 extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
@@ -204,10 +226,28 @@ pub fn log(line: []const u8) void {
     _ = __android_log_write(6, "zui", buf[0..n :0]);
 }
 
-// Map primitives (transform, clip, pointer, image, path, frames): implemented in the next commit.
-pub fn transform(_: u32, _: zui.Transform) void {}
-pub fn clip(_: u32, _: bool) void {}
-pub fn pointer(_: u32, _: bool) void {}
-pub fn image(_: u32, _: []const u8) void {}
-pub fn path(_: u32, _: zui.Path) void {}
-pub fn requestFrame() void {}
+pub fn transform(id: u32, t: zui.Transform) void {
+    call(methods.transform, &.{ int(id), float(t.rotate), float(t.tilt), float(t.perspective) });
+}
+pub fn clip(id: u32, on: bool) void {
+    call(methods.clip, &.{ int(id), boolean(on) });
+}
+pub fn pointer(id: u32, on: bool) void {
+    call(methods.pointer, &.{ int(id), boolean(on) });
+}
+pub fn image(id: u32, url: []const u8) void {
+    const js = newString(url);
+    defer env.functions.DeleteLocalRef(env, js);
+    call(methods.image, &.{ int(id), object(js) });
+}
+pub fn path(id: u32, p: zui.Path) void {
+    const f = env.functions;
+    const n: jni.jsize = @intCast(p.points.len * 2);
+    const arr = f.NewFloatArray(env, n);
+    defer f.DeleteLocalRef(env, arr);
+    f.SetFloatArrayRegion(env, arr, 0, n, @ptrCast(p.points.ptr));
+    call(methods.path, &.{ int(id), object(arr), int(p.color), float(p.width), float(p.dash[0]), float(p.dash[1]), boolean(p.round) });
+}
+pub fn requestFrame() void {
+    call(methods.request_frame, &.{});
+}

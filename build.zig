@@ -72,6 +72,8 @@ pub const AppOptions = struct {
     /// The iOS bundle's Info.plist (bundle id, name, scene manifest naming ZuiSceneDelegate).
     ios_info_plist: std.Build.LazyPath,
     android_min_sdk: u32 = 26,
+    /// Build-time settings for the client, imported as "app_config" (server address, ...).
+    client_config: ?*std.Build.Module = null,
     optimize: std.builtin.OptimizeMode,
 };
 
@@ -101,12 +103,14 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
     server_core = core;
     const client = struct {
         fn module(bb: *std.Build, o: AppOptions, z: *std.Build.Module, target: std.Build.ResolvedTarget) *std.Build.Module {
-            return bb.createModule(.{
+            const m = bb.createModule(.{
                 .root_source_file = o.client,
                 .target = target,
                 .optimize = o.optimize,
                 .imports = &.{ .{ .name = "zui", .module = z }, .{ .name = "map", .module = server_core.module("map") } },
             });
+            if (o.client_config) |cfg| m.addImport("app_config", cfg);
+            return m;
         }
     }.module;
 
@@ -216,7 +220,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 \\set -e
                 \\mkdir -p "$3"
                 \\xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 \
-                \\  "$1" -framework UIKit -framework Foundation -lobjc -o "$3/App"
+                \\  "$1" -framework UIKit -framework QuartzCore -framework CoreGraphics -framework Foundation -lobjc -o "$3/App"
                 \\cp "$2" "$3/Info.plist"
                 ,
                 "bundle",

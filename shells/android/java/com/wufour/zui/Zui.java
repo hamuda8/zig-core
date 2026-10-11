@@ -1,6 +1,17 @@
 package com.wufour.zui;
 
 import android.app.Activity;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.util.LruCache;
+import android.view.Choreographer;
+import android.view.ViewOutlineProvider;
+import android.widget.ImageView;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -31,7 +42,19 @@ import android.widget.TextView;
  * are logical points (dp); they become pixels here.
  */
 public final class Zui {
-    static final int VIEW = 0, TEXT = 1, INPUT = 2, SCROLL = 3, SCROLL_X = 4;
+    static final int VIEW = 0, TEXT = 1, INPUT = 2, SCROLL = 3, SCROLL_X = 4, IMAGE = 5, PATH = 6;
+    static final int POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4;
+
+    /** Images: decoded bitmaps in memory (1/8 of the heap), downloads on four threads. The HTTP
+     *  cache installed by the activity keeps them on disk across launches. */
+    static final LruCache<String, Bitmap> bitmaps = new LruCache<String, Bitmap>((int) Math.min(Integer.MAX_VALUE, Runtime.getRuntime().maxMemory() / 8)) {
+        @Override
+        protected int sizeOf(String key, Bitmap b) {
+            return b.getByteCount();
+        }
+    };
+    static final ExecutorService loader = Executors.newFixedThreadPool(4);
+    static boolean frameRequested;
     static final int PRESS_IN = 1, PRESS_OUT = 2, PRESS = 3;
 
     static Activity activity;
@@ -50,6 +73,8 @@ public final class Zui {
     static native void nativeDark(boolean dark);
     static native void nativeEvent(int id, int kind);
     static native void nativeText(int id, String text);
+    static native void nativePointer(int id, int kind, int pointer, float x, float y, long timeMs);
+    static native void nativeFrame();
 
     // ---- From the activity ----
 
@@ -120,6 +145,15 @@ public final class Zui {
                 v = s;
                 break;
             }
+            case IMAGE: {
+                ImageView i = new ImageView(activity);
+                i.setScaleType(ImageView.ScaleType.FIT_XY);
+                v = i;
+                break;
+            }
+            case PATH:
+                v = new ZuiPath(activity);
+                break;
             default:
                 v = new ZuiLayout(activity);
         }
@@ -267,6 +301,100 @@ public final class Zui {
     static void commit() {
         root.requestLayout();
         root.invalidate();
+    }
+
+    static void transform(int id, float rotate, float tilt, float perspective) {
+        View v = views.get(id);
+        v.setRotation(rotate);
+        v.setRotationX(tilt);
+        if (perspective > 0) v.setCameraDistance(perspective * density);
+    }
+
+    static void clip(int id, boolean on) {
+        View v = views.get(id);
+        v.setOutlineProvider(ViewOutlineProvider.BOUNDS);
+        v.setClipToOutline(on);
+    }
+
+    static void pointer(int id, boolean on) {
+        View v = views.get(id);
+        if (!on) {
+            v.setOnTouchListener(null);
+            return;
+        }
+        v.setOnTouchListener((view, e) -> {
+            long t = e.getEventTime();
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_POINTER_DOWN: {
+                    int i = e.getActionIndex();
+                    nativePointer(id, POINTER_DOWN, e.getPointerId(i), e.getX(i) / density, e.getY(i) / density, t);
+                    break;
+                }
+                case MotionEvent.ACTION_MOVE:
+                    for (int i = 0; i < e.getPointerCount(); i++)
+                        nativePointer(id, POINTER_MOVE, e.getPointerId(i), e.getX(i) / density, e.getY(i) / density, t);
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_POINTER_UP: {
+                    int i = e.getActionIndex();
+                    nativePointer(id, POINTER_UP, e.getPointerId(i), e.getX(i) / density, e.getY(i) / density, t);
+                    break;
+                }
+                case MotionEvent.ACTION_CANCEL:
+                    for (int i = 0; i < e.getPointerCount(); i++)
+                        nativePointer(id, POINTER_CANCEL, e.getPointerId(i), e.getX(i) / density, e.getY(i) / density, t);
+                    break;
+            }
+            return true;
+        });
+    }
+
+    static void image(int id, String url) {
+        ImageView v = (ImageView) views.get(id);
+        if (url.equals(v.getTag())) return;
+        v.setTag(url);
+        Bitmap cached = bitmaps.get(url);
+        if (cached != null) {
+            v.setImageBitmap(cached);
+            return;
+        }
+        v.setImageDrawable(null);
+        loader.execute(() -> {
+            Bitmap b = null;
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(15000);
+                c.setUseCaches(true);
+                try (InputStream in = c.getInputStream()) {
+                    b = BitmapFactory.decodeStream(in);
+                } finally {
+                    c.disconnect();
+                }
+            } catch (Exception ignored) {
+                // Missing tiles stay blank; the map keeps working.
+            }
+            if (b == null) return;
+            final Bitmap bitmap = b;
+            bitmaps.put(url, bitmap);
+            activity.runOnUiThread(() -> {
+                if (url.equals(v.getTag())) v.setImageBitmap(bitmap);
+            });
+        });
+    }
+
+    static void path(int id, float[] points, int color, float width, float dashOn, float dashOff, boolean round) {
+        ((ZuiPath) views.get(id)).set(points, color, width, dashOn, dashOff, round, density);
+    }
+
+    static void requestFrame() {
+        if (frameRequested) return;
+        frameRequested = true;
+        Choreographer.getInstance().postFrameCallback(time -> {
+            frameRequested = false;
+            nativeFrame();
+        });
     }
 
     static void rootBackground(int argb) {

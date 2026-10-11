@@ -4,7 +4,9 @@ import android.app.Activity;
 import android.content.res.Configuration;
 import android.graphics.Insets;
 import android.os.Build;
+import android.net.http.HttpResponseCache;
 import android.os.Bundle;
+import java.io.File;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -21,6 +23,11 @@ public final class ZuiActivity extends Activity {
         Zui.activity = this;
         Zui.density = getResources().getDisplayMetrics().density;
         Zui.dark = isDark(getResources().getConfiguration());
+        // Disk cache for downloaded images (map tiles), kept across launches.
+        try {
+            HttpResponseCache.install(new File(getCacheDir(), "http"), 100L * 1024 * 1024);
+        } catch (Exception ignored) {
+        }
 
         // Draw behind the system bars; zui keeps content out of them with the insets.
         Window w = getWindow();

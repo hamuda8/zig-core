@@ -20,6 +20,11 @@ extern "objc" fn objc_msgSendSuper() void;
 pub extern "objc" fn class_getSuperclass(cls: Class) Class;
 pub extern "objc" fn object_getClass(obj: id) Class;
 
+/// Adds a class method (to the metaclass) of a class defined with `defineClass`, e.g. +layerClass.
+pub fn addClassMethod(class_name: [*:0]const u8, name: [*:0]const u8, imp: *const anyopaque, types: [*:0]const u8) void {
+    _ = class_addMethod(object_getClass(@ptrCast(objc_getClass(class_name))), sel(name), imp, types);
+}
+
 /// CGFloat is a double on every 64-bit Apple platform.
 pub const CGFloat = f64;
 pub const CGPoint = extern struct { x: CGFloat, y: CGFloat };
