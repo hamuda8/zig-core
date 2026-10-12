@@ -180,6 +180,16 @@ pub fn closePeer(_: u32) void {
     peer_open = 0;
 }
 pub fn video(_: u32, _: zui.Video) void {}
+pub var ringing: std.ArrayList(u8) = .empty;
+pub fn ringCall(c: zui.Call) void {
+    ringing.clearRetainingCapacity();
+    ringing.appendSlice(gpa, c.id) catch {};
+}
+pub fn startCall(_: zui.Call) void {}
+pub fn callConnected(_: []const u8) void {}
+pub fn endCall(_: []const u8) void {
+    ringing.clearRetainingCapacity();
+}
 pub var notified: std.ArrayList(u8) = .empty;
 pub fn notify(n: zui.Notification) void {
     notified.clearRetainingCapacity();

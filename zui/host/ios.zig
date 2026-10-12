@@ -27,6 +27,7 @@ var rt: struct {
     timer_done: *const fn (u32) void,
     location: *const fn (zui.Location) void,
     socket: *const fn (u32, zui.SocketEvent.Kind, []const u8) void,
+    call: *const fn (zui.CallEvent.Kind, []const u8) void,
 } = undefined;
 /// NSStringDrawingUsesLineFragmentOrigin
 const uses_line_fragment_origin: isize = 1;
@@ -300,9 +301,15 @@ pub fn exportEntry(comptime App: type) void {
         var started = false;
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
-            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent };
+            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent };
             objc.defineClass("ZuiNotifications", "NSObject", &.{"UNUserNotificationCenterDelegate"}, &.{
                 .{ "userNotificationCenter:willPresentNotification:withCompletionHandler:", @ptrCast(&willPresent), "v@:@@@?" },
+            });
+            objc.defineClass("ZuiCalls", "NSObject", &.{"CXProviderDelegate"}, &.{
+                .{ "providerDidReset:", @ptrCast(&providerReset), "v@:@" },
+                .{ "provider:performAnswerCallAction:", @ptrCast(&performAnswer), "v@:@@" },
+                .{ "provider:performEndCallAction:", @ptrCast(&performEnd), "v@:@@" },
+                .{ "provider:performStartCallAction:", @ptrCast(&performStart), "v@:@@" },
             });
             objc.defineClass("ZuiSocketDelegate", "NSObject", &.{"NSURLSessionWebSocketDelegate"}, &.{
                 .{ "URLSession:webSocketTask:didOpenWithProtocol:", @ptrCast(&socketOpened), "v@:@@@" },
@@ -417,6 +424,9 @@ pub fn exportEntry(comptime App: type) void {
         }
         fn socketEvent(i: u32, kind: zui.SocketEvent.Kind, data: []const u8) void {
             R.socketEvent(i, kind, data);
+        }
+        fn callEvent(kind: zui.CallEvent.Kind, call_id: []const u8) void {
+            R.callEvent(kind, call_id);
         }
 
         fn wantsPointers(i: u32) bool {
@@ -1141,7 +1151,7 @@ pub fn notify(n: zui.Notification) void {
     const ident = objc.nsString(std.fmt.bufPrint(&idbuf, "zui-{d}", .{n.id}) catch "zui");
     defer objc.release(ident);
     const make = objc.msgSend(*const fn (id, objc.SEL, id, id, id) callconv(.c) id);
-    const request = make(objc.class("UNNotificationRequest"), objc.sel("requestWithIdentifier:note_content:trigger:"), ident, note_content, null);
+    const request = make(objc.class("UNNotificationRequest"), objc.sel("requestWithIdentifier:content:trigger:"), ident, note_content, null);
     objc.msgSend(*const fn (id, objc.SEL, id, ?*anyopaque) callconv(.c) void)(center, objc.sel("addNotificationRequest:withCompletionHandler:"), request, null);
 }
 
@@ -1153,4 +1163,159 @@ pub fn cancelNotify(i: u32) void {
     const arr = objc.send1(objc.class("NSArray"), "arrayWithObject:", ident);
     objc.sendVoid1(center, "removeDeliveredNotificationsWithIdentifiers:", arr);
     objc.sendVoid1(center, "removePendingNotificationRequestsWithIdentifiers:", arr);
+}
+
+// ---- Calls: CallKit ----
+// The system's call screen (also on the lock screen), Bluetooth and CarPlay. Each call is an
+// NSUUID for CallKit and the app's own id for zui.
+
+const CallEntry = struct { uuid: id, app_id: []u8, incoming: bool, answered: bool = false };
+var calls: std.ArrayList(CallEntry) = .empty;
+var call_provider: id = null;
+var call_controller: id = null;
+
+const CallDoneBlock = extern struct { header: objc.BlockHeader };
+const call_done_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(CallDoneBlock) };
+fn callDone(_: *CallDoneBlock, _: id) callconv(.c) void {}
+const call_done_block: CallDoneBlock = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&callDone), .descriptor = &call_done_descriptor } };
+
+fn provider() id {
+    if (call_provider != null) return call_provider;
+    const config = objc.new("CXProviderConfiguration");
+    defer objc.release(config);
+    objc.sendVoidBool(config, "setSupportsVideo:", true);
+    objc.sendVoidInt(config, "setMaximumCallGroups:", 1);
+    objc.sendVoidInt(config, "setMaximumCallsPerCallGroup:", 1);
+    objc.sendVoidBool(config, "setIncludesCallsInRecents:", false);
+    // CXHandleTypeGeneric
+    const generic = objc.msgSend(*const fn (id, objc.SEL, isize) callconv(.c) id)(objc.class("NSNumber"), objc.sel("numberWithInteger:"), 1);
+    objc.sendVoid1(config, "setSupportedHandleTypes:", objc.send1(objc.class("NSSet"), "setWithObject:", generic));
+    call_provider = objc.send1(objc.send(objc.class("CXProvider"), "alloc"), "initWithConfiguration:", config);
+    objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(call_provider, objc.sel("setDelegate:queue:"), objc.new("ZuiCalls"), null);
+    call_controller = objc.new("CXCallController");
+    return call_provider;
+}
+
+fn callIndexByUuid(uuid: id) ?usize {
+    for (calls.items, 0..) |c, i| {
+        if (objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) bool)(c.uuid, objc.sel("isEqual:"), uuid)) return i;
+    }
+    return null;
+}
+
+fn callIndexById(app_id: []const u8) ?usize {
+    for (calls.items, 0..) |c, i| if (std.mem.eql(u8, c.app_id, app_id)) return i;
+    return null;
+}
+
+fn addCall(app_id: []const u8, incoming: bool) ?id {
+    if (callIndexById(app_id) != null) return null;
+    const owned = zui.allocator.dupe(u8, app_id) catch return null;
+    const uuid = objc.new("NSUUID");
+    calls.append(zui.allocator, .{ .uuid = uuid, .app_id = owned, .incoming = incoming }) catch {
+        zui.allocator.free(owned);
+        objc.release(uuid);
+        return null;
+    };
+    return uuid;
+}
+
+fn removeCall(i: usize) void {
+    freeCall(calls.orderedRemove(i));
+}
+
+fn freeCall(c: CallEntry) void {
+    objc.release(c.uuid);
+    zui.allocator.free(c.app_id);
+}
+
+/// Taken out before the app hears of it, since the app may end calls while handling the event.
+fn emitAndRemove(i: usize, kind: zui.CallEvent.Kind) void {
+    const c = calls.orderedRemove(i);
+    defer freeCall(c);
+    rt.call(kind, c.app_id);
+}
+
+fn callHandle(app_id: []const u8) id {
+    const value = objc.nsString(app_id);
+    defer objc.release(value);
+    const init = objc.msgSend(*const fn (id, objc.SEL, isize, id) callconv(.c) id);
+    return init(objc.send(objc.class("CXHandle"), "alloc"), objc.sel("initWithType:value:"), 1, value);
+}
+
+pub fn ringCall(c: zui.Call) void {
+    const p = provider();
+    const uuid = addCall(c.id, true) orelse return;
+    const update = objc.new("CXCallUpdate");
+    defer objc.release(update);
+    const handle = callHandle(c.id);
+    defer objc.release(handle);
+    const name = objc.nsString(c.name);
+    defer objc.release(name);
+    objc.sendVoid1(update, "setRemoteHandle:", handle);
+    objc.sendVoid1(update, "setLocalizedCallerName:", name);
+    objc.sendVoidBool(update, "setHasVideo:", c.video);
+    const report = objc.msgSend(*const fn (id, objc.SEL, id, id, *const CallDoneBlock) callconv(.c) void);
+    report(p, objc.sel("reportNewIncomingCallWithUUID:update:completion:"), uuid, update, &call_done_block);
+}
+
+pub fn startCall(c: zui.Call) void {
+    _ = provider();
+    const uuid = addCall(c.id, false) orelse return;
+    const handle = callHandle(c.id);
+    defer objc.release(handle);
+    const action = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) id)(objc.send(objc.class("CXStartCallAction"), "alloc"), objc.sel("initWithCallUUID:handle:"), uuid, handle);
+    defer objc.release(action);
+    objc.sendVoidBool(action, "setVideo:", c.video);
+    const name = objc.nsString(c.name);
+    defer objc.release(name);
+    objc.sendVoid1(action, "setContactIdentifier:", name);
+    const transaction = objc.send1(objc.send(objc.class("CXTransaction"), "alloc"), "initWithAction:", action);
+    defer objc.release(transaction);
+    objc.msgSend(*const fn (id, objc.SEL, id, *const CallDoneBlock) callconv(.c) void)(call_controller, objc.sel("requestTransaction:completion:"), transaction, &call_done_block);
+}
+
+pub fn callConnected(app_id: []const u8) void {
+    const i = callIndexById(app_id) orelse return;
+    if (calls.items[i].incoming) return;
+    objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(provider(), objc.sel("reportOutgoingCallWithUUID:connectedAtDate:"), calls.items[i].uuid, null);
+}
+
+/// The app ended it: CallKit is told, no event comes back.
+pub fn endCall(app_id: []const u8) void {
+    const i = callIndexById(app_id) orelse return;
+    // CXCallEndedReasonRemoteEnded
+    objc.msgSend(*const fn (id, objc.SEL, id, id, isize) callconv(.c) void)(provider(), objc.sel("reportCallWithUUID:endedAtDate:reason:"), calls.items[i].uuid, null, 2);
+    removeCall(i);
+}
+
+fn providerReset(_: id, _: objc.SEL, _: id) callconv(.c) void {
+    while (calls.items.len > 0) {
+        emitAndRemove(calls.items.len - 1, .end);
+    }
+}
+
+fn performAnswer(_: id, _: objc.SEL, _: id, action: id) callconv(.c) void {
+    if (callIndexByUuid(objc.send(action, "callUUID"))) |i| {
+        calls.items[i].answered = true;
+        // A copy: the app may end the call while handling the event.
+        var buf: [256]u8 = undefined;
+        const n = @min(buf.len, calls.items[i].app_id.len);
+        @memcpy(buf[0..n], calls.items[i].app_id[0..n]);
+        rt.call(.answer, buf[0..n]);
+    }
+    objc.sendVoid(action, "fulfill");
+}
+
+fn performEnd(_: id, _: objc.SEL, _: id, action: id) callconv(.c) void {
+    if (callIndexByUuid(objc.send(action, "callUUID"))) |i| {
+        const c = calls.items[i];
+        emitAndRemove(i, if (c.incoming and !c.answered) .decline else .end);
+    }
+    objc.sendVoid(action, "fulfill");
+}
+
+fn performStart(_: id, _: objc.SEL, p: id, action: id) callconv(.c) void {
+    objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(p, objc.sel("reportOutgoingCallWithUUID:startedConnectingAtDate:"), objc.send(action, "callUUID"), null);
+    objc.sendVoid(action, "fulfill");
 }

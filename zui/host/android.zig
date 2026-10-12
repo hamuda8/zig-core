@@ -43,6 +43,10 @@ var methods: struct {
     open_socket: jni.jmethodID,
     background_location: jni.jmethodID,
     widget_update: jni.jmethodID,
+    ring_call: jni.jmethodID,
+    start_call: jni.jmethodID,
+    call_connected: jni.jmethodID,
+    end_call: jni.jmethodID,
     notify: jni.jmethodID,
     cancel_notify: jni.jmethodID,
     send_socket: jni.jmethodID,
@@ -82,6 +86,10 @@ fn bind(e: *jni.Env) void {
         .{ "open_socket", "openSocket", "(ILjava/lang/String;)V" },
         .{ "background_location", "backgroundLocation", "(ZLjava/lang/String;Ljava/lang/String;)V" },
         .{ "widget_update", "widgetUpdate", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V" },
+        .{ "ring_call", "ringCall", "(Ljava/lang/String;Ljava/lang/String;Z)V" },
+        .{ "start_call", "startCall", "(Ljava/lang/String;Ljava/lang/String;Z)V" },
+        .{ "call_connected", "callConnected", "(Ljava/lang/String;)V" },
+        .{ "end_call", "endCall", "(Ljava/lang/String;)V" },
         .{ "notify", "notify", "(ILjava/lang/String;Ljava/lang/String;Z)V" },
         .{ "cancel_notify", "cancelNotify", "(I)V" },
         .{ "send_socket", "sendSocket", "(ILjava/lang/String;)V" },
@@ -295,6 +303,11 @@ pub fn exportEntry(comptime App: type) void {
             defer zui.allocator.free(buf);
             R.socketEvent(@bitCast(id), k, javaStringLong(data, buf));
         }
+        fn callEvent(e: *jni.Env, _: jni.jclass, kind: jni.jint, id: jni.jstring) callconv(.c) void {
+            bind(e);
+            var buf: [512]u8 = undefined;
+            R.callEvent(std.enums.fromInt(zui.CallEvent.Kind, @as(u8, @intCast(kind))) orelse return, javaString(id, &buf));
+        }
         fn inputEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint) callconv(.c) void {
             bind(e);
             R.inputEvent(@bitCast(id), std.enums.fromInt(zui.InputEvent, @as(u8, @intCast(kind))) orelse return);
@@ -319,6 +332,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.locationError, .{ .name = "Java_com_wufour_zui_Zui_nativeLocationError" });
     @export(&Entry.inputEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeInput" });
     @export(&Entry.socketEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeSocket" });
+    @export(&Entry.callEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeCall" });
 }
 
 extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
@@ -451,6 +465,29 @@ pub fn notify(n: zui.Notification) void {
 }
 pub fn cancelNotify(id: u32) void {
     call(methods.cancel_notify, &.{int(id)});
+}
+pub fn ringCall(c: zui.Call) void {
+    callWith(methods.ring_call, c);
+}
+pub fn startCall(c: zui.Call) void {
+    callWith(methods.start_call, c);
+}
+fn callWith(m: jni.jmethodID, c: zui.Call) void {
+    const ji = newString(c.id);
+    defer env.functions.DeleteLocalRef(env, ji);
+    const jn = newString(c.name);
+    defer env.functions.DeleteLocalRef(env, jn);
+    call(m, &.{ object(ji), object(jn), boolean(c.video) });
+}
+pub fn callConnected(id: []const u8) void {
+    const ji = newString(id);
+    defer env.functions.DeleteLocalRef(env, ji);
+    call(methods.call_connected, &.{object(ji)});
+}
+pub fn endCall(id: []const u8) void {
+    const ji = newString(id);
+    defer env.functions.DeleteLocalRef(env, ji);
+    call(methods.end_call, &.{object(ji)});
 }
 pub fn widgetUpdate(title: []const u8, l1: []const u8, l2: []const u8, l3: []const u8) void {
     const f = env.functions;

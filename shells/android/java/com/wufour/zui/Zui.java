@@ -114,6 +114,18 @@ public final class Zui {
     static native void nativeInput(int id, int kind);
     /** kind: 1 open, 2 message (data), 3 closed. */
     static native void nativeSocket(int id, int kind, String data);
+    /** kind: 1 answer, 2 decline, 3 end. */
+    static native void nativeCall(int kind, String id);
+    /** Call events from before the app's Zig side started (answering opened the app). */
+    static final java.util.ArrayList<Object[]> pendingCalls = new java.util.ArrayList<>();
+
+    /** From the call screen (any thread, maybe before the app started). */
+    static void callEvent(int kind, String id) {
+        main.post(() -> {
+            if (started) nativeCall(kind, id);
+            else pendingCalls.add(new Object[] {kind, id});
+        });
+    }
     static final java.util.HashMap<Integer, ZuiSocket> sockets = new java.util.HashMap<>();
 
     static final int INPUT_FOCUS = 1, INPUT_BLUR = 2, INPUT_SUBMIT = 3;
@@ -129,6 +141,8 @@ public final class Zui {
         if (!started) {
             started = true;
             nativeStart(w / density, h / density, dark, insetTop, insetRight, insetBottom, insetLeft, java.util.Locale.getDefault().toLanguageTag(), link);
+            for (Object[] e : pendingCalls) nativeCall((Integer) e[0], (String) e[1]);
+            pendingCalls.clear();
         } else {
             nativeResize(w / density, h / density);
         }
@@ -710,6 +724,22 @@ public final class Zui {
 
     static void cancelNotify(int id) {
         activity.getSystemService(android.app.NotificationManager.class).cancel(id);
+    }
+
+    static void ringCall(String id, String name, boolean video) {
+        ZuiCallService.ring(activity, id, name, video);
+    }
+
+    static void startCall(String id, String name, boolean video) {
+        ZuiCallService.outgoing(activity, id, name, video);
+    }
+
+    static void callConnected(String id) {
+        ZuiCallService.connected(id);
+    }
+
+    static void endCall(String id) {
+        ZuiCallService.end(activity, id);
     }
 
     static void widgetUpdate(String title, String l1, String l2, String l3) {

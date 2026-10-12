@@ -156,6 +156,29 @@ pub const PeerEvent = struct {
     pub const Kind = enum(u8) { signal = 1, state = 2, track = 3 };
 };
 
+/// A call the phone itself shows: the ringing screen over the lock screen, and the call in
+/// Bluetooth, the car and the system's "in call" state. Android: a self-managed ConnectionService
+/// and a full-screen call notification (the app declares com.wufour.zui.ZuiCallService and
+/// ZuiCallReceiver in its manifest); iOS: CallKit. The web has no such screen: the app draws its own.
+pub const Call = struct {
+    /// The app's id for the call; events carry it back.
+    id: []const u8,
+    /// Who is calling, or being called.
+    name: []const u8,
+    video: bool = false,
+};
+
+/// What the user did on the system's call screen. The app receives these through
+/// `pub fn callEvent(e: zui.CallEvent) ?Msg`, also after being opened by answering a call it was
+/// not running for. `id` is only valid during the call.
+pub const CallEvent = struct {
+    kind: Kind,
+    id: []const u8,
+
+    /// `.end`: hung up from outside the app (Bluetooth, the car, the notification).
+    pub const Kind = enum(u8) { answer = 1, decline = 2, end = 3 };
+};
+
 /// What `update` may ask of the platform. Each result arrives later as a message.
 pub fn Fx(comptime Msg: type) type {
     return struct {
@@ -187,6 +210,10 @@ pub fn Fx(comptime Msg: type) type {
             peer_signal: *const fn (u32, []const u8) void,
             peer_stream: *const fn (u32, u32) void,
             close_peer: *const fn (u32) void,
+            ring_call: *const fn (Call) void,
+            start_call: *const fn (Call) void,
+            call_connected: *const fn ([]const u8) void,
+            end_call: *const fn ([]const u8) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -296,6 +323,26 @@ pub fn Fx(comptime Msg: type) type {
 
         pub fn closePeer(fx: Self, peer: u32) void {
             fx.vt.close_peer(peer);
+        }
+
+        /// An incoming call: the phone rings and shows its call screen, even when locked.
+        pub fn ringCall(fx: Self, c: Call) void {
+            fx.vt.ring_call(c);
+        }
+
+        /// An outgoing call, so the system knows the phone is in a call (audio, Bluetooth).
+        pub fn startCall(fx: Self, c: Call) void {
+            fx.vt.start_call(c);
+        }
+
+        /// The other side is connected (the call's timer starts).
+        pub fn callConnected(fx: Self, id: []const u8) void {
+            fx.vt.call_connected(id);
+        }
+
+        /// Stops ringing / ends the call on the system's side.
+        pub fn endCall(fx: Self, id: []const u8) void {
+            fx.vt.end_call(id);
         }
 
         /// Puts `text` on the clipboard.
@@ -558,7 +605,30 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .peer_signal = fxPeerSignal,
             .peer_stream = fxPeerStream,
             .close_peer = fxClosePeer,
+            .ring_call = fxRingCall,
+            .start_call = fxStartCall,
+            .call_connected = fxCallConnected,
+            .end_call = fxEndCall,
         };
+
+        // The system's call screens; a host without them (the web) leaves it to the app.
+        const has_system_calls = @hasDecl(H, "ringCall");
+
+        fn fxRingCall(c: Call) void {
+            if (has_system_calls) H.ringCall(c);
+        }
+
+        fn fxStartCall(c: Call) void {
+            if (has_system_calls) H.startCall(c);
+        }
+
+        fn fxCallConnected(id: []const u8) void {
+            if (has_system_calls) H.callConnected(id);
+        }
+
+        fn fxEndCall(id: []const u8) void {
+            if (has_system_calls) H.endCall(id);
+        }
 
         // Calls. A host without them (until reseal-rtc lands on the phones) answers "unsupported".
         const has_calls = @hasDecl(H, "openMedia");
@@ -831,6 +901,11 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         pub fn peerEvent(id: u32, kind: PeerEvent.Kind, data: []const u8, stream: u32) void {
             const on = peers.get(id) orelse return;
             if (started) dispatch(on(.{ .kind = kind, .peer = id, .data = data, .stream = stream }));
+        }
+
+        pub fn callEvent(kind: CallEvent.Kind, id: []const u8) void {
+            if (!started or !@hasDecl(App, "callEvent")) return;
+            if (App.callEvent(.{ .kind = kind, .id = id })) |m| dispatch(m);
         }
 
         /// A message from the embedding page; the app turns it into a Msg with

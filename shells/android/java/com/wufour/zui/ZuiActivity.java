@@ -25,6 +25,7 @@ public final class ZuiActivity extends Activity {
         Zui.dark = isDark(getResources().getConfiguration());
         if (getIntent() != null && getIntent().getData() != null) Zui.link = getIntent().getDataString();
         showOverLockScreen(getIntent());
+        ZuiCallService.fromIntent(this, getIntent());
         // Disk cache for downloaded images (map tiles), kept across launches.
         try {
             HttpResponseCache.install(new File(getCacheDir(), "http"), 100L * 1024 * 1024);
@@ -71,6 +72,7 @@ public final class ZuiActivity extends Activity {
     protected void onNewIntent(android.content.Intent intent) {
         super.onNewIntent(intent);
         showOverLockScreen(intent);
+        ZuiCallService.fromIntent(this, intent);
     }
 
     @Override
