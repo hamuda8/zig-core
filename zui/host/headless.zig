@@ -154,6 +154,32 @@ pub fn widgetUpdate(title: []const u8, _: []const u8, _: []const u8, _: []const 
     widget_title.clearRetainingCapacity();
     widget_title.appendSlice(gpa, title) catch {};
 }
+/// Calls: what the app asked for, for tests (a test answers with R.mediaEvent / R.peerEvent).
+pub var media_open: u32 = 0;
+pub var peer_open: u32 = 0;
+pub var peer_polite = false;
+pub var signals: std.ArrayList(u8) = .empty;
+pub fn openMedia(id: u32, _: zui.Media) void {
+    media_open = id;
+}
+pub fn mediaEnable(_: u32, _: bool, _: bool) void {}
+pub fn switchCamera(_: u32) void {}
+pub fn closeMedia(_: u32) void {
+    media_open = 0;
+}
+pub fn openPeer(id: u32, p: zui.Peer) void {
+    peer_open = id;
+    peer_polite = p.polite;
+}
+pub fn peerSignal(_: u32, json: []const u8) void {
+    signals.appendSlice(gpa, json) catch {};
+    signals.append(gpa, 10) catch {};
+}
+pub fn peerStream(_: u32, _: u32) void {}
+pub fn closePeer(_: u32) void {
+    peer_open = 0;
+}
+pub fn video(_: u32, _: zui.Video) void {}
 pub var notified: std.ArrayList(u8) = .empty;
 pub fn notify(n: zui.Notification) void {
     notified.clearRetainingCapacity();
@@ -400,4 +426,60 @@ test "the loop: press, type, re-render" {
 
 pub fn log(line: []const u8) void {
     std.debug.print("{s}\n", .{line});
+}
+
+const Caller = struct {
+    pub const Msg = union(enum) { call, media: zui.MediaEvent, peer: zui.PeerEvent };
+    pub const State = struct { stream: u32 = 0, peer: u32 = 0, remote: u32 = 0, state: [16]u8 = undefined, state_len: usize = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    fn onMedia(e: zui.MediaEvent) Msg {
+        return .{ .media = e };
+    }
+    fn onPeer(e: zui.PeerEvent) Msg {
+        return .{ .peer = e };
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .call => s.stream = fx.openMedia(.{ .video = true }, onMedia),
+            .media => |e| if (e.kind == .ready) {
+                s.peer = fx.openPeer(.{ .polite = true, .stream = e.stream }, onPeer);
+            },
+            .peer => |e| switch (e.kind) {
+                .signal => fx.peerSignal(s.peer, e.data), // echoes back, for the test
+                .state => {
+                    s.state_len = @min(e.data.len, s.state.len);
+                    @memcpy(s.state[0..s.state_len], e.data[0..s.state_len]);
+                },
+                .track => s.remote = e.stream,
+            },
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{ .on_press = .call });
+        ui.text("Call", .{});
+        if (s.remote != 0) ui.video(s.remote, .{}, .{ .width = .{ .px = 100 }, .height = .{ .px = 100 } }, 0);
+        ui.text(s.state[0..s.state_len], .{});
+        ui.end();
+    }
+};
+
+test "a call: media, a peer, its signals, state and the other side's video" {
+    const D = Driver(Caller);
+    D.start(200, 400);
+    defer D.reset();
+    defer signals.clearRetainingCapacity();
+    try D.press("Call");
+    try std.testing.expect(media_open != 0);
+    D.R.mediaEvent(media_open, .ready, "");
+    try std.testing.expect(peer_open != 0 and peer_polite);
+    D.R.peerEvent(peer_open, .signal, "{\"candidate\":{}}", 0);
+    try std.testing.expectEqualStrings("{\"candidate\":{}}\n", signals.items);
+    D.R.peerEvent(peer_open, .state, "connected", 0);
+    try std.testing.expect(D.findText("connected") != 0);
+    D.R.peerEvent(peer_open, .track, "", 0x80000000);
+    var videos: usize = 0;
+    for (views.values()) |v| videos += @intFromBool(v.kind == .video);
+    try std.testing.expectEqual(@as(usize, 1), videos);
 }

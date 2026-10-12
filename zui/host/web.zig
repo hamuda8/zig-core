@@ -39,6 +39,15 @@ const js = struct {
     extern "zui" fn zui_socket_send(id: u32, ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_socket_close(id: u32) void;
     extern "zui" fn zui_request_frame() void;
+    extern "zui" fn zui_media_open(id: u32, audio: u32, video: u32, screen: u32, back: u32) void;
+    extern "zui" fn zui_media_enable(id: u32, audio: u32, video: u32) void;
+    extern "zui" fn zui_media_switch(id: u32) void;
+    extern "zui" fn zui_media_close(id: u32) void;
+    extern "zui" fn zui_peer_open(id: u32, ice: [*]const u8, ice_len: usize, polite: u32, stream: u32) void;
+    extern "zui" fn zui_peer_signal(id: u32, ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_peer_stream(id: u32, stream: u32) void;
+    extern "zui" fn zui_peer_close(id: u32) void;
+    extern "zui" fn zui_video(id: u32, stream: u32, mirror: u32, cover: u32) void;
     extern "zui" fn zui_measure(ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, max_width: f32, out: *[2]f32) void;
 };
 
@@ -147,6 +156,33 @@ pub fn sendSocket(id: u32, message: []const u8) void {
 pub fn closeSocket(id: u32) void {
     js.zui_socket_close(id);
 }
+pub fn openMedia(id: u32, m: zui.Media) void {
+    js.zui_media_open(id, @intFromBool(m.audio), @intFromBool(m.video), @intFromBool(m.screen), @intFromBool(m.back_camera));
+}
+pub fn mediaEnable(id: u32, audio: bool, video_: bool) void {
+    js.zui_media_enable(id, @intFromBool(audio), @intFromBool(video_));
+}
+pub fn switchCamera(id: u32) void {
+    js.zui_media_switch(id);
+}
+pub fn closeMedia(id: u32) void {
+    js.zui_media_close(id);
+}
+pub fn openPeer(id: u32, p: zui.Peer) void {
+    js.zui_peer_open(id, p.ice_servers.ptr, p.ice_servers.len, @intFromBool(p.polite), p.stream);
+}
+pub fn peerSignal(id: u32, json: []const u8) void {
+    js.zui_peer_signal(id, json.ptr, json.len);
+}
+pub fn peerStream(id: u32, stream: u32) void {
+    js.zui_peer_stream(id, stream);
+}
+pub fn closePeer(id: u32) void {
+    js.zui_peer_close(id);
+}
+pub fn video(id: u32, v: zui.Video) void {
+    js.zui_video(id, v.stream, @intFromBool(v.mirror), @intFromBool(v.cover));
+}
 pub fn requestFrame() void {
     js.zui_request_frame();
 }
@@ -209,6 +245,12 @@ pub fn exportEntry(comptime App: type) void {
         fn socketEvent(id: u32, kind: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
             R.socketEvent(id, std.enums.fromInt(zui.SocketEvent.Kind, kind) orelse return, ptr[0..len]);
         }
+        fn mediaEvent(id: u32, kind: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.mediaEvent(id, std.enums.fromInt(zui.MediaEvent.Kind, kind) orelse return, ptr[0..len]);
+        }
+        fn peerEvent(id: u32, kind: u32, ptr: [*]const u8, len: usize, stream: u32) callconv(.c) void {
+            R.peerEvent(id, std.enums.fromInt(zui.PeerEvent.Kind, kind) orelse return, ptr[0..len], stream);
+        }
         fn hostMessage(ptr: [*]const u8, len: usize) callconv(.c) void {
             R.hostMessage(ptr[0..len]);
         }
@@ -238,6 +280,8 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.inputEvent, .{ .name = "zui_input_event" });
     @export(&Entry.socketEvent, .{ .name = "zui_socket_event" });
     @export(&Entry.hostMessage, .{ .name = "zui_host_message" });
+    @export(&Entry.mediaEvent, .{ .name = "zui_media_event" });
+    @export(&Entry.peerEvent, .{ .name = "zui_peer_event" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });
     @export(&Entry.free, .{ .name = "zui_free" });
 }

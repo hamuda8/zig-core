@@ -110,6 +110,52 @@ pub const SocketEvent = struct {
     pub const Kind = enum(u8) { open = 1, message = 2, closed = 3 };
 };
 
+/// Microphone and camera (or the screen) for a call, opened with `fx.openMedia`.
+pub const Media = struct {
+    audio: bool = true,
+    video: bool = false,
+    /// The screen instead of the camera (desktop web only).
+    screen: bool = false,
+    /// The rear camera instead of the front one.
+    back_camera: bool = false,
+};
+
+pub const MediaEvent = struct {
+    kind: Kind,
+    /// The stream (as `openMedia` returned it); show it with `ui.video`.
+    stream: u32,
+    /// `.failed`: "denied", "unavailable" or "unsupported".
+    data: []const u8 = "",
+
+    /// `.ended`: the user stopped sharing the screen, or the camera went away.
+    pub const Kind = enum(u8) { ready = 1, failed = 2, ended = 3 };
+};
+
+/// A call connection to one other device, opened with `fx.openPeer`. Both sides open one and pass
+/// each other's `.signal` messages through the app's own server; offers, answers, glare
+/// ("perfect negotiation") and ICE restarts are handled inside.
+pub const Peer = struct {
+    /// ICE servers in RTCPeerConnection's JSON form: [{"urls":[...],"username":"","credential":""}].
+    ice_servers: []const u8 = "[]",
+    /// When both sides offer at once, the polite one gives way. Exactly one side is polite.
+    polite: bool,
+    /// The local stream to send (from `openMedia`), or 0 to only receive.
+    stream: u32 = 0,
+};
+
+pub const PeerEvent = struct {
+    kind: Kind,
+    peer: u32,
+    /// `.signal`: JSON for the other side's `fx.peerSignal` ({"description":{...}} or
+    /// {"candidate":{...}}). `.state`: "connecting", "connected", "disconnected", "failed" or
+    /// "closed". Only valid during `update`.
+    data: []const u8 = "",
+    /// `.track`: the other side's stream, for `ui.video` (its sound plays by itself).
+    stream: u32 = 0,
+
+    pub const Kind = enum(u8) { signal = 1, state = 2, track = 3 };
+};
+
 /// What `update` may ask of the platform. Each result arrives later as a message.
 pub fn Fx(comptime Msg: type) type {
     return struct {
@@ -133,6 +179,14 @@ pub fn Fx(comptime Msg: type) type {
             background_location: *const fn (bool, []const u8, []const u8) void,
             notify: *const fn (Notification) void,
             cancel_notify: *const fn (u32) void,
+            open_media: *const fn (Media, *const fn (MediaEvent) Msg) u32,
+            media_enable: *const fn (u32, bool, bool) void,
+            switch_camera: *const fn (u32) void,
+            close_media: *const fn (u32) void,
+            open_peer: *const fn (Peer, *const fn (PeerEvent) Msg) u32,
+            peer_signal: *const fn (u32, []const u8) void,
+            peer_stream: *const fn (u32, u32) void,
+            close_peer: *const fn (u32) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -201,6 +255,47 @@ pub fn Fx(comptime Msg: type) type {
 
         pub fn cancelNotify(fx: Self, id: u32) void {
             fx.vt.cancel_notify(id);
+        }
+
+        /// Asks for the microphone and camera (or the screen); `.ready` arrives once they are on.
+        /// Returns the stream's id.
+        pub fn openMedia(fx: Self, m: Media, on: *const fn (MediaEvent) Msg) u32 {
+            return fx.vt.open_media(m, on);
+        }
+
+        /// Mutes or unmutes the stream's sound and picture (the other side sees silence/black).
+        pub fn mediaEnable(fx: Self, stream: u32, audio: bool, video: bool) void {
+            fx.vt.media_enable(stream, audio, video);
+        }
+
+        /// Front camera to back camera and back, also on every connection sending this stream.
+        pub fn switchCamera(fx: Self, stream: u32) void {
+            fx.vt.switch_camera(stream);
+        }
+
+        /// Turns the microphone and camera off.
+        pub fn closeMedia(fx: Self, stream: u32) void {
+            fx.vt.close_media(stream);
+        }
+
+        /// Starts a call connection; its signals, state and the other side's stream arrive
+        /// through `on`. Returns its id.
+        pub fn openPeer(fx: Self, p: Peer, on: *const fn (PeerEvent) Msg) u32 {
+            return fx.vt.open_peer(p, on);
+        }
+
+        /// A `.signal` the other side sent.
+        pub fn peerSignal(fx: Self, peer: u32, json: []const u8) void {
+            fx.vt.peer_signal(peer, json);
+        }
+
+        /// Sends another local stream instead (the screen instead of the camera, and back).
+        pub fn peerStream(fx: Self, peer: u32, stream: u32) void {
+            fx.vt.peer_stream(peer, stream);
+        }
+
+        pub fn closePeer(fx: Self, peer: u32) void {
+            fx.vt.close_peer(peer);
         }
 
         /// Puts `text` on the clipboard.
@@ -273,6 +368,8 @@ pub fn Ui(comptime Msg: type) type {
             fill: ?Color = null,
         };
 
+        pub const VideoOptions = struct { mirror: bool = false, cover: bool = true };
+
         pub const InputOptions = struct {
             key: u64 = 0,
             value: []const u8 = "",
@@ -322,6 +419,12 @@ pub fn Ui(comptime Msg: type) type {
             if (o.on_change) |f| ui.changes.append(ui.arena(), .{ .node = i, .value = f }) catch ui.fail();
             if (o.on_focus != null or o.on_blur != null or o.on_submit != null)
                 ui.inputs.append(ui.arena(), .{ .node = i, .value = .{ .focus = o.on_focus, .blur = o.on_blur, .submit = o.on_submit } }) catch ui.fail();
+        }
+
+        /// A stream's moving picture (from `fx.openMedia` or a peer's `.track`), sized by `style`.
+        /// `mirror` flips it (your own front camera); `cover` fills the box, cropping.
+        pub fn video(ui: *Self, stream: u32, o: VideoOptions, style: st.Style, k: u64) void {
+            _ = ui.tree.add(.{ .kind = .video, .style = style, .key = k, .video = .{ .stream = stream, .mirror = o.mirror, .cover = o.cover } }) catch ui.fail();
         }
 
         /// A picture loaded from `url` (the host caches it), sized by `style`.
@@ -447,7 +550,66 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .background_location = fxBackgroundLocation,
             .notify = fxNotify,
             .cancel_notify = fxCancelNotify,
+            .open_media = fxOpenMedia,
+            .media_enable = fxMediaEnable,
+            .switch_camera = fxSwitchCamera,
+            .close_media = fxCloseMedia,
+            .open_peer = fxOpenPeer,
+            .peer_signal = fxPeerSignal,
+            .peer_stream = fxPeerStream,
+            .close_peer = fxClosePeer,
         };
+
+        // Calls. A host without them (until reseal-rtc lands on the phones) answers "unsupported".
+        const has_calls = @hasDecl(H, "openMedia");
+        var medias: std.AutoHashMapUnmanaged(u32, *const fn (MediaEvent) Msg) = .empty;
+        var peers: std.AutoHashMapUnmanaged(u32, *const fn (PeerEvent) Msg) = .empty;
+
+        fn fxOpenMedia(m: Media, on: *const fn (MediaEvent) Msg) u32 {
+            const id = newId();
+            if (!has_calls) {
+                fxAfter(0, on(.{ .kind = .failed, .stream = id, .data = "unsupported" }));
+                return id;
+            }
+            medias.put(gpa, id, on) catch return 0;
+            H.openMedia(id, m);
+            return id;
+        }
+
+        fn fxMediaEnable(id: u32, audio: bool, video: bool) void {
+            if (has_calls) H.mediaEnable(id, audio, video);
+        }
+
+        fn fxSwitchCamera(id: u32) void {
+            if (has_calls) H.switchCamera(id);
+        }
+
+        fn fxCloseMedia(id: u32) void {
+            if (medias.remove(id) and has_calls) H.closeMedia(id);
+        }
+
+        fn fxOpenPeer(p: Peer, on: *const fn (PeerEvent) Msg) u32 {
+            const id = newId();
+            if (!has_calls) {
+                fxAfter(0, on(.{ .kind = .state, .peer = id, .data = "failed" }));
+                return id;
+            }
+            peers.put(gpa, id, on) catch return 0;
+            H.openPeer(id, p);
+            return id;
+        }
+
+        fn fxPeerSignal(id: u32, json: []const u8) void {
+            if (has_calls and peers.contains(id)) H.peerSignal(id, json);
+        }
+
+        fn fxPeerStream(id: u32, stream: u32) void {
+            if (has_calls and peers.contains(id)) H.peerStream(id, stream);
+        }
+
+        fn fxClosePeer(id: u32) void {
+            if (peers.remove(id) and has_calls) H.closePeer(id);
+        }
 
         fn fxNotify(n: Notification) void {
             H.notify(n);
@@ -658,6 +820,17 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             const on = sockets.get(id) orelse return;
             if (kind == .closed) _ = sockets.remove(id);
             if (started) dispatch(on(.{ .kind = kind, .socket = id, .data = data }));
+        }
+
+        pub fn mediaEvent(id: u32, kind: MediaEvent.Kind, data: []const u8) void {
+            const on = medias.get(id) orelse return;
+            if (kind != .ready) _ = medias.remove(id);
+            if (started) dispatch(on(.{ .kind = kind, .stream = id, .data = data }));
+        }
+
+        pub fn peerEvent(id: u32, kind: PeerEvent.Kind, data: []const u8, stream: u32) void {
+            const on = peers.get(id) orelse return;
+            if (started) dispatch(on(.{ .kind = kind, .peer = id, .data = data, .stream = stream }));
         }
 
         /// A message from the embedding page; the app turns it into a Msg with

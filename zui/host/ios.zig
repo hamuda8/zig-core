@@ -154,7 +154,8 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
             objc.sendVoid1(objc.send(pv, "layer"), "setFillColor:", null);
             break :blk pv;
         },
-        .view => objc.new("ZuiView"),
+        // Calls on iOS arrive with reseal-rtc; until then a video is an empty box.
+        .view, .video => objc.new("ZuiView"),
         .text => blk: {
             const l = objc.new("UILabel");
             objc.sendVoidInt(l, "setNumberOfLines:", 0);

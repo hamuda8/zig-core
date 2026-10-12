@@ -67,7 +67,7 @@ pub const Engine = struct {
                 content = .{ .w = e.measure_text(sample, font, inf).w, .h = font.line_height };
             },
             // Pictures and lines take the size their style gives them.
-            .image, .path => {},
+            .image, .path, .video => {},
             .view, .scroll, .scroll_x => {
                 const row = s.direction == .row;
                 var count: usize = 0;

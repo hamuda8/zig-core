@@ -201,6 +201,10 @@ pub fn Reconciler(comptime H: type) type {
                     const same = if (o) |old| (if (old.path) |op| op.eql(p) else false) else false;
                     if (!same) H.path(id, p);
                 },
+                .video => if (n.video) |v| {
+                    const same = if (o) |old| std.meta.eql(old.video, n.video) else false;
+                    if (!same and @hasDecl(H, "video")) H.video(id, v);
+                },
                 .view => {},
             }
         }
@@ -269,6 +273,9 @@ pub const RecordingHost = struct {
     pub fn imageFilter(_: u32, _: st.ImageFilter) void {}
     pub fn path(id: u32, p: tree_mod.Path) void {
         write("path {d} {d}", .{ id, p.points.len });
+    }
+    pub fn video(id: u32, v: tree_mod.Video) void {
+        write("video {d} {d}", .{ id, v.stream });
     }
 };
 

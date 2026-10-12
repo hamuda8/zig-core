@@ -7,8 +7,17 @@ const style = @import("style.zig");
 pub const none: u32 = std.math.maxInt(u32);
 
 /// `scroll` scrolls vertically, `scroll_x` horizontally (Android needs a different view for each).
-/// `image` shows a picture from a URL; `path` draws a line (routes on a map).
-pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4, image = 5, path = 6 };
+/// `image` shows a picture from a URL; `path` draws a line (routes on a map); `video` shows a
+/// call's camera stream.
+pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4, image = 5, path = 6, video = 7 };
+
+pub const Video = struct {
+    /// A stream id from fx.openMedia or a peer's .track event; 0 shows nothing.
+    stream: u32,
+    mirror: bool = false,
+    /// Fill the box and crop, or fit inside it.
+    cover: bool = true,
+};
 
 /// A polyline in the node's own coordinates.
 /// Lines through points. A point with a NaN x starts a new sub-path (an icon is several).
@@ -41,6 +50,7 @@ pub const Node = struct {
     /// Receives pointer events (gestures).
     pointer: bool = false,
     path: ?Path = null,
+    video: ?Video = null,
 
     parent: u32 = none,
     first_child: u32 = none,

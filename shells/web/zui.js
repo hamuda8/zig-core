@@ -10,7 +10,7 @@
 // maps on a page compile once). options.onPost receives the app's fx.post messages (else they
 // go to the parent page); the returned send(json) reaches the app's hostMessage.
 
-const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4, KIND_IMAGE = 5, KIND_PATH = 6;
+const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4, KIND_IMAGE = 5, KIND_PATH = 6, KIND_VIDEO = 7;
 const POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4, POINTER_WHEEL = 5;
 const SVG = 'http://www.w3.org/2000/svg';
 const EVENT_PRESS_IN = 1, EVENT_PRESS_OUT = 2, EVENT_PRESS = 3;
@@ -79,13 +79,14 @@ export async function start(wasm, mount = document.body, options = {}) {
   const sendText = (id, s) => withBytes(encoder.encode(s), (p, n) => ex.zui_text_event(id, p, n));
   let watchId = null;
   const sockets = new Map();
+  const calls = webCalls(() => ex, () => memory, withBytes, encoder, str);
   const notes = new Map();
 
   const imports = {
     zui: {
       zui_create(id, kind) {
         const el = kind === KIND_PATH ? document.createElementNS(SVG, 'svg')
-          : document.createElement(kind === KIND_INPUT ? 'input' : kind === KIND_IMAGE ? 'img' : 'div');
+          : document.createElement(kind === KIND_INPUT ? 'input' : kind === KIND_IMAGE ? 'img' : kind === KIND_VIDEO ? 'video' : 'div');
         el.style.position = 'absolute';
         el.style.boxSizing = 'border-box';
         el.style.margin = '0';
@@ -109,6 +110,13 @@ export async function start(wasm, mount = document.body, options = {}) {
           el.decoding = 'async';
           el.style.userSelect = 'none';
           el.style.pointerEvents = 'none';
+        } else if (kind === KIND_VIDEO) {
+          // Sound plays through the peer's own audio element, so a video never doubles it.
+          el.autoplay = true;
+          el.playsInline = true;
+          el.muted = true;
+          el.style.pointerEvents = 'none';
+          el.style.background = '#000';
         } else if (kind === KIND_PATH) {
           el.style.overflow = 'visible';
           el.style.pointerEvents = 'none';
@@ -388,6 +396,14 @@ export async function start(wasm, mount = document.body, options = {}) {
         sockets.get(id)?.close();
         sockets.delete(id);
       },
+      ...calls.imports,
+      zui_video(id, stream, mirror, cover) {
+        const el = views.get(id);
+        const s = calls.streams.get(stream) || null;
+        if (el.srcObject !== s) el.srcObject = s;
+        el.style.transform = mirror ? 'scaleX(-1)' : '';
+        el.style.objectFit = cover ? 'cover' : 'contain';
+      },
       zui_root_background(argb) {
         const c = css(argb);
         root.style.background = c;
@@ -464,7 +480,177 @@ export async function start(wasm, mount = document.body, options = {}) {
       dark.removeEventListener('change', onDark);
       if (watchId !== null) navigator.geolocation?.clearWatch(watchId);
       for (const s of sockets.values()) s.close();
+      calls.destroy();
       mount.replaceChildren();
+    },
+  };
+}
+
+// Calls: the browser's own WebRTC (part of the browser, not a library). Streams have ids: the app's
+// for its own (fx.openMedia), and ids from 0x80000000 up for the ones peers send.
+const MEDIA_READY = 1, MEDIA_FAILED = 2, MEDIA_ENDED = 3;
+const PEER_SIGNAL = 1, PEER_STATE = 2, PEER_TRACK = 3;
+
+function webCalls(getEx, getMemory, withBytes, encoder, str) {
+  const streams = new Map();
+  const peers = new Map();
+  let nextRemote = 0x80000000;
+  const mediaEvent = (id, kind, text = '') => withBytes(encoder.encode(text), (p, n) => getEx().zui_media_event(id, kind, p, n));
+  const peerEvent = (id, kind, text = '', stream = 0) => withBytes(encoder.encode(text), (p, n) => getEx().zui_peer_event(id, kind, p, n, stream));
+
+  const camera = (back) => ({ width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: back ? 'environment' : 'user' });
+
+  // Hardware-friendly H.264 first, where the browser lets the page choose.
+  const preferH264 = (pc) => {
+    const caps = window.RTCRtpReceiver?.getCapabilities?.('video');
+    if (!caps) return;
+    const codecs = [...caps.codecs].sort((a, b) => (b.mimeType === 'video/H264') - (a.mimeType === 'video/H264'));
+    for (const t of pc.getTransceivers()) {
+      if (t.receiver.track?.kind === 'video' && t.setCodecPreferences) try { t.setCodecPreferences(codecs); } catch {}
+    }
+  };
+
+  // Puts a stream's tracks on a connection, replacing what it sent before.
+  const send = (peer, stream) => {
+    const s = streams.get(stream);
+    const senders = peer.pc.getSenders();
+    for (const kind of ['audio', 'video']) {
+      const track = s?.getTracks().find((t) => t.kind === kind) || null;
+      const sender = senders.find((x) => x.track?.kind === kind || (x._kind === kind));
+      if (sender) sender.replaceTrack(track).catch(() => {});
+      else if (track) peer.pc.addTrack(track, s)._kind = kind;
+    }
+    peer.stream = stream;
+    preferH264(peer.pc);
+  };
+
+  const imports = {
+    zui_media_open(id, audio, video, screen, back) {
+      const ask = screen
+        ? navigator.mediaDevices?.getDisplayMedia?.({ video: true, audio: !!audio })
+        : navigator.mediaDevices?.getUserMedia?.({ audio: audio ? { echoCancellation: true, noiseSuppression: true } : false, video: video ? camera(back) : false });
+      if (!ask) return void setTimeout(() => mediaEvent(id, MEDIA_FAILED, 'unsupported'));
+      ask.then((s) => {
+        s._back = !!back;
+        streams.set(id, s);
+        for (const t of s.getTracks()) t.onended = () => { if (streams.get(id) === s && t.kind === 'video') mediaEvent(id, MEDIA_ENDED); };
+        mediaEvent(id, MEDIA_READY);
+      }, (e) => mediaEvent(id, MEDIA_FAILED, e?.name === 'NotAllowedError' ? 'denied' : 'unavailable'));
+    },
+    zui_media_enable(id, audio, video) {
+      const s = streams.get(id);
+      if (!s) return;
+      for (const t of s.getAudioTracks()) t.enabled = !!audio;
+      for (const t of s.getVideoTracks()) t.enabled = !!video;
+    },
+    zui_media_switch(id) {
+      const s = streams.get(id);
+      const old = s?.getVideoTracks()[0];
+      if (!old) return;
+      navigator.mediaDevices.getUserMedia({ video: camera(!s._back) }).then((fresh) => {
+        const track = fresh.getVideoTracks()[0];
+        track.enabled = old.enabled;
+        s._back = !s._back;
+        s.removeTrack(old);
+        old.stop();
+        s.addTrack(track);
+        for (const p of peers.values()) if (p.stream === id) send(p, id);
+        // Video elements showing this stream pick up the new track.
+        for (const v of document.querySelectorAll('video')) if (v.srcObject === s) { v.srcObject = null; v.srcObject = s; }
+      }, () => {});
+    },
+    zui_media_close(id) {
+      for (const t of streams.get(id)?.getTracks() || []) t.stop();
+      streams.delete(id);
+    },
+    zui_peer_open(id, iptr, ilen, polite, stream) {
+      let iceServers = [];
+      try { iceServers = JSON.parse(str(iptr, ilen)); } catch {}
+      const pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle' });
+      const peer = { pc, polite: !!polite, makingOffer: false, ignoreOffer: false, stream: 0, queue: Promise.resolve(), remote: new Map(), audio: [] };
+      peers.set(id, peer);
+      const signal = (obj) => peerEvent(id, PEER_SIGNAL, JSON.stringify(obj));
+      pc.onnegotiationneeded = async () => {
+        try {
+          peer.makingOffer = true;
+          await pc.setLocalDescription();
+          signal({ description: pc.localDescription });
+        } catch {} finally { peer.makingOffer = false; }
+      };
+      pc.onicecandidate = ({ candidate }) => { if (candidate) signal({ candidate: candidate.toJSON() }); };
+      pc.onconnectionstatechange = () => {
+        if (!peers.has(id)) return;
+        const state = pc.connectionState;
+        if (state === 'failed') pc.restartIce();
+        if (state !== 'new') peerEvent(id, PEER_STATE, state);
+      };
+      pc.ontrack = (e) => {
+        const s = e.streams[0] || new MediaStream([e.track]);
+        let sid = peer.remote.get(s);
+        if (!sid) {
+          sid = nextRemote++;
+          peer.remote.set(s, sid);
+          streams.set(sid, s);
+          const a = document.createElement('audio');
+          a.autoplay = true;
+          a.srcObject = s;
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          peer.audio.push(a);
+        }
+        peerEvent(id, PEER_TRACK, '', sid);
+      };
+      if (stream) send(peer, stream);
+      else {
+        // Receive both even when sending nothing.
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        preferH264(pc);
+      }
+    },
+    zui_peer_signal(id, ptr, len) {
+      const peer = peers.get(id);
+      if (!peer) return;
+      let msg;
+      try { msg = JSON.parse(str(ptr, len)); } catch { return; }
+      const { pc } = peer;
+      // One signal at a time, in order: descriptions must not interleave.
+      peer.queue = peer.queue.then(async () => {
+        if (msg.description) {
+          const d = msg.description;
+          const collision = d.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
+          peer.ignoreOffer = !peer.polite && collision;
+          if (peer.ignoreOffer) return;
+          await pc.setRemoteDescription(d);
+          if (d.type === 'offer') {
+            await pc.setLocalDescription();
+            peerEvent(id, PEER_SIGNAL, JSON.stringify({ description: pc.localDescription }));
+          }
+        } else if (msg.candidate) {
+          try { await pc.addIceCandidate(msg.candidate); } catch (e) { if (!peer.ignoreOffer) throw e; }
+        }
+      }).catch(() => {});
+    },
+    zui_peer_stream(id, stream) {
+      const peer = peers.get(id);
+      if (peer) send(peer, stream);
+    },
+    zui_peer_close(id) {
+      const peer = peers.get(id);
+      if (!peer) return;
+      peers.delete(id);
+      peer.pc.close();
+      for (const a of peer.audio) a.remove();
+      for (const sid of peer.remote.values()) streams.delete(sid);
+    },
+  };
+
+  return {
+    imports,
+    streams,
+    destroy() {
+      for (const id of [...peers.keys()]) imports.zui_peer_close(id);
+      for (const id of [...streams.keys()]) imports.zui_media_close(id);
     },
   };
 }
