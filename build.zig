@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
     _ = b.addModule("http", .{ .root_source_file = b.path("http/http.zig") });
     _ = b.addModule("mongo", .{ .root_source_file = b.path("mongo/mongo.zig") });
     _ = b.addModule("env", .{ .root_source_file = b.path("env/env.zig") });
+    _ = b.addModule("push", .{ .root_source_file = b.path("push/push.zig") });
     const geo = b.addModule("geo", .{ .root_source_file = b.path("geo/geo.zig") });
 
     // Builds and queries region search indexes by hand: zig-out/bin/geo search <dir> <text>
@@ -62,7 +63,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "zui", .module = b.createModule(.{ .root_source_file = b.path("zui/zui.zig"), .target = target, .optimize = optimize }) }},
     }) })).step);
-    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
+    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "push/push.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
@@ -281,6 +282,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 .{ .name = "mongo", .module = server_core.module("mongo") },
                 .{ .name = "env", .module = server_core.module("env") },
                 .{ .name = "geo", .module = server_core.module("geo") },
+                .{ .name = "push", .module = server_core.module("push") },
             } });
         }
     }.module;

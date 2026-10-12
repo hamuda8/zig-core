@@ -14,6 +14,7 @@
         "mongo",
         "env",
         "geo",
+        "push",
         "tools",
         "toolchain.zon",
     },
