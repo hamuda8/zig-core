@@ -149,6 +149,11 @@ pub fn openSocket(id: u32, url: []const u8) void {
     socket_url.appendSlice(gpa, url) catch {};
 }
 pub fn sendSocket(_: u32, _: []const u8) void {}
+pub var widget_title: std.ArrayList(u8) = .empty;
+pub fn widgetUpdate(title: []const u8, _: []const u8, _: []const u8, _: []const u8) void {
+    widget_title.clearRetainingCapacity();
+    widget_title.appendSlice(gpa, title) catch {};
+}
 pub var background_location = false;
 pub fn backgroundLocation(on: bool, _: []const u8, _: []const u8) void {
     background_location = on;

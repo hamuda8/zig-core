@@ -1090,3 +1090,6 @@ pub fn storageRemove(key: []const u8, secure: bool) void {
     const q = keychainQuery(k);
     _ = SecItemDelete(nsDict(&.{ q[0][0], q[1][0], q[2][0] }, &.{ q[0][1], q[1][1], q[2][1] }));
 }
+
+/// iOS widgets need a SwiftUI WidgetKit extension (not built yet).
+pub fn widgetUpdate(_: []const u8, _: []const u8, _: []const u8, _: []const u8) void {}

@@ -93,11 +93,16 @@ pub const AppOptions = struct {
     /// More wasm modules for the web build (zig-out/web/<name>.wasm), with the client's imports:
     /// e.g. a library that other sites load.
     web_extra: []const WebExtra = &.{},
+    /// The app's Android res/ folder (launcher icon...), and its files (so a change rebuilds).
+    android_res: ?std.Build.LazyPath = null,
+    android_res_files: []const []const u8 = &.{},
     optimize: std.builtin.OptimizeMode,
 };
 
 /// The fixed Android shim (shells/android/java/com/wufour/zui). Listed so the APK rebuilds when one changes.
-const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java" };
+const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java" };
+/// zui's Android resources (the widget), listed for the same reason.
+const android_res = [_][]const u8{ "layout/zui_widget.xml", "xml/zui_widget_info.xml", "drawable/zui_widget_bg.xml" };
 
 const android_abis = [_]struct { abi: []const u8, arch: std.Target.Cpu.Arch }{
     .{ .abi = "arm64-v8a", .arch = .aarch64 },
@@ -184,6 +189,15 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
             // The cache does not look inside a directory argument, so each source is also an input:
             // without this, a Java-only change leaves the old APK in place.
             for (android_java) |f| run.addFileInput(core.path(b.fmt("shells/android/java/com/wufour/zui/{s}", .{f})));
+            run.addArg("--res");
+            run.addDirectoryArg(core.path("shells/android/res"));
+            for (android_res) |f| run.addFileInput(core.path(b.fmt("shells/android/res/{s}", .{f})));
+            // The app's own resources: its launcher icon (mipmap/ic_launcher), strings...
+            if (opts.android_res) |res| {
+                run.addArg("--res");
+                run.addDirectoryArg(res);
+                for (opts.android_res_files) |f| run.addFileInput(res.path(b, f));
+            }
             const sysroot = b.pathJoin(&.{ sdk, "ndk", ndk_version, "toolchains", "llvm", "prebuilt", ndk_host, "sysroot" });
             for (android_abis) |a| {
                 const triple = b.fmt("{t}-linux-android", .{a.arch});

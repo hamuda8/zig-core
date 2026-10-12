@@ -672,6 +672,10 @@ public final class Zui {
         activity.startForegroundService(intent);
     }
 
+    static void widgetUpdate(String title, String l1, String l2, String l3) {
+        ZuiWidget.update(activity, title, l1, l2, l3);
+    }
+
     static void openSocket(int id, String url) {
         ZuiSocket s = new ZuiSocket(id, url);
         sockets.put(id, s);

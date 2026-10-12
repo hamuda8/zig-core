@@ -42,6 +42,7 @@ var methods: struct {
     storage_remove: jni.jmethodID,
     open_socket: jni.jmethodID,
     background_location: jni.jmethodID,
+    widget_update: jni.jmethodID,
     send_socket: jni.jmethodID,
     close_socket: jni.jmethodID,
 } = undefined;
@@ -78,6 +79,7 @@ fn bind(e: *jni.Env) void {
         .{ "storage_remove", "storageRemove", "(Ljava/lang/String;Z)V" },
         .{ "open_socket", "openSocket", "(ILjava/lang/String;)V" },
         .{ "background_location", "backgroundLocation", "(ZLjava/lang/String;Ljava/lang/String;)V" },
+        .{ "widget_update", "widgetUpdate", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V" },
         .{ "send_socket", "sendSocket", "(ILjava/lang/String;)V" },
         .{ "close_socket", "closeSocket", "(I)V" },
         .{ "timer", "timer", "(II)V" },
@@ -436,6 +438,13 @@ pub fn requestFrame() void {
 /// There is no embedding page on a phone.
 pub fn post(_: []const u8) void {}
 
+pub fn widgetUpdate(title: []const u8, l1: []const u8, l2: []const u8, l3: []const u8) void {
+    const f = env.functions;
+    var refs: [4]jni.jstring = undefined;
+    for ([_][]const u8{ title, l1, l2, l3 }, &refs) |s, *r| r.* = newString(s);
+    defer for (refs) |r| f.DeleteLocalRef(env, r);
+    call(methods.widget_update, &.{ object(refs[0]), object(refs[1]), object(refs[2]), object(refs[3]) });
+}
 pub fn backgroundLocation(on: bool, title: []const u8, text_: []const u8) void {
     const jt = newString(title);
     defer env.functions.DeleteLocalRef(env, jt);

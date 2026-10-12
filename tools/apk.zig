@@ -27,6 +27,8 @@ const Options = struct {
     keystore: []const u8 = "",
     out: []const u8 = "",
     libs: std.ArrayList(Lib) = .empty,
+    /// Android resource folders (res/), compiled and linked in order.
+    res: std.ArrayList([]const u8) = .empty,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -60,9 +62,16 @@ pub fn main(init: std.process.Init) !void {
     try cwd.createDirPath(io, stage);
     try cwd.createDirPath(io, classes);
 
-    // 1. Manifest (no resources yet) -> base.apk
+    // 1. Resources (zui's widget layouts, the app's icon...) and the manifest -> base.apk
     const base_apk = try join(arena, &.{ work, "base.apk" });
-    try run(arena, io, env, null, &.{ try tool(arena, bt, "aapt2", exe_ext), "link", "-o", base_apk, "--manifest", opts.manifest, "-I", android_jar });
+    var link: std.ArrayList([]const u8) = .empty;
+    try link.appendSlice(arena, &.{ try tool(arena, bt, "aapt2", exe_ext), "link", "-o", base_apk, "--manifest", opts.manifest, "-I", android_jar, "--auto-add-overlay" });
+    for (opts.res.items, 0..) |dir, i| {
+        const flat = try join(arena, &.{ work, try std.fmt.allocPrint(arena, "res-{d}.zip", .{i}) });
+        try run(arena, io, env, null, &.{ try tool(arena, bt, "aapt2", exe_ext), "compile", "--dir", dir, "-o", flat });
+        try link.appendSlice(arena, &.{ "-R", flat });
+    }
+    try run(arena, io, env, null, link.items);
 
     // 2. Java shim -> .class -> classes.dex
     var javac: std.ArrayList([]const u8) = .empty;
@@ -114,7 +123,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const [:0]const u8) !Options {
     while (i + 1 < args.len) : (i += 2) {
         const key = args[i];
         const val: []const u8 = args[i + 1];
-        if (std.mem.eql(u8, key, "--sdk")) o.sdk = val else if (std.mem.eql(u8, key, "--build-tools")) o.build_tools = val else if (std.mem.eql(u8, key, "--platform")) o.platform = val else if (std.mem.eql(u8, key, "--min-sdk")) o.min_sdk = val else if (std.mem.eql(u8, key, "--jdk")) o.jdk = val else if (std.mem.eql(u8, key, "--manifest")) o.manifest = val else if (std.mem.eql(u8, key, "--java")) o.java = val else if (std.mem.eql(u8, key, "--keystore")) o.keystore = val else if (std.mem.eql(u8, key, "--out")) o.out = val else if (std.mem.eql(u8, key, "--lib")) {
+        if (std.mem.eql(u8, key, "--sdk")) o.sdk = val else if (std.mem.eql(u8, key, "--build-tools")) o.build_tools = val else if (std.mem.eql(u8, key, "--platform")) o.platform = val else if (std.mem.eql(u8, key, "--min-sdk")) o.min_sdk = val else if (std.mem.eql(u8, key, "--jdk")) o.jdk = val else if (std.mem.eql(u8, key, "--manifest")) o.manifest = val else if (std.mem.eql(u8, key, "--java")) o.java = val else if (std.mem.eql(u8, key, "--keystore")) o.keystore = val else if (std.mem.eql(u8, key, "--out")) o.out = val else if (std.mem.eql(u8, key, "--res")) try o.res.append(arena, val) else if (std.mem.eql(u8, key, "--lib")) {
             const eq = std.mem.indexOfScalar(u8, val, '=') orelse return error.BadLibArg;
             try o.libs.append(arena, .{ .abi = val[0..eq], .path = val[eq + 1 ..] });
         } else {

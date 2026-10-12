@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- zui's home-screen widget: a title and up to three lines the app writes (zui.widget). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/zui_widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="14dp"
+    android:background="@drawable/zui_widget_bg">
+    <TextView android:id="@+id/zui_widget_title" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:textSize="15sp" android:textStyle="bold" android:textColor="#0f172a" android:maxLines="1" android:ellipsize="end" />
+    <TextView android:id="@+id/zui_widget_line1" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="6dp" android:textSize="13sp" android:textColor="#334155" android:maxLines="1" android:ellipsize="end" />
+    <TextView android:id="@+id/zui_widget_line2" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="2dp" android:textSize="13sp" android:textColor="#334155" android:maxLines="1" android:ellipsize="end" />
+    <TextView android:id="@+id/zui_widget_line3" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="2dp" android:textSize="13sp" android:textColor="#334155" android:maxLines="1" android:ellipsize="end" />
+</LinearLayout>
