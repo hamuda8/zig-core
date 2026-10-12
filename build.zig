@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     _ = b.addModule("http", .{ .root_source_file = b.path("http/http.zig") });
     _ = b.addModule("mongo", .{ .root_source_file = b.path("mongo/mongo.zig") });
     _ = b.addModule("env", .{ .root_source_file = b.path("env/env.zig") });
-    _ = b.addModule("push", .{ .root_source_file = b.path("push/push.zig") });
+    const push = b.addModule("push", .{ .root_source_file = b.path("push/push.zig") });
     const geo = b.addModule("geo", .{ .root_source_file = b.path("geo/geo.zig") });
 
     // Builds and queries region search indexes by hand: zig-out/bin/geo search <dir> <text>
@@ -35,6 +35,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(geo_tool);
+
+    // Tries the HTTP/2 client against a server by hand: zig-out/bin/h2get https://host/path
+    b.installArtifact(b.addExecutable(.{
+        .name = "h2get",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/h2get.zig"),
+            .target = target,
+            .optimize = if (optimize == .debug) .safe else optimize,
+            .imports = &.{.{ .name = "push", .module = push }},
+        }),
+    }));
 
     // Host tool that packages APKs; apps reach it through `addApp`.
     b.installArtifact(b.addExecutable(.{
@@ -62,6 +73,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "zui", .module = b.createModule(.{ .root_source_file = b.path("zui/zui.zig"), .target = target, .optimize = optimize }) }},
+    }) })).step);
+    // HTTP/2 + ALPN end to end: the push client against our TLS server.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("push/e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = b.createModule(.{ .root_source_file = b.path("http/http.zig"), .target = target, .optimize = optimize }) }},
     }) })).step);
     for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "push/push.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -96,6 +114,10 @@ pub const AppOptions = struct {
     /// The app's Android res/ folder (launcher icon...), and its files (so a change rebuilds).
     android_res: ?std.Build.LazyPath = null,
     android_res_files: []const []const u8 = &.{},
+    /// Adds the home-screen widget to the iOS app (a fixed SwiftUI extension, shells/ios/widget).
+    /// Its data travels through the app group "group.<bundle id>": a device build needs that
+    /// group in the app's provisioning profile.
+    ios_widget: bool = false,
     optimize: std.builtin.OptimizeMode,
 };
 
@@ -265,19 +287,52 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
             }
             // The system linker turns libapp.a into the app binary; the bundle is that binary
             // plus Info.plist.
+            // With the widget, swiftc links the app (for the small reload function) and builds
+            // the extension into PlugIns/Widget.appex; both are signed with the app group.
             const bundle = b.addSystemCommand(&.{
                 "sh",     "-c",
                 \\set -e
                 \\mkdir -p "$3"
-                \\xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 \
-                \\  "$1" -framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework CallKit -framework Foundation -lobjc -o "$3/App"
+                \\frameworks="-framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework CallKit -framework Foundation -lobjc"
                 \\cp "$2" "$3/Info.plist"
+                \\if [ "$4" = "none" ]; then
+                \\  xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 "$1" $frameworks -Wl,-U,_zui_widget_reload -o "$3/App"
+                \\  exit 0
+                \\fi
+                \\swift="xcrun --sdk iphonesimulator swiftc -target arm64-apple-ios18.0-simulator -parse-as-library"
+                \\$swift "$5" "$1" $frameworks -framework WidgetKit -o "$3/App"
+                \\id=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$2")
+                \\get() { /usr/libexec/PlistBuddy -c "Print $1" "$2" 2>/dev/null || echo "$3"; }
+                \\ext="$3/PlugIns/Widget.appex"
+                \\mkdir -p "$ext"
+                \\$swift -application-extension "$4" -framework WidgetKit -framework SwiftUI -o "$ext/Widget"
+                \\p() { /usr/libexec/PlistBuddy -c "$1" "$ext/Info.plist" >/dev/null; }
+                \\p "Add :CFBundleIdentifier string $id.widget"
+                \\p "Add :CFBundleExecutable string Widget"
+                \\p "Add :CFBundlePackageType string XPC!"
+                \\p "Add :CFBundleName string Widget"
+                \\p "Add :CFBundleDisplayName string $(get CFBundleDisplayName "$2" "$(get CFBundleName "$2" App)")"
+                \\p "Add :CFBundleShortVersionString string $(get CFBundleShortVersionString "$2" 1.0)"
+                \\p "Add :CFBundleVersion string $(get CFBundleVersion "$2" 1)"
+                \\p "Add :MinimumOSVersion string 18.0"
+                \\p "Add :CFBundleSupportedPlatforms array"
+                \\p "Add :CFBundleSupportedPlatforms:0 string iPhoneSimulator"
+                \\p "Add :NSExtension dict"
+                \\p "Add :NSExtension:NSExtensionPointIdentifier string com.apple.widgetkit-extension"
+                \\ent="$(mktemp)"
+                \\/usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" -c "Add :com.apple.security.application-groups:0 string group.$id" "$ent" >/dev/null
+                \\codesign -f -s - --entitlements "$ent" "$ext"
+                \\codesign -f -s - --entitlements "$ent" "$3"
                 ,
                 "bundle",
             });
             bundle.addFileArg(lib.getEmittedBin());
             bundle.addFileArg(opts.ios_info_plist);
             const app_dir = bundle.addOutputDirectoryArg(b.fmt("{s}.app", .{opts.name}));
+            if (opts.ios_widget) {
+                bundle.addFileArg(core.path("shells/ios/widget/ZuiWidget.swift"));
+                bundle.addFileArg(core.path("shells/ios/widget/ZuiWidgetReload.swift"));
+            } else bundle.addArg("none");
             sim_app.dependOn(&b.addInstallDirectory(.{
                 .source_dir = app_dir,
                 .install_dir = .{ .custom = "ios" },

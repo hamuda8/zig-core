@@ -1105,8 +1105,29 @@ pub fn storageRemove(key: []const u8, secure: bool) void {
     _ = SecItemDelete(nsDict(&.{ q[0][0], q[1][0], q[2][0] }, &.{ q[0][1], q[1][1], q[2][1] }));
 }
 
-/// iOS widgets need a SwiftUI WidgetKit extension (not built yet).
-pub fn widgetUpdate(_: []const u8, _: []const u8, _: []const u8, _: []const u8) void {}
+/// The widget (shells/ios/widget, in apps built with ios_widget) reads these from the app group
+/// "group.<bundle id>". Without the widget the lines are kept but nothing shows them.
+pub fn widgetUpdate(title: []const u8, l1: []const u8, l2: []const u8, l3: []const u8) void {
+    const bundle_id = objc.send(objc.send(objc.class("NSBundle"), "mainBundle"), "bundleIdentifier");
+    if (bundle_id == null) return;
+    const prefix = objc.nsString("group.");
+    defer objc.release(prefix);
+    const group = objc.send1(prefix, "stringByAppendingString:", bundle_id);
+    const defaults = objc.send1(objc.send(objc.class("NSUserDefaults"), "alloc"), "initWithSuiteName:", group);
+    if (defaults == null) return;
+    defer objc.release(defaults);
+    const keys = [_][]const u8{ "zui_widget_title", "zui_widget_line1", "zui_widget_line2", "zui_widget_line3" };
+    for (keys, [_][]const u8{ title, l1, l2, l3 }) |k, v| {
+        const key = objc.nsString(k);
+        defer objc.release(key);
+        const value = objc.nsString(v);
+        defer objc.release(value);
+        objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(defaults, objc.sel("setObject:forKey:"), value, key);
+    }
+    // Linked in (shells/ios/widget/ZuiWidgetReload.swift) only when the app has the widget.
+    if (widget_reload) |reload| reload();
+}
+const widget_reload = @extern(?*const fn () callconv(.c) void, .{ .name = "zui_widget_reload", .linkage = .weak });
 
 // ---- Notifications: UNUserNotificationCenter ----
 
