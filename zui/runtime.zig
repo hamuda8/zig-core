@@ -88,6 +88,17 @@ pub const Location = union(enum) {
 
 pub const InputEvent = enum(u8) { focus = 1, blur = 2, submit = 3 };
 
+pub const Notification = struct {
+    /// Same id replaces; also what cancelNotify takes.
+    id: u32,
+    title: []const u8,
+    body: []const u8 = "",
+    /// Wakes the phone over the lock screen and keeps sounding until seen (a dispatch alarm,
+    /// an incoming call): Android full-screen intent + insistent alarm sound; iOS a
+    /// time-sensitive alert; the web a notification that stays until clicked.
+    urgent: bool = false,
+};
+
 /// Something that happened on a WebSocket opened with `fx.openSocket`.
 pub const SocketEvent = struct {
     kind: Kind,
@@ -120,6 +131,8 @@ pub fn Fx(comptime Msg: type) type {
             copy: *const fn ([]const u8) void,
             open_url: *const fn ([]const u8, bool) void,
             background_location: *const fn (bool, []const u8, []const u8) void,
+            notify: *const fn (Notification) void,
+            cancel_notify: *const fn (u32) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -179,6 +192,15 @@ pub fn Fx(comptime Msg: type) type {
         /// location indicator (the app lists "location" in UIBackgroundModes). The web cannot.
         pub fn backgroundLocation(fx: Self, on: bool, title: []const u8, text: []const u8) void {
             fx.vt.background_location(on, title, text);
+        }
+
+        /// Shows a notification now (asking permission the first time). Tapping it opens the app.
+        pub fn notify(fx: Self, n: Notification) void {
+            fx.vt.notify(n);
+        }
+
+        pub fn cancelNotify(fx: Self, id: u32) void {
+            fx.vt.cancel_notify(id);
         }
 
         /// Puts `text` on the clipboard.
@@ -423,7 +445,17 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .copy = fxCopy,
             .open_url = fxOpenUrl,
             .background_location = fxBackgroundLocation,
+            .notify = fxNotify,
+            .cancel_notify = fxCancelNotify,
         };
+
+        fn fxNotify(n: Notification) void {
+            H.notify(n);
+        }
+
+        fn fxCancelNotify(id: u32) void {
+            H.cancelNotify(id);
+        }
 
         fn fxBackgroundLocation(on: bool, title: []const u8, text: []const u8) void {
             H.backgroundLocation(on, title, text);

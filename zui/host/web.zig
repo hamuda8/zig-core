@@ -32,6 +32,8 @@ const js = struct {
     extern "zui" fn zui_image_filter(id: u32, saturate: f32, contrast: f32, brightness: f32) void;
     extern "zui" fn zui_post(ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_copy(ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_notify(id: u32, title: [*]const u8, title_len: usize, body: [*]const u8, body_len: usize, urgent: u32) void;
+    extern "zui" fn zui_cancel_notify(id: u32) void;
     extern "zui" fn zui_open_url(ptr: [*]const u8, len: usize, new_window: u32) void;
     extern "zui" fn zui_socket_open(id: u32, ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_socket_send(id: u32, ptr: [*]const u8, len: usize) void;
@@ -116,6 +118,12 @@ pub fn imageFilter(id: u32, f: zui.ImageFilter) void {
 }
 pub fn focus(id: u32) void {
     js.zui_focus(id);
+}
+pub fn notify(n: zui.Notification) void {
+    js.zui_notify(n.id, n.title.ptr, n.title.len, n.body.ptr, n.body.len, @intFromBool(n.urgent));
+}
+pub fn cancelNotify(id: u32) void {
+    js.zui_cancel_notify(id);
 }
 /// A web page has no home-screen widget.
 pub fn widgetUpdate(_: []const u8, _: []const u8, _: []const u8, _: []const u8) void {}

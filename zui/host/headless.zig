@@ -154,6 +154,14 @@ pub fn widgetUpdate(title: []const u8, _: []const u8, _: []const u8, _: []const 
     widget_title.clearRetainingCapacity();
     widget_title.appendSlice(gpa, title) catch {};
 }
+pub var notified: std.ArrayList(u8) = .empty;
+pub fn notify(n: zui.Notification) void {
+    notified.clearRetainingCapacity();
+    notified.appendSlice(gpa, n.title) catch {};
+}
+pub fn cancelNotify(_: u32) void {
+    notified.clearRetainingCapacity();
+}
 pub var background_location = false;
 pub fn backgroundLocation(on: bool, _: []const u8, _: []const u8) void {
     background_location = on;

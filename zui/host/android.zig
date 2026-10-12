@@ -43,6 +43,8 @@ var methods: struct {
     open_socket: jni.jmethodID,
     background_location: jni.jmethodID,
     widget_update: jni.jmethodID,
+    notify: jni.jmethodID,
+    cancel_notify: jni.jmethodID,
     send_socket: jni.jmethodID,
     close_socket: jni.jmethodID,
 } = undefined;
@@ -80,6 +82,8 @@ fn bind(e: *jni.Env) void {
         .{ "open_socket", "openSocket", "(ILjava/lang/String;)V" },
         .{ "background_location", "backgroundLocation", "(ZLjava/lang/String;Ljava/lang/String;)V" },
         .{ "widget_update", "widgetUpdate", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V" },
+        .{ "notify", "notify", "(ILjava/lang/String;Ljava/lang/String;Z)V" },
+        .{ "cancel_notify", "cancelNotify", "(I)V" },
         .{ "send_socket", "sendSocket", "(ILjava/lang/String;)V" },
         .{ "close_socket", "closeSocket", "(I)V" },
         .{ "timer", "timer", "(II)V" },
@@ -438,6 +442,16 @@ pub fn requestFrame() void {
 /// There is no embedding page on a phone.
 pub fn post(_: []const u8) void {}
 
+pub fn notify(n: zui.Notification) void {
+    const jt = newString(n.title);
+    defer env.functions.DeleteLocalRef(env, jt);
+    const jb = newString(n.body);
+    defer env.functions.DeleteLocalRef(env, jb);
+    call(methods.notify, &.{ int(n.id), object(jt), object(jb), boolean(n.urgent) });
+}
+pub fn cancelNotify(id: u32) void {
+    call(methods.cancel_notify, &.{int(id)});
+}
 pub fn widgetUpdate(title: []const u8, l1: []const u8, l2: []const u8, l3: []const u8) void {
     const f = env.functions;
     var refs: [4]jni.jstring = undefined;

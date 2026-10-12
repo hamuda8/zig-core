@@ -79,6 +79,7 @@ export async function start(wasm, mount = document.body, options = {}) {
   const sendText = (id, s) => withBytes(encoder.encode(s), (p, n) => ex.zui_text_event(id, p, n));
   let watchId = null;
   const sockets = new Map();
+  const notes = new Map();
 
   const imports = {
     zui: {
@@ -335,6 +336,27 @@ export async function start(wasm, mount = document.body, options = {}) {
       },
       zui_focus(id) {
         views.get(id)?.focus();
+      },
+      zui_notify(id, tptr, tlen, bptr, blen, urgent) {
+        if (!('Notification' in window)) return;
+        const show = () => {
+          notes.get(id)?.close();
+          const n = new Notification(str(tptr, tlen), { body: str(bptr, blen), tag: 'zui-' + id, requireInteraction: !!urgent, renotify: true });
+          n.onclick = () => { window.focus(); n.close(); };
+          notes.set(id, n);
+        };
+        const title = str(tptr, tlen), body = str(bptr, blen);
+        if (Notification.permission === 'granted') show();
+        else if (Notification.permission !== 'denied') Notification.requestPermission().then((p) => {
+          if (p !== 'granted') return;
+          const n = new Notification(title, { body, tag: 'zui-' + id, requireInteraction: !!urgent });
+          n.onclick = () => { window.focus(); n.close(); };
+          notes.set(id, n);
+        });
+      },
+      zui_cancel_notify(id) {
+        notes.get(id)?.close();
+        notes.delete(id);
       },
       zui_copy(ptr, len) {
         navigator.clipboard?.writeText(str(ptr, len)).catch(() => {});

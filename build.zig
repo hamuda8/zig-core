@@ -270,7 +270,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 \\set -e
                 \\mkdir -p "$3"
                 \\xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 \
-                \\  "$1" -framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework Foundation -lobjc -o "$3/App"
+                \\  "$1" -framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework Foundation -lobjc -o "$3/App"
                 \\cp "$2" "$3/Info.plist"
                 ,
                 "bundle",

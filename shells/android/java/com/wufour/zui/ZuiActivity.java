@@ -24,6 +24,7 @@ public final class ZuiActivity extends Activity {
         Zui.density = getResources().getDisplayMetrics().density;
         Zui.dark = isDark(getResources().getConfiguration());
         if (getIntent() != null && getIntent().getData() != null) Zui.link = getIntent().getDataString();
+        showOverLockScreen(getIntent());
         // Disk cache for downloaded images (map tiles), kept across launches.
         try {
             HttpResponseCache.install(new File(getCacheDir(), "http"), 100L * 1024 * 1024);
@@ -55,6 +56,21 @@ public final class ZuiActivity extends Activity {
             return insets;
         });
         setContentView(root);
+    }
+
+    /** An urgent notification (dispatch alarm, call) opens the app over the lock screen. */
+    void showOverLockScreen(android.content.Intent intent) {
+        if (intent == null || !intent.getBooleanExtra("zui_alert", false)) return;
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        showOverLockScreen(intent);
     }
 
     @Override

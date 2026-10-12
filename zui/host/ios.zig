@@ -300,6 +300,9 @@ pub fn exportEntry(comptime App: type) void {
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
             rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent };
+            objc.defineClass("ZuiNotifications", "NSObject", &.{"UNUserNotificationCenterDelegate"}, &.{
+                .{ "userNotificationCenter:willPresentNotification:withCompletionHandler:", @ptrCast(&willPresent), "v@:@@@?" },
+            });
             objc.defineClass("ZuiSocketDelegate", "NSObject", &.{"NSURLSessionWebSocketDelegate"}, &.{
                 .{ "URLSession:webSocketTask:didOpenWithProtocol:", @ptrCast(&socketOpened), "v@:@@@" },
                 .{ "URLSession:webSocketTask:didCloseWithCode:reason:", @ptrCast(&socketClosed), "v@:@@q@" },
@@ -1093,3 +1096,60 @@ pub fn storageRemove(key: []const u8, secure: bool) void {
 
 /// iOS widgets need a SwiftUI WidgetKit extension (not built yet).
 pub fn widgetUpdate(_: []const u8, _: []const u8, _: []const u8, _: []const u8) void {}
+
+// ---- Notifications: UNUserNotificationCenter ----
+
+var notify_asked = false;
+const AuthBlock = extern struct { header: objc.BlockHeader };
+const auth_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(AuthBlock) };
+fn authDone(_: *AuthBlock, _: bool, _: id) callconv(.c) void {}
+const auth_block: AuthBlock = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&authDone), .descriptor = &auth_descriptor } };
+
+fn notificationCenter() id {
+    const center = objc.send(objc.class("UNUserNotificationCenter"), "currentNotificationCenter");
+    if (!notify_asked) {
+        notify_asked = true;
+        objc.sendVoid1(center, "setDelegate:", objc.new("ZuiNotifications"));
+        // UNAuthorizationOptionBadge | Sound | Alert
+        objc.msgSend(*const fn (id, objc.SEL, usize, *const AuthBlock) callconv(.c) void)(center, objc.sel("requestAuthorizationWithOptions:completionHandler:"), 1 | 2 | 4, &auth_block);
+    }
+    return center;
+}
+
+/// UNUserNotificationCenterDelegate: show banners while the app is open too. The handler is a
+/// block iOS gives us; calling it is calling its invoke function with itself first.
+pub fn willPresent(_: id, _: objc.SEL, _: id, _: id, handler: *objc.BlockHeader) callconv(.c) void {
+    const invoke: *const fn (*objc.BlockHeader, usize) callconv(.c) void = @ptrCast(@alignCast(handler.invoke));
+    invoke(handler, (1 << 1) | (1 << 4) | (1 << 3)); // sound, banner, list
+}
+
+pub fn notify(n: zui.Notification) void {
+    const center = notificationCenter();
+    const note_content = objc.new("UNMutableNotificationContent");
+    defer objc.release(note_content);
+    const t = objc.nsString(n.title);
+    defer objc.release(t);
+    const b = objc.nsString(n.body);
+    defer objc.release(b);
+    objc.sendVoid1(note_content, "setTitle:", t);
+    objc.sendVoid1(note_content, "setBody:", b);
+    objc.sendVoid1(note_content, "setSound:", objc.send(objc.class("UNNotificationSound"), "defaultSound"));
+    // UNNotificationInterruptionLevelTimeSensitive (2) for urgent alerts.
+    if (n.urgent) objc.sendVoidInt(note_content, "setInterruptionLevel:", 2);
+    var idbuf: [24]u8 = undefined;
+    const ident = objc.nsString(std.fmt.bufPrint(&idbuf, "zui-{d}", .{n.id}) catch "zui");
+    defer objc.release(ident);
+    const make = objc.msgSend(*const fn (id, objc.SEL, id, id, id) callconv(.c) id);
+    const request = make(objc.class("UNNotificationRequest"), objc.sel("requestWithIdentifier:note_content:trigger:"), ident, note_content, null);
+    objc.msgSend(*const fn (id, objc.SEL, id, ?*anyopaque) callconv(.c) void)(center, objc.sel("addNotificationRequest:withCompletionHandler:"), request, null);
+}
+
+pub fn cancelNotify(i: u32) void {
+    const center = notificationCenter();
+    var idbuf: [24]u8 = undefined;
+    const ident = objc.nsString(std.fmt.bufPrint(&idbuf, "zui-{d}", .{i}) catch "zui");
+    defer objc.release(ident);
+    const arr = objc.send1(objc.class("NSArray"), "arrayWithObject:", ident);
+    objc.sendVoid1(center, "removeDeliveredNotificationsWithIdentifiers:", arr);
+    objc.sendVoid1(center, "removePendingNotificationRequestsWithIdentifiers:", arr);
+}

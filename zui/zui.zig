@@ -41,6 +41,7 @@ pub const Response = runtime.Response;
 pub const Location = runtime.Location;
 pub const Method = runtime.Method;
 pub const InputEvent = runtime.InputEvent;
+pub const Notification = runtime.Notification;
 pub const SocketEvent = runtime.SocketEvent;
 pub const Transform = style.Transform;
 pub const ImageFilter = style.ImageFilter;

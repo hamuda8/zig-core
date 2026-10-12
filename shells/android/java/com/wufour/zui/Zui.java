@@ -672,6 +672,46 @@ public final class Zui {
         activity.startForegroundService(intent);
     }
 
+    // ---- Notifications: normal, and urgent (full-screen over the lock screen, insistent alarm) ----
+
+    static final String CHANNEL_NORMAL = "zui-normal", CHANNEL_URGENT = "zui-urgent";
+
+    static void notify(int id, String title, String body, boolean urgent) {
+        android.app.NotificationManager nm = activity.getSystemService(android.app.NotificationManager.class);
+        if (Build.VERSION.SDK_INT >= 33 && activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 7003);
+        }
+        if (nm.getNotificationChannel(CHANNEL_NORMAL) == null) {
+            nm.createNotificationChannel(new android.app.NotificationChannel(CHANNEL_NORMAL, "Notifications", android.app.NotificationManager.IMPORTANCE_DEFAULT));
+            android.app.NotificationChannel urgentChannel = new android.app.NotificationChannel(CHANNEL_URGENT, "Alerts", android.app.NotificationManager.IMPORTANCE_HIGH);
+            urgentChannel.setSound(android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM),
+                    new android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_ALARM).build());
+            urgentChannel.enableVibration(true);
+            urgentChannel.setBypassDnd(true);
+            nm.createNotificationChannel(urgentChannel);
+        }
+        Intent open = new Intent(activity, activity.getClass()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        open.putExtra("zui_alert", urgent);
+        android.app.PendingIntent tap = android.app.PendingIntent.getActivity(activity, id, open, android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+        android.app.Notification.Builder b = new android.app.Notification.Builder(activity, urgent ? CHANNEL_URGENT : CHANNEL_NORMAL)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(new android.app.Notification.BigTextStyle().bigText(body))
+                .setSmallIcon(activity.getApplicationInfo().icon != 0 ? activity.getApplicationInfo().icon : android.R.drawable.ic_dialog_info)
+                .setContentIntent(tap)
+                .setAutoCancel(true);
+        if (urgent) {
+            b.setCategory(android.app.Notification.CATEGORY_ALARM).setFullScreenIntent(tap, true).setOngoing(true);
+        }
+        android.app.Notification n = b.build();
+        if (urgent) n.flags |= android.app.Notification.FLAG_INSISTENT;
+        nm.notify(id, n);
+    }
+
+    static void cancelNotify(int id) {
+        activity.getSystemService(android.app.NotificationManager.class).cancel(id);
+    }
+
     static void widgetUpdate(String title, String l1, String l2, String l3) {
         ZuiWidget.update(activity, title, l1, l2, l3);
     }
