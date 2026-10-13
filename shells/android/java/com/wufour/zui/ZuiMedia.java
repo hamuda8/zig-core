@@ -40,6 +40,8 @@ final class ZuiMedia {
     static native void nativeRotation(int id, int degrees);
     /** The surface a remote stream's decoder draws into, or null when its view went away. */
     static native void nativeRemoteSurface(int stream, Surface surface);
+    /** The camera writes into the encoder surface that swapEncoder handed over. */
+    static native void nativeEncoderSwapped(int id);
 
     static final class Local {
         int id;
@@ -48,6 +50,11 @@ final class ZuiMedia {
         CameraDevice camera;
         CameraCaptureSession session;
         boolean reported;
+        /** What the camera offers for encoders, and its framerate ranges. */
+        volatile android.util.Size[] sizes;
+        Range<Integer>[] fpsRanges;
+        int fps = 30;
+        boolean swapPending;
     }
 
     static final class VideoView {
@@ -59,7 +66,8 @@ final class ZuiMedia {
         int width, height, rotation;
     }
 
-    static final HashMap<Integer, Local> locals = new HashMap<>();
+    /** Read from the encoder thread too (pickSize). */
+    static final java.util.concurrent.ConcurrentHashMap<Integer, Local> locals = new java.util.concurrent.ConcurrentHashMap<>();
     static final SparseArray<VideoView> videos = new SparseArray<>();
     static final ArrayList<Local> waitingPermission = new ArrayList<>();
     /** Remote stream sizes as the decoders reported them: {width, height, rotation}. */
@@ -186,6 +194,9 @@ final class ZuiMedia {
                 boolean isBack = facing == CameraCharacteristics.LENS_FACING_BACK;
                 if (isBack == l.back) {
                     chosen = cid;
+                    android.hardware.camera2.params.StreamConfigurationMap map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                    if (map != null) l.sizes = map.getOutputSizes(android.media.MediaCodec.class);
+                    l.fpsRanges = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
                     Integer o = c.get(CameraCharacteristics.SENSOR_ORIENTATION);
                     sensor = o == null ? 0 : o;
                     break;
@@ -282,6 +293,10 @@ final class ZuiMedia {
                         l.session = s;
                         if (l.videoOn) repeat(l);
                         report(l);
+                        if (l.swapPending) {
+                            l.swapPending = false;
+                            nativeEncoderSwapped(l.id);
+                        }
                     });
                 }
 
@@ -302,10 +317,49 @@ final class ZuiMedia {
         try {
             CaptureRequest.Builder b = l.camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
             for (Surface s : targets(l)) b.addTarget(s);
-            b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(15, 30));
+            b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange(l));
             l.session.setRepeatingRequest(b.build(), null, camera);
         } catch (Exception ignored) {
         }
+    }
+
+    /** The camera framerate range closest to l.fps from below, as wide as possible. */
+    static Range<Integer> fpsRange(Local l) {
+        Range<Integer> best = null;
+        if (l.fpsRanges != null) for (Range<Integer> r : l.fpsRanges) {
+            if (r.getUpper() > l.fps) continue;
+            if (best == null || r.getUpper() > best.getUpper() || (r.getUpper().equals(best.getUpper()) && r.getLower() < best.getLower())) best = r;
+        }
+        return best != null ? best : new Range<>(15, 30);
+    }
+
+    /** From the encoder thread: the largest camera size within w x h (4:3 first), as w << 32 | h. */
+    static long pickSize(int id, int w, int h) {
+        Local l = locals.get(id);
+        android.util.Size[] sizes = l == null ? null : l.sizes;
+        if (sizes == null) return ((long) w << 32) | h;
+        android.util.Size best = null;
+        for (int pass = 0; pass < 2 && best == null; pass++) {
+            for (android.util.Size s : sizes) {
+                if (s.getWidth() > w || s.getHeight() > h) continue;
+                if (pass == 0 && s.getWidth() * 3 != s.getHeight() * 4) continue;
+                if (best == null || s.getWidth() * s.getHeight() > best.getWidth() * best.getHeight()) best = s;
+            }
+        }
+        if (best == null) return ((long) WIDTH << 32) | HEIGHT;
+        return ((long) best.getWidth() << 32) | best.getHeight();
+    }
+
+    /** From the encoder thread: a new encoder surface (another size or framerate) for the camera. */
+    static void swapEncoder(int id, Surface encoder, int fps) {
+        Zui.main.post(() -> {
+            Local l = locals.get(id);
+            if (l == null) return;
+            l.encoder = encoder;
+            l.fps = fps;
+            l.swapPending = true;
+            session(l);
+        });
     }
 
     // ---- video views ----

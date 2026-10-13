@@ -18,6 +18,7 @@
 //!         audio(ctx, opus_packet)               one received Opus packet
 //!         video(ctx, annexb, keyframe, rotation) one received H.264 access unit
 //!         keyframe(ctx)                         the other side asks our encoder for a keyframe
+//!         bitrate(ctx, bps, loss) (optional)    the bitrate our encoder should use, and the loss behind it
 //!     pub const Options = struct { ice_servers: []const u8, polite: bool, ... };
 //!     pub const Peer;
 //!     pub fn open(gpa, Options, Sink) !*Peer      sends its first offer through sink.signal
@@ -142,7 +143,8 @@ pub fn Native(comptime M: type, comptime E: type, comptime R: type) type {
                 return enqueuePeer(id, .state, "failed", 0);
             };
             lock.unlock();
-            const sink: E.Sink = .{ .ctx = ctx, .signal = sinkSignal, .state = sinkState, .tracks = sinkTracks, .audio = sinkAudio, .video = sinkVideo, .keyframe = sinkKeyframe };
+            var sink: E.Sink = .{ .ctx = ctx, .signal = sinkSignal, .state = sinkState, .tracks = sinkTracks, .audio = sinkAudio, .video = sinkVideo, .keyframe = sinkKeyframe };
+            if (@hasField(E.Sink, "bitrate")) sink.bitrate = sinkBitrate else _ = &sink;
             const engine = E.open(gpa, .{ .ice_servers = p.ice_servers, .polite = p.polite }, sink) catch {
                 enqueuePeer(id, .state, "failed", 0);
                 return;
@@ -177,6 +179,8 @@ pub fn Native(comptime M: type, comptime E: type, comptime R: type) type {
             const ctx = (kv orelse return).value;
             // Closing waits for the engine's threads, which never take `lock`.
             if (ctx.engine) |e| E.close(e);
+            // This connection no longer limits the stream's bitrate.
+            if (@hasDecl(M, "setBitrate")) M.setBitrate(@atomicLoad(u32, &ctx.stream, .acquire), id, 0, 0);
             const remote = @atomicLoad(u32, &ctx.remote, .acquire);
             if (remote != 0) M.closeRemote(remote);
             gpa.destroy(ctx);
@@ -284,6 +288,15 @@ pub fn Native(comptime M: type, comptime E: type, comptime R: type) type {
         fn sinkVideo(p: *anyopaque, annexb: []const u8, keyframe: bool, rotation: u16) void {
             const remote = @atomicLoad(u32, &ctxOf(p).remote, .acquire);
             if (remote != 0) M.remoteVideo(remote, annexb, keyframe, rotation);
+        }
+
+        /// The engine's target bitrate for what this connection sends. The backend keeps one per
+        /// connection and encodes at the lowest (a stream may go to several, in a group call).
+        fn sinkBitrate(p: *anyopaque, bps: u32, loss: f32) void {
+            if (!@hasDecl(M, "setBitrate")) return;
+            const c = ctxOf(p);
+            const stream = @atomicLoad(u32, &c.stream, .acquire);
+            if (stream != 0) M.setBitrate(stream, c.id, bps, loss);
         }
 
         fn sinkKeyframe(p: *anyopaque) void {

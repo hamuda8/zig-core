@@ -103,6 +103,8 @@ var j: struct {
     audio_mode: jni.jmethodID,
     remote_size: jni.jmethodID,
     wake: jni.jmethodID,
+    pick_size: jni.jmethodID,
+    swap_encoder: jni.jmethodID,
 } = undefined;
 
 /// JNI for this thread: the UI thread's, or an attachment (as a daemon, never detached).
@@ -161,6 +163,32 @@ const Local = struct {
     mic: ?*AAudioStream = null,
     mic_ring: common.Ring = .{},
     audio_us: u64 = 0,
+    // Bitrate adaptation: the engine's target per connection sending this stream, the rate
+    // the encoder runs at, and the resolution/framerate step (see `ladder`).
+    rates: [8]Rate = undefined,
+    rate_count: usize = 0,
+    applied_bps: u32 = 0,
+    level: usize = 0,
+    level_changed_at: i64 = 0,
+    clean_since: i64 = 0,
+    adapted_at: i64 = 0,
+    /// The encoder being replaced while the camera moves to the new one.
+    old_venc: ?*AMediaCodec = null,
+    old_window: ?*ANativeWindow = null,
+    swap_done: std.atomic.Value(bool) = .init(false),
+};
+
+const Rate = struct { peer: u32, bps: u32, loss: f32 };
+
+/// Resolution and framerate steps for our camera video. Step down when the target falls under
+/// `down_lossy` with loss, or under `down` regardless; step up (after a quiet spell) once it
+/// is back over `up` (the previous step's need).
+const Step = struct { w: i32, h: i32, fps: i32, down_lossy: u32, down: u32, up: u32 };
+const ladder = [_]Step{
+    .{ .w = 640, .h = 480, .fps = 30, .down_lossy = 450_000, .down = 200_000, .up = 0 },
+    .{ .w = 480, .h = 360, .fps = 30, .down_lossy = 250_000, .down = 120_000, .up = 550_000 },
+    .{ .w = 320, .h = 240, .fps = 20, .down_lossy = 140_000, .down = 80_000, .up = 300_000 },
+    .{ .w = 320, .h = 240, .fps = 15, .down_lossy = 0, .down = 0, .up = 170_000 },
 };
 
 const Remote = struct {
@@ -252,6 +280,8 @@ pub fn init(h: calls.MediaHooks) void {
         .audio_mode = f.GetStaticMethodID(e, media_class, "audioMode", "(Z)V"),
         .remote_size = f.GetStaticMethodID(e, media_class, "remoteSize", "(IIII)V"),
         .wake = f.GetStaticMethodID(e, media_class, "wake", "()V"),
+        .pick_size = f.GetStaticMethodID(e, media_class, "pickSize", "(III)J"),
+        .swap_encoder = f.GetStaticMethodID(e, media_class, "swapEncoder", "(ILandroid/view/Surface;I)V"),
     };
 }
 
@@ -312,6 +342,8 @@ pub fn close(id: u32) void {
     if (l.aenc) |c| deleteCodec(c);
     if (l.venc) |c| deleteCodec(c);
     if (l.venc_window) |w| ANativeWindow_release(w);
+    if (l.old_venc) |c| deleteCodec(c);
+    if (l.old_window) |w| ANativeWindow_release(w);
     if (l.ready and l.want_audio) audioUsers(false);
     gpa.destroy(l);
 }
@@ -379,6 +411,24 @@ pub fn requestKeyframe(id: u32) void {
     if (findLocal(id)) |l| l.want_key.store(true, .release);
 }
 
+/// The engine's target for what connection `peer` sends of local stream `id` (0 bps: the
+/// connection is gone). The encoder follows the lowest.
+pub fn setBitrate(id: u32, peer: u32, bps: u32, loss: f32) void {
+    mutex.lock();
+    defer mutex.unlock();
+    const l = findLocal(id) orelse return;
+    for (l.rates[0..l.rate_count], 0..) |*r, i| if (r.peer == peer) {
+        if (bps == 0) {
+            l.rates[i] = l.rates[l.rate_count - 1];
+            l.rate_count -= 1;
+        } else r.* = .{ .peer = peer, .bps = bps, .loss = loss };
+        return;
+    };
+    if (bps == 0 or l.rate_count == l.rates.len) return;
+    l.rates[l.rate_count] = .{ .peer = peer, .bps = bps, .loss = loss };
+    l.rate_count += 1;
+}
+
 fn findLocal(id: u32) ?*Local {
     for (locals.items) |l| if (l.id == id) return l;
     return null;
@@ -444,7 +494,15 @@ fn nativeRemoteSurface(e: *jni.Env, _: jni.jclass, stream: jni.jint, surface: jn
     r.window_changed = true;
 }
 
+/// The camera now writes into the encoder `swapEncoder` handed over.
+fn nativeEncoderSwapped(_: *jni.Env, _: jni.jclass, id: jni.jint) callconv(.c) void {
+    mutex.lock();
+    defer mutex.unlock();
+    if (findLocal(@bitCast(id))) |l| l.swap_done.store(true, .release);
+}
+
 comptime {
+    @export(&nativeEncoderSwapped, .{ .name = "Java_com_wufour_zui_ZuiMedia_nativeEncoderSwapped" });
     @export(&nativeResult, .{ .name = "Java_com_wufour_zui_ZuiMedia_nativeResult" });
     @export(&nativeRotation, .{ .name = "Java_com_wufour_zui_ZuiMedia_nativeRotation" });
     @export(&nativeRemoteSurface, .{ .name = "Java_com_wufour_zui_ZuiMedia_nativeRemoteSurface" });
@@ -458,46 +516,112 @@ fn deleteCodec(c: *AMediaCodec) void {
 }
 
 fn createVideoEncoder(l: *Local) bool {
-    const c = AMediaCodec_createEncoderByType("video/avc") orelse return false;
+    const e = newVideoEncoder(width, height, 30, 900_000) orelse return false;
+    l.venc = e.codec;
+    l.venc_window = e.window;
+    return true;
+}
+
+/// An H.264 encoder fed by a surface (the camera writes into it).
+fn newVideoEncoder(w: i32, h: i32, fps: i32, bps: u32) ?struct { codec: *AMediaCodec, window: *ANativeWindow } {
+    const c = AMediaCodec_createEncoderByType("video/avc") orelse return null;
     const f = AMediaFormat_new() orelse {
         _ = AMediaCodec_delete(c);
-        return false;
+        return null;
     };
     defer _ = AMediaFormat_delete(f);
     AMediaFormat_setString(f, "mime", "video/avc");
-    AMediaFormat_setInt32(f, "width", width);
-    AMediaFormat_setInt32(f, "height", height);
+    AMediaFormat_setInt32(f, "width", w);
+    AMediaFormat_setInt32(f, "height", h);
     AMediaFormat_setInt32(f, "color-format", color_format_surface);
-    AMediaFormat_setInt32(f, "bitrate", 900_000);
-    AMediaFormat_setInt32(f, "frame-rate", 30);
+    AMediaFormat_setInt32(f, "bitrate", @intCast(bps));
+    AMediaFormat_setInt32(f, "frame-rate", fps);
     AMediaFormat_setInt32(f, "i-frame-interval", 3);
     // Baseline profile, level 3.1: what browsers decode everywhere (profile-level-id 42e01f).
     AMediaFormat_setInt32(f, "profile", 1);
     AMediaFormat_setInt32(f, "level", 0x200);
     if (AMediaCodec_configure(c, f, null, null, 1) != 0) {
         // Some encoders refuse an explicit profile/level: their default is baseline anyway.
-        const g = AMediaFormat_new() orelse return false;
+        const g = AMediaFormat_new() orelse return null;
         defer _ = AMediaFormat_delete(g);
         AMediaFormat_setString(g, "mime", "video/avc");
-        AMediaFormat_setInt32(g, "width", width);
-        AMediaFormat_setInt32(g, "height", height);
+        AMediaFormat_setInt32(g, "width", w);
+        AMediaFormat_setInt32(g, "height", h);
         AMediaFormat_setInt32(g, "color-format", color_format_surface);
-        AMediaFormat_setInt32(g, "bitrate", 900_000);
-        AMediaFormat_setInt32(g, "frame-rate", 30);
+        AMediaFormat_setInt32(g, "bitrate", @intCast(bps));
+        AMediaFormat_setInt32(g, "frame-rate", fps);
         AMediaFormat_setInt32(g, "i-frame-interval", 3);
         if (AMediaCodec_configure(c, g, null, null, 1) != 0) {
             _ = AMediaCodec_delete(c);
-            return false;
+            return null;
         }
     }
     var window: ?*ANativeWindow = null;
     if (AMediaCodec_createInputSurface(c, &window) != 0 or AMediaCodec_start(c) != 0) {
         _ = AMediaCodec_delete(c);
-        return false;
+        return null;
     }
-    l.venc = c;
-    l.venc_window = window;
-    return true;
+    return .{ .codec = c, .window = window.? };
+}
+
+/// Follows the engine's target: the encoder's bitrate at once, and the resolution/framerate
+/// step with hysteresis (down on loss or a very low target, up after 10 quiet seconds).
+fn adapt(l: *Local, now: i64) void {
+    if (l.rate_count == 0 or now < l.adapted_at + 500) return;
+    l.adapted_at = now;
+    var bps: u32 = std.math.maxInt(u32);
+    var loss: f32 = 0;
+    for (l.rates[0..l.rate_count]) |r| {
+        bps = @min(bps, r.bps);
+        loss = @max(loss, r.loss);
+    }
+    const c = l.venc orelse return;
+    if (l.applied_bps == 0 or bps * 20 < l.applied_bps * 19 or bps * 20 > l.applied_bps * 21) {
+        const f = AMediaFormat_new() orelse return;
+        defer _ = AMediaFormat_delete(f);
+        AMediaFormat_setInt32(f, "video-bitrate", @intCast(bps));
+        _ = AMediaCodec_setParameters(c, f);
+        l.applied_bps = bps;
+    }
+    if (loss >= 0.02) l.clean_since = now;
+    if (l.old_venc != null or now < l.level_changed_at + 3000) return;
+    const step = ladder[l.level];
+    var next = l.level;
+    if (l.level + 1 < ladder.len and ((loss >= 0.05 and bps < step.down_lossy) or bps < step.down)) {
+        next = l.level + 1;
+    } else if (l.level > 0 and bps >= step.up and now >= l.clean_since + 10_000) {
+        next = l.level - 1;
+    }
+    if (next != l.level) changeLevel(l, next, bps, now);
+}
+
+/// A new encoder at the step's size (the nearest the camera offers) and the camera moved to it.
+fn changeLevel(l: *Local, level: usize, bps: u32, now: i64) void {
+    const e = threadEnv() orelse return;
+    const step = ladder[level];
+    const args = [_]jni.jvalue{ int(l.id), int(step.w), int(step.h) };
+    const size: u64 = @bitCast(e.functions.CallStaticLongMethodA(e, media_class, j.pick_size, &args));
+    if (e.functions.ExceptionCheck(e) == jni.JNI_TRUE) {
+        e.functions.ExceptionClear(e);
+        return;
+    }
+    const w: i32 = @intCast(size >> 32);
+    const h: i32 = @intCast(size & 0xffff_ffff);
+    if (w <= 0 or h <= 0) return;
+    const fresh = newVideoEncoder(w, h, step.fps, bps) orelse return;
+    l.old_venc = l.venc;
+    l.old_window = l.venc_window;
+    l.venc = fresh.codec;
+    l.venc_window = fresh.window;
+    l.params = .{};
+    l.applied_bps = bps;
+    l.level = level;
+    l.level_changed_at = now;
+    l.clean_since = now;
+    zui.log("calls: video now {d}x{d} at {d} fps, {d} kbps", .{ w, h, step.fps, bps / 1000 });
+    const surface = ANativeWindow_toSurface(e, fresh.window);
+    defer e.functions.DeleteLocalRef(e, surface);
+    callJava(e, j.swap_encoder, &.{ int(l.id), .{ .l = surface }, int(step.fps) });
 }
 
 fn createOpusEncoder() ?*AMediaCodec {
@@ -700,8 +824,17 @@ fn service() void {
         if (r.adec) |c| drainAudioDecoder(r, c);
     }
 
+    const now = nowMs();
     for (locals.items) |l| {
+        if (l.swap_done.swap(false, .acq_rel)) {
+            // The camera writes into the new encoder now: the old one can go.
+            if (l.old_venc) |c| deleteCodec(c);
+            if (l.old_window) |w| ANativeWindow_release(w);
+            l.old_venc = null;
+            l.old_window = null;
+        }
         if (l.venc) |c| {
+            adapt(l, now);
             if (l.want_key.swap(false, .acq_rel)) requestSync(c);
             drainVideoEncoder(l, c);
         }
