@@ -1994,3 +1994,10 @@ fn streamCompleted(_: id, _: objc.SEL, _: id, task: id, _: id) callconv(.c) void
     objc.release(task);
     rt.stream_end(conn);
 }
+
+extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
+
+/// The system's CSPRNG (the key store's randomness).
+pub fn randomBytes(buf: []u8) void {
+    arc4random_buf(buf.ptr, buf.len);
+}

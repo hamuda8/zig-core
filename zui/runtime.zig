@@ -24,6 +24,7 @@ const icon_mod = @import("icon.zig");
 const text_mod = @import("text.zig");
 const calls = @import("calls.zig");
 const sse = @import("sse.zig");
+const keys = @import("keys.zig");
 
 const Tree = tree_mod.Tree;
 
@@ -393,6 +394,7 @@ pub fn Fx(comptime Msg: type) type {
             save_file: *const fn (SaveFile) void,
             open_events: *const fn (EventStream, *const fn (ServerEvent) Msg) u32,
             close_events: *const fn (u32) void,
+            key: *const fn (keys.Request, *const fn (keys.Result) Msg) u32,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -484,6 +486,12 @@ pub fn Fx(comptime Msg: type) type {
 
         pub fn closeEvents(fx: Self, stream: u32) void {
             fx.vt.close_events(stream);
+        }
+
+        /// A request to the secure key store (zui/keys.zig): keys the app uses by name and can
+        /// never read. The answer arrives through `done`; returns the request's id.
+        pub fn key(fx: Self, req: keys.Request, done: *const fn (keys.Result) Msg) u32 {
+            return fx.vt.key(req, done);
         }
 
         /// Keeps the screen on while `on` (a courier's navigation, a scanner).
@@ -1355,7 +1363,50 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .save_file = fxSaveFile,
             .open_events = fxOpenEvents,
             .close_events = fxCloseEvents,
+            .key = fxKey,
         };
+
+        // ---- Secure keys: the web's WebCrypto answers later (H.keyRequest); elsewhere zui's
+        // engine runs on the host's secure storage (and its keystore, H.KeyHw). Every answer is
+        // delivered as a message after the current update.
+        const KeyStore = struct {
+            pub const Hw = if (@hasDecl(H, "KeyHw")) H.KeyHw else struct {};
+            pub fn get(a: std.mem.Allocator, k: []const u8) ?[]u8 {
+                return H.storageGet(a, k, true);
+            }
+            pub fn set(k: []const u8, v: []const u8) void {
+                H.storageSet(k, v, true);
+            }
+            pub fn remove(k: []const u8) void {
+                H.storageRemove(k, true);
+            }
+            pub fn random(buf: []u8) void {
+                H.randomBytes(buf);
+            }
+        };
+        var key_done: std.AutoHashMapUnmanaged(u32, *const fn (keys.Result) Msg) = .empty;
+        var key_ready: std.AutoHashMapUnmanaged(u32, struct { id: u32, status: keys.Status, data: []u8 }) = .empty;
+
+        fn fxKey(req: keys.Request, done: *const fn (keys.Result) Msg) u32 {
+            const id = newId();
+            key_done.put(gpa, id, done) catch return 0;
+            if (@hasDecl(H, "keyRequest")) {
+                H.keyRequest(id, req);
+            } else {
+                var arena = std.heap.ArenaAllocator.init(gpa);
+                defer arena.deinit();
+                const r = keys.Engine(KeyStore).run(arena.allocator(), req);
+                keyDone(id, r[0], r[1]);
+            }
+            return id;
+        }
+
+        /// The answer to key request `id` (`data` is copied).
+        pub fn keyDone(id: u32, status: keys.Status, data: []const u8) void {
+            const t = newId();
+            key_ready.put(gpa, t, .{ .id = id, .status = status, .data = gpa.dupe(u8, data) catch return }) catch return;
+            H.timer(t, 0);
+        }
 
         // ---- Server-Sent Events: the host streams the bytes of a GET, zui parses them (sse.zig)
         // and connects again. Each connection has its own id, so a late chunk of an old one is
@@ -1987,6 +2038,16 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         }
 
         pub fn timerDone(id: u32) void {
+            if (key_ready.fetchRemove(id)) |kv| {
+                const r = kv.value;
+                defer {
+                    std.crypto.secureZero(u8, r.data);
+                    gpa.free(r.data);
+                }
+                const done = (key_done.fetchRemove(r.id) orelse return).value;
+                if (started) dispatch(done(.{ .id = r.id, .status = r.status, .data = r.data }));
+                return;
+            }
             if (id != 0 and id == hold_timer) return if (started) holdFired();
             if (stream_timers.fetchRemove(id)) |kv| {
                 // Connect again, unless the app closed the stream meanwhile.

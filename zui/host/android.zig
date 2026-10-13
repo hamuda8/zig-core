@@ -768,3 +768,10 @@ pub fn video(id: u32, v: zui.Video) void {
 pub fn closeSocket(id: u32) void {
     call(methods.close_socket, &.{int(id)});
 }
+
+extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
+
+/// The system's CSPRNG (the key store's randomness).
+pub fn randomBytes(buf: []u8) void {
+    arc4random_buf(buf.ptr, buf.len);
+}

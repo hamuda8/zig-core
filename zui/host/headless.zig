@@ -371,6 +371,11 @@ pub fn backState(handler: bool, has_history: bool, _: bool) void {
     back_handler = handler;
     back_history = has_history;
 }
+/// Test randomness (the key store's): fixed seed, so runs repeat.
+var test_prng = std.Random.DefaultPrng.init(0x5eed);
+pub fn randomBytes(buf: []u8) void {
+    test_prng.random().bytes(buf);
+}
 pub fn rootBackground(argb: u32) void {
     root_background = argb;
 }
@@ -1157,4 +1162,53 @@ test "recording a voice message and playing it" {
     try std.testing.expect(D.findText("9 bytes, 750 of 2000 ms") != 0);
     try D.press("Seek");
     try std.testing.expectEqual(@as(u32, 1500), playback_controls.items[playback_controls.items.len - 1].seek);
+}
+
+const Keys = struct {
+    pub const Msg = union(enum) { go, got: zui.keys.Result };
+    pub const State = struct { log: [512]u8 = undefined, len: usize = 0, step: u8 = 0, public: [65]u8 = undefined };
+    pub fn init() State {
+        return .{};
+    }
+    fn onKey(r: zui.keys.Result) Msg {
+        return .{ .got = r };
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .go => _ = fx.key(.{ .op = .generate, .name = "sig", .kind = .ecdsa }, onKey),
+            .got => |r| {
+                const w = std.fmt.bufPrint(s.log[s.len..], "{t}:{d};", .{ r.status, r.data.len }) catch return;
+                s.len += w.len;
+                s.step += 1;
+                switch (s.step) {
+                    1 => {
+                        @memcpy(&s.public, r.data[0..65]);
+                        _ = fx.key(.{ .op = .sign, .name = "sig", .data = "hi" }, onKey);
+                    },
+                    2 => {
+                        const pk = std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey.fromSec1(&s.public) catch return;
+                        std.crypto.sign.ecdsa.EcdsaP256Sha256.Signature.fromBytes(r.data[0..64].*).verify("hi", pk) catch return;
+                        _ = fx.key(.{ .op = .public, .name = "nope" }, onKey);
+                    },
+                    else => {},
+                }
+            },
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{ .on_press = .go });
+        ui.text("Go", .{});
+        ui.text(s.log[0..s.len], .{});
+        ui.end();
+    }
+};
+
+test "secure keys through fx.key: answers arrive as messages" {
+    const D = Driver(Keys);
+    D.start(200, 400);
+    defer D.reset();
+    try D.press("Go");
+    try std.testing.expectEqual(@as(usize, 0), D.R.appState().len); // not during the update
+    D.runTimers();
+    try std.testing.expectEqualStrings("ok:65;ok:64;missing:0;", D.R.appState().log[0..D.R.appState().len]);
 }

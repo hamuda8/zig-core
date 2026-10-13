@@ -176,6 +176,91 @@ export async function start(wasm, mount = document.body, options = {}) {
   // Event streams: fetch() reads the answer as it arrives (EventSource cannot send headers).
   const streams = new Map();
 
+  // Secure keys (zui/keys.zig): WebCrypto keys made non-extractable, kept in IndexedDB, so the
+  // page can use them and nobody can read them. Requests answer later through zui_key_done.
+  let keyDbP = null;
+  const keyStore = (mode, fn) => (keyDbP ||= new Promise((res, rej) => {
+    const r = indexedDB.open('zui-keys', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('keys');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  })).then((db) => new Promise((res, rej) => {
+    const tx = db.transaction('keys', mode);
+    const req = fn(tx.objectStore('keys'));
+    tx.oncomplete = () => res(req.result);
+    tx.onerror = () => rej(tx.error);
+  }));
+  const KEY_ALG = { 1: { name: 'ECDH', namedCurve: 'P-256' }, 2: { name: 'ECDSA', namedCurve: 'P-256' }, 3: { name: 'AES-GCM', length: 256 } };
+  const KEY_USE = { 1: ['deriveBits'], 2: ['sign'], 3: ['encrypt', 'decrypt'] };
+  const OK = 0, MISSING = 1, FAILED = 2;
+  const subtle = globalThis.crypto?.subtle;
+  const keyGet = async (name, kind) => {
+    const k = await keyStore('readonly', (st) => st.get(name));
+    return k && (!kind || k.kind === kind) ? k : null;
+  };
+  const keyPut = (name, v) => keyStore('readwrite', (st) => st.put(v, name));
+  // The public key of a PKCS#8 private key: imported once extractable (as JWK), then forgotten.
+  const publicOf = async (der, alg) => {
+    const jwk = await subtle.exportKey('jwk', await subtle.importKey('pkcs8', der, alg, true, alg.name === 'ECDH' ? ['deriveBits'] : ['sign']));
+    const b = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+    const out = new Uint8Array(65);
+    out[0] = 4;
+    out.set(b(jwk.x), 1);
+    out.set(b(jwk.y), 33);
+    return out;
+  };
+  const runKey = async (op, kind, name, data, peer, iv, aad, salt, info, into) => {
+    switch (op) {
+      case 1: { // generate
+        if (kind === 3) {
+          await keyPut(name, { kind, key: await subtle.generateKey(KEY_ALG[3], false, KEY_USE[3]), pub: null });
+          return [OK];
+        }
+        const pair = await subtle.generateKey(KEY_ALG[kind], false, KEY_USE[kind]);
+        const pub = new Uint8Array(await subtle.exportKey('raw', pair.publicKey));
+        await keyPut(name, { kind, key: pair.privateKey, pub });
+        return [OK, pub];
+      }
+      case 2: { // import
+        if (kind === 3) {
+          await keyPut(name, { kind, key: await subtle.importKey('raw', data, 'AES-GCM', false, KEY_USE[3]), pub: null });
+          return [OK];
+        }
+        const pub = await publicOf(data, KEY_ALG[kind]);
+        await keyPut(name, { kind, key: await subtle.importKey('pkcs8', data, KEY_ALG[kind], false, KEY_USE[kind]), pub });
+        return [OK, pub];
+      }
+      case 3: { // public
+        const k = await keyGet(name);
+        return k ? (k.pub ? [OK, k.pub] : [FAILED]) : [MISSING];
+      }
+      case 4: await keyStore('readwrite', (st) => st.delete(name)); return [OK];
+      case 5: { // sign
+        const k = await keyGet(name, 2);
+        if (!k) return [MISSING];
+        return [OK, new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, k.key, data))];
+      }
+      case 6: { // ecdh
+        const k = await keyGet(name, 1);
+        if (!k) return [MISSING];
+        const other = await subtle.importKey('raw', peer, KEY_ALG[1], false, []);
+        const bits = await subtle.deriveBits({ name: 'ECDH', public: other }, k.key, 256);
+        if (!into) return [OK, new Uint8Array(bits)];
+        const base = await subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
+        const aes = await subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt, info }, base, KEY_ALG[3], false, KEY_USE[3]);
+        await keyPut(into, { kind: 3, key: aes, pub: null });
+        return [OK];
+      }
+      case 7: case 8: { // encrypt, decrypt
+        const k = await keyGet(name, 3);
+        if (!k || iv.length !== 12) return [MISSING];
+        const f = op === 7 ? subtle.encrypt : subtle.decrypt;
+        return [OK, new Uint8Array(await f.call(subtle, { name: 'AES-GCM', iv, additionalData: aad }, k.key, data))];
+      }
+    }
+    return [FAILED];
+  };
+
   // Copies bytes into wasm memory for one call.
   const withBytes = (bytes, fn) => {
     const ptr = ex.zui_alloc(Math.max(1, bytes.length));
@@ -443,6 +528,13 @@ export async function start(wasm, mount = document.body, options = {}) {
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
+      },
+      zui_key(id, op, kind, np, nl, dp, dl, pp, pl, ip, il, ap, al, sp, sl, fp, fl, tp, tl) {
+        // Copied now: the request outlives this call.
+        const bytes = (ptr, len) => (len === 0 ? new Uint8Array(0) : new Uint8Array(memory.buffer, ptr >>> 0, len).slice());
+        const args = [op, kind, str(np, nl), bytes(dp, dl), bytes(pp, pl), bytes(ip, il), bytes(ap, al), bytes(sp, sl), bytes(fp, fl), str(tp, tl)];
+        const reply = ([status, data = new Uint8Array(0)]) => withBytes(data, (p, n) => ex.zui_key_done(id, status, p, n));
+        (subtle ? runKey(...args) : Promise.resolve([3])).then(reply, () => reply([FAILED]));
       },
       zui_content(id, w, h) {
         const el = views.get(id);

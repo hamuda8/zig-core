@@ -59,6 +59,7 @@ const js = struct {
     extern "zui" fn zui_pick_photo(camera: u32, max_size: u32, quality: u32) void;
     extern "zui" fn zui_pick_file(accept: [*]const u8, accept_len: usize) void;
     extern "zui" fn zui_save_file(name: [*]const u8, name_len: usize, mime: [*]const u8, mime_len: usize, data: [*]const u8, data_len: usize, share: u32) void;
+    extern "zui" fn zui_key(id: u32, op: u32, kind: u32, name: [*]const u8, name_len: usize, data: [*]const u8, data_len: usize, peer: [*]const u8, peer_len: usize, iv: [*]const u8, iv_len: usize, aad: [*]const u8, aad_len: usize, salt: [*]const u8, salt_len: usize, info: [*]const u8, info_len: usize, into: [*]const u8, into_len: usize) void;
     extern "zui" fn zui_now() f64;
     extern "zui" fn zui_tz_offset() i32;
     extern "zui" fn zui_vibrate(ms: u32) void;
@@ -243,6 +244,10 @@ pub fn controlPlayback(id: u32, c: zui.PlaybackControl) void {
 pub fn video(id: u32, v: zui.Video) void {
     js.zui_video(id, v.stream, @intFromBool(v.mirror), @intFromBool(v.cover));
 }
+/// The key store is WebCrypto's (shells/web/zui.js): non-extractable keys in IndexedDB.
+pub fn keyRequest(id: u32, r: zui.keys.Request) void {
+    js.zui_key(id, @intFromEnum(r.op), @intFromEnum(r.kind), r.name.ptr, r.name.len, r.data.ptr, r.data.len, r.peer.ptr, r.peer.len, r.iv.ptr, r.iv.len, r.aad.ptr, r.aad.len, r.salt.ptr, r.salt.len, r.info.ptr, r.info.len, r.into.ptr, r.into.len);
+}
 pub fn now() i64 {
     return @intFromFloat(js.zui_now());
 }
@@ -360,6 +365,9 @@ pub fn exportEntry(comptime App: type) void {
         fn pickDone(ptr: [*]const u8, len: usize) callconv(.c) void {
             R.pickDone(ptr[0..len]);
         }
+        fn keyDone(id: u32, status: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.keyDone(id, std.enums.fromInt(zui.keys.Status, status) orelse .failed, ptr[0..len]);
+        }
         fn back() callconv(.c) u32 {
             return @intFromBool(R.back());
         }
@@ -397,6 +405,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.recordEvent, .{ .name = "zui_record_event" });
     @export(&Entry.playEvent, .{ .name = "zui_play_event" });
     @export(&Entry.back, .{ .name = "zui_back" });
+    @export(&Entry.keyDone, .{ .name = "zui_key_done" });
     @export(&Entry.pickDone, .{ .name = "zui_pick_done" });
     @export(&Entry.fileDone, .{ .name = "zui_file_done" });
     @export(&Entry.streamStatus, .{ .name = "zui_stream_status" });

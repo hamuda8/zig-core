@@ -72,6 +72,8 @@ pub const SaveFile = runtime.SaveFile;
 pub const EventStream = runtime.EventStream;
 pub const ServerEvent = runtime.ServerEvent;
 pub const sse = @import("sse.zig");
+/// The secure key store (requests through `fx.key`).
+pub const keys = @import("keys.zig");
 pub const Transform = style.Transform;
 pub const ImageFilter = style.ImageFilter;
 pub const Shadow = style.Shadow;
@@ -139,6 +141,7 @@ test {
     _ = icon;
     _ = calls;
     _ = sse;
+    _ = keys;
 }
 
 /// Wall-clock time: milliseconds since 1970-01-01 UTC.
