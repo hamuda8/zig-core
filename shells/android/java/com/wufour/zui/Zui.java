@@ -169,7 +169,9 @@ public final class Zui {
     static void create(int id, int kind) {
         View v;
         switch (kind) {
-            case TEXT: {
+            case TEXT:
+            case 9: // selectable text (ZuiStyle.richText)
+            {
                 TextView t = new TextView(activity);
                 t.setIncludeFontPadding(false);
                 t.setPadding(0, 0, 0, 0);

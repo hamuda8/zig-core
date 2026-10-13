@@ -314,6 +314,7 @@ fn newString(s: []const u8) jni.jstring {
 
 pub fn create(id: u32, kind: zui.tree.Kind) void {
     call(methods.create, &.{ int(id), int(@backingInt(kind)) });
+    styleCreated(id, kind);
 }
 pub fn destroy(id: u32) void {
     call(methods.destroy, &.{int(id)});
@@ -322,15 +323,18 @@ pub fn insert(parent: u32, id: u32, index: u32) void {
     call(methods.insert, &.{ int(parent), int(id), int(index) });
 }
 pub fn frame(id: u32, r: zui.Rect) void {
+    if (animatedFrame(id, r)) return;
     call(methods.frame, &.{ int(id), float(r.x), float(r.y), float(r.w), float(r.h) });
 }
 pub fn box(id: u32, b: zui.Box) void {
     call(methods.box, &.{ int(id), int(b.background), float(b.radius), float(b.border_width), int(b.border_color), float(b.opacity) });
+    styleBox(id, b);
 }
 pub fn pressable(id: u32, on: bool) void {
     call(methods.pressable, &.{ int(id), boolean(on) });
 }
 pub fn text(id: u32, s: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
+    if (f.letter_spacing != 0 or isSelectable(id)) return richText(id, s, &.{}, f, color, a);
     const js = newString(s);
     defer env.functions.DeleteLocalRef(env, js);
     call(methods.text, &.{ int(id), object(js), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(f.max_lines), int(color), int(@backingInt(a)) });
@@ -352,6 +356,7 @@ pub fn rootBackground(argb: u32) void {
     call(methods.root_background, &.{int(argb)});
 }
 pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
+    if (f.letter_spacing != 0) return measureRich(s, &.{}, f, max_width);
     const js = newString(s);
     defer env.functions.DeleteLocalRef(env, js);
     const args = [_]jni.jvalue{ object(js), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(f.max_lines), float(max_width) };
@@ -576,6 +581,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.streamEnd, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeStreamEnd" });
     @export(&Entry.linkEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeLink" });
     @export(&Entry.deviceEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeDevice" });
+    exportStyle(R);
 }
 
 extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
@@ -592,6 +598,7 @@ pub fn log(line: []const u8) void {
 pub fn transform(id: u32, t: zui.Transform) void {
     const o = t.origin orelse [2]f32{ 0, 0 };
     call(methods.transform, &.{ int(id), float(t.rotate), float(t.tilt), float(t.perspective), boolean(t.origin != null), float(o[0]), float(o[1]) });
+    styleTransformed(id, t.rotate);
 }
 pub fn clip(id: u32, on: bool) void {
     call(methods.clip, &.{ int(id), boolean(on) });
@@ -774,4 +781,205 @@ extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
 /// The system's CSPRNG (the key store's randomness).
 pub fn randomBytes(buf: []u8) void {
     arc4random_buf(buf.ptr, buf.len);
+}
+
+// ---- Styling and interaction (ZuiStyle.java): rich text, pictures from memory, decorations,
+// transitions, spinners, scroll control, the haptic tick of a long press ----
+
+var style_class: jni.jclass = null;
+var style_m: struct {
+    rich_text: jni.jmethodID,
+    measure_rich: jni.jmethodID,
+    image_bytes: jni.jmethodID,
+    image_fit: jni.jmethodID,
+    decor: jni.jmethodID,
+    transition: jni.jmethodID,
+    frame: jni.jmethodID,
+    alpha_to: jni.jmethodID,
+    rotate_from: jni.jmethodID,
+    spin: jni.jmethodID,
+    haptic: jni.jmethodID,
+    watch_scroll: jni.jmethodID,
+    scroll_to: jni.jmethodID,
+} = undefined;
+
+fn styleBind() void {
+    if (style_class != null) return;
+    const f = env.functions;
+    const local = f.FindClass(env, "com/wufour/zui/ZuiStyle");
+    style_class = f.NewGlobalRef(env, local);
+    f.DeleteLocalRef(env, local);
+    inline for (.{
+        .{ "rich_text", "richText", "(ILjava/lang/String;[IFIFZIIIFZ)V" },
+        .{ "measure_rich", "measureRich", "(Ljava/lang/String;[IFIFZIFF)J" },
+        .{ "image_bytes", "imageBytes", "(ILjava/lang/String;[B)V" },
+        .{ "image_fit", "imageFit", "(II)V" },
+        .{ "decor", "decor", "(II[F[I)V" },
+        .{ "transition", "transition", "(IIFFFF)V" },
+        .{ "frame", "frame", "(IFFFF)Z" },
+        .{ "alpha_to", "alphaTo", "(IF)V" },
+        .{ "rotate_from", "rotateFrom", "(IF)V" },
+        .{ "spin", "spin", "(II)V" },
+        .{ "haptic", "haptic", "()V" },
+        .{ "watch_scroll", "watchScroll", "(I)V" },
+        .{ "scroll_to", "scrollTo", "(IFZ)V" },
+    }) |m| @field(style_m, m[0]) = f.GetStaticMethodID(env, style_class, m[1], m[2]);
+}
+
+fn callStyle(method: jni.jmethodID, args: []const jni.jvalue) void {
+    env.functions.CallStaticVoidMethodA(env, style_class, method, args.ptr);
+    check();
+}
+
+/// Per view: 1 selectable text, 2 animated (a transition); and the last rotation of animated views.
+var style_flags: std.ArrayList(u8) = .empty;
+var style_rotation: std.AutoHashMapUnmanaged(u32, f32) = .empty;
+var dummy_flag: u8 = 0;
+
+fn flagsOf(id: u32) *u8 {
+    while (style_flags.items.len <= id) style_flags.append(zui.allocator, 0) catch return &dummy_flag;
+    return &style_flags.items[id];
+}
+
+fn isSelectable(id: u32) bool {
+    return flagsOf(id).* & 1 != 0;
+}
+
+fn styleCreated(id: u32, kind: zui.tree.Kind) void {
+    styleBind();
+    flagsOf(id).* = if (kind == .text_select) 1 else 0;
+    _ = style_rotation.remove(id);
+    if (kind == .scroll or kind == .scroll_x) callStyle(style_m.watch_scroll, &.{int(id)});
+}
+
+fn animatedFrame(id: u32, r: zui.Rect) bool {
+    if (flagsOf(id).* & 2 == 0) return false;
+    const args = [_]jni.jvalue{ int(id), float(r.x), float(r.y), float(r.w), float(r.h) };
+    const done = env.functions.CallStaticBooleanMethodA(env, style_class, style_m.frame, &args);
+    check();
+    return done != 0;
+}
+
+fn styleBox(id: u32, b: zui.Box) void {
+    if (!b.isSimple()) {
+        const d = b.decor;
+        const n: usize = d.gradient_count;
+        var fl: [12 + 6]f32 = undefined;
+        @memcpy(fl[0..4], &d.radii);
+        @memcpy(fl[4..8], &d.border_widths);
+        @memcpy(fl[8..11], &d.shadow);
+        fl[11] = d.gradient_angle;
+        @memcpy(fl[12..][0..n], d.gradient_at[0..n]);
+        var cs: [5 + 6]u32 = undefined;
+        @memcpy(cs[0..4], &d.border_colors);
+        cs[4] = d.shadow_color;
+        @memcpy(cs[5..][0..n], d.gradient_colors[0..n]);
+        const f = env.functions;
+        const jf = f.NewFloatArray(env, @intCast(12 + n));
+        defer f.DeleteLocalRef(env, jf);
+        f.SetFloatArrayRegion(env, jf, 0, @intCast(12 + n), &fl);
+        const jc = f.NewIntArray(env, @intCast(5 + n));
+        defer f.DeleteLocalRef(env, jc);
+        f.SetIntArrayRegion(env, jc, 0, @intCast(5 + n), @ptrCast(&cs));
+        callStyle(style_m.decor, &.{ int(id), int(b.background), object(jf), object(jc) });
+    }
+    if (flagsOf(id).* & 2 != 0) callStyle(style_m.alpha_to, &.{ int(id), float(b.opacity) });
+}
+
+fn styleTransformed(id: u32, rotate: f32) void {
+    if (flagsOf(id).* & 2 == 0) return;
+    const was = style_rotation.get(id) orelse rotate;
+    style_rotation.put(zui.allocator, id, rotate) catch {};
+    if (was != rotate) callStyle(style_m.rotate_from, &.{ int(id), float(was) });
+}
+
+/// Spans as Java wants them: 5 ints each, offsets in UTF-16 units.
+fn spanInts(s: []const u8, spans: []const zui.Span) jni.jobject {
+    const f = env.functions;
+    const ints = zui.allocator.alloc(i32, spans.len * 5) catch return f.NewIntArray(env, 0);
+    defer zui.allocator.free(ints);
+    for (spans, 0..) |sp, k| {
+        const a = @min(s.len, sp.start);
+        const b = @min(s.len, sp.start + sp.len);
+        const flags: i32 = @as(i32, @intFromBool(sp.bold)) | @as(i32, @intFromBool(sp.italic)) << 1 | @as(i32, @intFromBool(sp.mono)) << 2 | @as(i32, @intFromBool(sp.underline)) << 3 | @as(i32, @intFromBool(sp.strike)) << 4;
+        ints[k * 5 ..][0..5].* = .{ utf16Len(s[0..a]), utf16Len(s[0..b]), flags, @bitCast(sp.color), sp.link };
+    }
+    const arr = f.NewIntArray(env, @intCast(ints.len));
+    if (ints.len > 0) f.SetIntArrayRegion(env, arr, 0, @intCast(ints.len), ints.ptr);
+    return arr;
+}
+
+fn utf16Len(s: []const u8) i32 {
+    return @intCast(std.unicode.calcUtf16LeLen(s) catch s.len);
+}
+
+pub fn richText(id: u32, s: []const u8, spans: []const zui.Span, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
+    const js = newString(s);
+    defer env.functions.DeleteLocalRef(env, js);
+    const arr = spanInts(s, spans);
+    defer env.functions.DeleteLocalRef(env, arr);
+    callStyle(style_m.rich_text, &.{ int(id), object(js), object(arr), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(f.max_lines), int(color), int(@backingInt(a)), float(f.letter_spacing), boolean(isSelectable(id)) });
+}
+
+pub fn measureRich(s: []const u8, spans: []const zui.Span, f: zui.Font, max_width: f32) zui.Size {
+    styleBind();
+    const js = newString(s);
+    defer env.functions.DeleteLocalRef(env, js);
+    const arr = spanInts(s, spans);
+    defer env.functions.DeleteLocalRef(env, arr);
+    const args = [_]jni.jvalue{ object(js), object(arr), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(f.max_lines), float(max_width), float(f.letter_spacing) };
+    const bits: u64 = @bitCast(env.functions.CallStaticLongMethodA(env, style_class, style_m.measure_rich, &args));
+    check();
+    return .{ .w = @bitCast(@as(u32, @truncate(bits >> 32))), .h = @bitCast(@as(u32, @truncate(bits))) };
+}
+
+/// Long press and the context menu are timed in zui; a phone has no mouse to hover.
+pub fn gestures(_: u32, _: zui.Gestures) void {}
+
+pub fn imageBytes(id: u32, key: []const u8, bytes: []const u8) void {
+    const f = env.functions;
+    const jk = newString(key);
+    defer f.DeleteLocalRef(env, jk);
+    const jb = f.NewByteArray(env, @intCast(bytes.len));
+    defer f.DeleteLocalRef(env, jb);
+    if (bytes.len > 0) f.SetByteArrayRegion(env, jb, 0, @intCast(bytes.len), bytes.ptr);
+    callStyle(style_m.image_bytes, &.{ int(id), object(jk), object(jb) });
+}
+pub fn imageFit(id: u32, fit: zui.Fit) void {
+    callStyle(style_m.image_fit, &.{ int(id), int(@intFromEnum(fit)) });
+}
+pub fn transition(id: u32, t: ?zui.Transition) void {
+    const fl = flagsOf(id);
+    if (t) |tr| {
+        fl.* |= 2;
+        const p = tr.easing.controlPoints();
+        callStyle(style_m.transition, &.{ int(id), int(tr.duration_ms), float(p[0]), float(p[1]), float(p[2]), float(p[3]) });
+    } else {
+        fl.* &= ~@as(u8, 2);
+        callStyle(style_m.transition, &.{ int(id), int(0), float(0), float(0), float(1), float(1) });
+    }
+}
+pub fn spin(id: u32, period_ms: u16) void {
+    callStyle(style_m.spin, &.{ int(id), int(period_ms) });
+}
+pub fn haptic() void {
+    callStyle(style_m.haptic, &.{});
+}
+pub fn scrollTo(id: u32, offset: f32, animated: bool) void {
+    callStyle(style_m.scroll_to, &.{ int(id), float(offset), boolean(animated) });
+}
+
+fn exportStyle(comptime R: type) void {
+    const Entry = struct {
+        fn spanPress(e: *jni.Env, _: jni.jclass, id: jni.jint, index: jni.jint) callconv(.c) void {
+            bind(e);
+            R.spanPress(@bitCast(id), @bitCast(index));
+        }
+        fn scroll(e: *jni.Env, _: jni.jclass, id: jni.jint, offset: f32) callconv(.c) void {
+            bind(e);
+            R.scrollEvent(@bitCast(id), offset);
+        }
+    };
+    @export(&Entry.spanPress, .{ .name = "Java_com_wufour_zui_ZuiStyle_nativeSpan" });
+    @export(&Entry.scroll, .{ .name = "Java_com_wufour_zui_ZuiStyle_nativeScroll" });
 }

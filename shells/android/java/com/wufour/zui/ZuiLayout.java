@@ -19,6 +19,8 @@ public final class ZuiLayout extends ViewGroup {
 
     public ZuiLayout(Context context) {
         super(context);
+        // Children may draw outside their frame (a shadow), as on the web; `clip` cuts them.
+        setClipChildren(false);
     }
 
     @Override

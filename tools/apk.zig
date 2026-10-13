@@ -81,7 +81,15 @@ pub fn main(init: std.process.Init) !void {
 
     var d8: std.ArrayList([]const u8) = .empty;
     try d8.appendSlice(arena, &.{ try tool(arena, bt, "d8", bat_ext), "--release", "--min-api", opts.min_sdk, "--lib", android_jar, "--output", stage });
-    try collect(arena, io, classes, ".class", &d8);
+    // The classes go in an argument file: listed on the command line they pass Windows's
+    // 8191-character limit as soon as the shim grows or the build directory is deep.
+    var class_files: std.ArrayList([]const u8) = .empty;
+    try collect(arena, io, classes, ".class", &class_files);
+    var arg_text: std.ArrayList(u8) = .empty;
+    for (class_files.items) |f| try arg_text.print(arena, "{s}\n", .{f});
+    const arg_file = try join(arena, &.{ work, "d8-classes.txt" });
+    try cwd.writeFile(io, .{ .sub_path = arg_file, .data = arg_text.items });
+    try d8.append(arena, try std.fmt.allocPrint(arena, "@{s}", .{arg_file}));
     try run(arena, io, env, null, d8.items);
 
     // 3. Assemble: aapt2's entries as they are, then classes.dex and the native libraries,

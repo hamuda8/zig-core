@@ -144,7 +144,7 @@ pub const AppOptions = struct {
 };
 
 /// The fixed Android shim (shells/android/java/com/wufour/zui). Listed so the APK rebuilds when one changes.
-const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java" };
+const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java", "ZuiStyle.java" };
 /// zui's Android resources (the widget), listed for the same reason.
 const android_res = [_][]const u8{ "layout/zui_widget.xml", "xml/zui_widget_info.xml", "drawable/zui_widget_bg.xml" };
 
