@@ -3,7 +3,8 @@
 //!   for the web apps;
 //! - Firebase Cloud Messaging HTTP v1 for Android: a service account's RS256-signed JWT is
 //!   exchanged for an access token (RSA signing is here, since std only verifies RSA);
-//! - APNs for iOS: an ES256 provider token; APNs only speaks HTTP/2 (see apns.zig).
+//! - APNs for iOS: an ES256 provider token, sent over HTTP/2 (apns.zig on h2.zig, hpack.zig and
+//!   tls_client.zig, which is std's TLS client with ALPN added).
 //!
 //! Each send returns the push service's status so callers can drop subscriptions that are gone
 //! (404 / 410).
@@ -11,6 +12,10 @@
 const std = @import("std");
 pub const rsa = @import("rsa.zig");
 pub const jwt = @import("jwt.zig");
+pub const hpack = @import("hpack.zig");
+pub const h2 = @import("h2.zig");
+pub const tls_client = @import("tls_client.zig");
+pub const apns = @import("apns.zig");
 
 const P256 = std.crypto.ecc.P256;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -261,4 +266,7 @@ test "VAPID header verifies with the public key" {
 test {
     _ = rsa;
     _ = jwt;
+    _ = hpack;
+    _ = h2;
+    _ = apns;
 }

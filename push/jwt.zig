@@ -69,7 +69,8 @@ pub fn p8PrivateKey(gpa: std.mem.Allocator, pem: []const u8) ![32]u8 {
     // PKCS#8: the ECPrivateKey's privateKey is the one 32-byte OCTET STRING (04 20 ...) inside.
     var i: usize = 0;
     while (i + 34 <= der.len) : (i += 1) {
-        if (der[i] == 0x04 and der[i + 1] == 0x20 and i >= 2 and der[i - 2] == 0x02 and der[i - 1] == 0x01) {
+        // version INTEGER 1 (02 01 01), then the key (04 20 ...).
+        if (der[i] == 0x04 and der[i + 1] == 0x20 and i >= 3 and der[i - 3] == 0x02 and der[i - 2] == 0x01 and der[i - 1] == 0x01) {
             var key: [32]u8 = undefined;
             @memcpy(&key, der[i + 2 ..][0..32]);
             return key;
@@ -89,4 +90,19 @@ test es256 {
     const n = try b64url.Decoder.calcSizeForSlice(token[0..dot]);
     try b64url.Decoder.decode(header[0..n], token[0..dot]);
     try std.testing.expectEqualStrings("{\"alg\":\"ES256\",\"kid\":\"KEYID\"}", header[0..n]);
+}
+
+test p8PrivateKey {
+    // A throwaway key made with `openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256`,
+    // laid out like Apple's .p8 files (PKCS#8 with the public key inside).
+    const pem =
+        \\-----BEGIN PRIVATE KEY-----
+        \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgr6M8rNgfivNdbkPB
+        \\BN74rINR8070VBpqqJtMg1BRYc2hRANCAAT9mzlgrjiZdsHmByUr86Y+8uL2ZIwC
+        \\deQKoaQuQuKpX15j2EZrnRKlth40NBhoBze/V+lHZDE4S7hczt5ihUjc
+        \\-----END PRIVATE KEY-----
+    ;
+    var want: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&want, "afa33cacd81f8af35d6e43c104def8ac8351f34ef4541a6aa89b4c83505161cd");
+    try std.testing.expectEqualSlices(u8, &want, &try p8PrivateKey(std.testing.allocator, pem));
 }
