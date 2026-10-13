@@ -143,6 +143,10 @@ pub const View = struct {
 pub const Gesture = struct {
     /// A tap at this screen point (no drag, one finger, short).
     tap: ?[2]f64 = null,
+    /// A pressable marker was tapped (its key; see `handleMarkers`).
+    marker_press: ?u64 = null,
+    /// A draggable marker was let go at a new place.
+    marker_drop: ?struct { key: u64, at: LatLng } = null,
 };
 
 /// A camera move over time (flyTo, easeTo, fitBounds).
@@ -180,6 +184,8 @@ pub const State = struct {
     can_tilt: bool = true,
     /// Where and when the current single-finger touch began, for taps.
     touch_start: ?struct { x: f64, y: f64, ms: i64, moved: bool, many: bool } = null,
+    /// A marker being dragged: its key, where it is now, and where the finger holds it.
+    drag: ?struct { key: u64, at: LatLng, dx: f64, dy: f64, x0: f64, y0: f64, moved: bool = false } = null,
 
     const Finger = struct { id: u32, x: f64, y: f64 };
     const Pinch = struct {
@@ -374,6 +380,64 @@ pub const State = struct {
         return .{};
     }
 
+    /// `handle`, with markers that can be pressed or dragged (`Marker.pressable`,
+    /// `Marker.draggable`). A finger that comes down on a draggable marker moves the marker,
+    /// not the map; `draw` shows it under the finger, and letting go gives `marker_drop`. A tap
+    /// on a pressable marker gives `marker_press` instead of `tap`.
+    pub fn handleMarkers(s: *State, p: zui.Pointer, markers: []const Marker) Gesture {
+        const x: f64 = p.x;
+        const y: f64 = p.y;
+        if (s.drag) |*d| switch (p.kind) {
+            .move => {
+                if (std.math.hypot(x - d.x0, y - d.y0) > 4) d.moved = true;
+                if (d.moved) if (s.view().toMap(x - d.dx, y - d.dy)) |at| {
+                    d.at = at;
+                };
+                return .{};
+            },
+            .up, .cancel => {
+                const done = d.*;
+                s.drag = null;
+                if (p.kind == .cancel) return .{};
+                if (done.moved) return .{ .marker_drop = .{ .key = done.key, .at = done.at } };
+                for (markers, 0..) |m, i| if (markerKey(m, i) == done.key and m.pressable) return .{ .marker_press = done.key };
+                return .{};
+            },
+            else => return .{},
+        };
+        if (p.kind == .down and s.count() == 0) {
+            if (s.markerAt(x, y, markers, true)) |hit| {
+                const at = s.view().toScreen(hit.m.at).?;
+                s.drag = .{ .key = hit.key, .at = hit.m.at, .dx = x - at[0], .dy = y - at[1], .x0 = x, .y0 = y };
+                s.gliding = false;
+                s.animation = null;
+                return .{};
+            }
+        }
+        var g = s.handle(p);
+        if (g.tap) |t| if (s.markerAt(t[0], t[1], markers, false)) |hit| {
+            g.tap = null;
+            g.marker_press = hit.key;
+        };
+        return g;
+    }
+
+    /// The topmost marker drawn around screen point (x, y) that is draggable (or pressable).
+    fn markerAt(s: *const State, x: f64, y: f64, markers: []const Marker, draggable: bool) ?struct { m: Marker, key: u64 } {
+        const v = s.view();
+        var i = markers.len;
+        while (i > 0) {
+            i -= 1;
+            const m = markers[i];
+            if (if (draggable) !m.draggable else !m.pressable) continue;
+            const at = v.toScreen(m.at) orelse continue;
+            const half: f64 = @max(m.size / 2, 12);
+            const cy = if (m.anchor == .bottom) at[1] - m.size / 2 else at[1];
+            if (@abs(x - at[0]) <= half and @abs(y - cy) <= half) return .{ .m = m, .key = markerKey(m, i) };
+        }
+        return null;
+    }
+
     /// Moves the map with the finger by (dx, dy) screen points.
     pub fn panBy(s: *State, dx: f64, dy: f64) void {
         const v = s.view();
@@ -523,6 +587,10 @@ pub const Marker = struct {
     badge: ?zui.Color = null,
     icon_size: f32 = 24,
     key: u64 = 0,
+    /// Tapping it reports its key (`Gesture.marker_press`, through `State.handleMarkers`).
+    pressable: bool = false,
+    /// It can be dragged; letting it go reports its key and new place (`Gesture.marker_drop`).
+    draggable: bool = false,
 };
 
 pub const Route = struct {
@@ -545,6 +613,9 @@ pub fn Options(comptime Msg: type) type {
         /// The tiles' look: Maps-js's "Wufour Official MapLibre Adjustments"
         /// (`filter: saturate(0.5) contrast(0.9) brightness(1.2)` on the map canvas).
         tile_filter: zui.ImageFilter = .{ .saturate = 0.5, .contrast = 0.9, .brightness = 1.2 },
+        /// The map view's key: pointer events carry it (`Pointer.key`), so two maps on a page can
+        /// be told apart.
+        key: u64 = 0,
     };
 }
 
@@ -554,7 +625,7 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
     const c = state.camera;
     if (v.width <= 0 or v.height <= 0) return;
 
-    ui.begin(.{ .width = .fill, .height = .fill, .clip = true, .no_mirror = true, .background = o.background }, .{ .on_pointer = o.on_pointer });
+    ui.begin(.{ .width = .fill, .height = .fill, .clip = true, .no_mirror = true, .background = o.background }, .{ .key = o.key, .on_pointer = o.on_pointer });
     defer ui.end();
 
     // The tilt view: the ground the screen shows, turning around the screen centre.
@@ -596,7 +667,8 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
     ui.end();
 
     for (o.markers, 0..) |m, i| {
-        const p = v.toScreen(m.at) orelse continue;
+        const shown_at = if (state.drag) |d| (if (d.key == markerKey(m, i)) d.at else m.at) else m.at;
+        const p = v.toScreen(shown_at) orelse continue;
         const half = m.size / 2;
         if (p[0] < -m.size or p[1] < -m.size or p[0] > v.width + m.size or p[1] > v.height + m.size) continue;
         const top: f32 = @as(f32, @floatCast(p[1])) - if (m.anchor == .bottom) m.size else half;
@@ -607,7 +679,7 @@ pub fn draw(comptime Msg: type, ui: *zui.Ui(Msg), state: *const State, o: Option
             .height = .{ .px = m.size },
             .rotate = if (m.heading) |h| @floatCast(h - c.bearing) else 0,
         };
-        const k = if (m.key != 0) m.key else zui.key(i + 1_000_000);
+        const k = markerKey(m, i);
         if (m.halo) {
             const ring = m.size * 2.6;
             ui.begin(.{
@@ -961,4 +1033,33 @@ test tileUrl {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     try testing.expectEqualStrings("/tiles/3/4/2.png", try tileUrl(arena.allocator(), "/tiles/{z}/{x}/{y}.png", 3, 4, 2));
+}
+
+/// A marker's key: its own, or one from its place in the list.
+pub fn markerKey(m: Marker, index: usize) u64 {
+    return if (m.key != 0) m.key else zui.key(index + 1_000_000);
+}
+
+test "markers: a tap presses one, a drag moves one and reports where it was let go" {
+    var s: State = .{ .camera = .{ .center = .{ .lat = 33.5, .lng = 36.3 }, .zoom = 14 } };
+    s.setViewport(400, 400);
+    const markers = [_]Marker{
+        .{ .at = .{ .lat = 33.5, .lng = 36.3 }, .pressable = true, .key = 7 },
+        .{ .at = s.view().toMap(300, 200).?, .draggable = true, .key = 9 },
+    };
+    _ = s.handleMarkers(.{ .kind = .down, .id = 1, .x = 201, .y = 199, .time_ms = 0 }, &markers);
+    const g = s.handleMarkers(.{ .kind = .up, .id = 1, .x = 201, .y = 199, .time_ms = 100 }, &markers);
+    try testing.expectEqual(@as(?u64, 7), g.marker_press);
+    try testing.expect(g.tap == null);
+
+    const before = s.camera.center;
+    _ = s.handleMarkers(.{ .kind = .down, .id = 1, .x = 302, .y = 200, .time_ms = 1000 }, &markers);
+    _ = s.handleMarkers(.{ .kind = .move, .id = 1, .x = 332, .y = 250, .time_ms = 1050 }, &markers);
+    try testing.expectEqual(@as(u64, 9), s.drag.?.key);
+    const d = s.handleMarkers(.{ .kind = .up, .id = 1, .x = 332, .y = 250, .time_ms = 1100 }, &markers);
+    const at = s.view().toScreen(d.marker_drop.?.at).?;
+    try testing.expectApproxEqAbs(@as(f64, 330), at[0], 0.01);
+    try testing.expectApproxEqAbs(@as(f64, 250), at[1], 0.01);
+    // The map stayed where it was.
+    try testing.expectEqual(before, s.camera.center);
 }
