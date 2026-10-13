@@ -30,8 +30,17 @@ var calls_enabled = false;
 
 /// A video view shows a stream: the camera preview, or a remote picture.
 pub fn video(i: u32, v: zui.Video) void {
+    if (Messages.bindView(i, view(i), v)) return;
     if (calls_enabled) Media.bindView(i, view(i), v);
 }
+
+/// Voice and video messages: recording and playback (AVAudioRecorder, AVCaptureMovieFileOutput,
+/// AVPlayer). A video view showing a recorder or a player is handled there.
+const Messages = @import("../media/ios_messages.zig");
+pub const startRecording = Messages.startRecording;
+pub const stopRecording = Messages.stopRecording;
+pub const play = Messages.play;
+pub const controlPlayback = Messages.controlPlayback;
 
 /// The runtime's entry points, for callbacks that arrive from C (GCD, NSURLSession, ...).
 var rt: struct {
@@ -228,6 +237,7 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
 }
 
 pub fn destroy(i: u32) void {
+    Messages.unbindView(i);
     if (calls_enabled) Media.unbindView(i);
     const v = view(i);
     objc.sendVoid(v, "removeFromSuperview");
@@ -396,6 +406,7 @@ pub fn exportEntry(comptime App: type) void {
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
             rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent, .pick = pickDone, .file = fileDone, .stream_status = streamStatus, .stream_data = streamData, .stream_end = streamEnd };
+            Messages.init(&R.recordEvent, &R.playEvent);
             if (@hasDecl(App, "rtc")) {
                 Media.defineClasses();
                 Media.setPump(&R.callsPump);
@@ -1532,7 +1543,7 @@ fn systemSound(sound: u32) void {
         S.looked = true;
         S.play = systemFunction(*const fn (u32) callconv(.c) void, "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", "AudioServicesPlaySystemSound");
     }
-    if (S.play) |play| play(sound);
+    if (S.play) |play_sound| play_sound(sound);
 }
 
 /// iPhones have one vibration (kSystemSoundID_Vibrate); its length is fixed.
