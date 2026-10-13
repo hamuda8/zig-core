@@ -48,6 +48,13 @@ const js = struct {
     extern "zui" fn zui_peer_stream(id: u32, stream: u32) void;
     extern "zui" fn zui_peer_close(id: u32) void;
     extern "zui" fn zui_video(id: u32, stream: u32, mirror: u32, cover: u32) void;
+    extern "zui" fn zui_now() f64;
+    extern "zui" fn zui_tz_offset() i32;
+    extern "zui" fn zui_vibrate(ms: u32) void;
+    extern "zui" fn zui_beep() void;
+    extern "zui" fn zui_keep_awake(on: u32) void;
+    extern "zui" fn zui_push_link(ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_back_state(handler: u32, has_history: u32, rtl: u32) void;
     extern "zui" fn zui_measure(ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, max_width: f32, out: *[2]f32) void;
 };
 
@@ -183,6 +190,28 @@ pub fn closePeer(id: u32) void {
 pub fn video(id: u32, v: zui.Video) void {
     js.zui_video(id, v.stream, @intFromBool(v.mirror), @intFromBool(v.cover));
 }
+pub fn now() i64 {
+    return @intFromFloat(js.zui_now());
+}
+pub fn tzOffset() i32 {
+    return js.zui_tz_offset();
+}
+pub fn vibrate(ms: u32) void {
+    js.zui_vibrate(ms);
+}
+pub fn beep() void {
+    js.zui_beep();
+}
+pub fn keepAwake(on: bool) void {
+    js.zui_keep_awake(@intFromBool(on));
+}
+/// The browser keeps the history: a new entry (history.pushState).
+pub fn pushLink(s: []const u8) void {
+    js.zui_push_link(s.ptr, s.len);
+}
+pub fn backState(handler: bool, has_history: bool, rtl: bool) void {
+    js.zui_back_state(@intFromBool(handler), @intFromBool(has_history), @intFromBool(rtl));
+}
 pub fn requestFrame() void {
     js.zui_request_frame();
 }
@@ -257,6 +286,15 @@ pub fn exportEntry(comptime App: type) void {
         fn inputEvent(id: u32, kind: u32) callconv(.c) void {
             R.inputEvent(id, std.enums.fromInt(zui.InputEvent, kind) orelse return);
         }
+        fn back() callconv(.c) u32 {
+            return @intFromBool(R.back());
+        }
+        fn linkEvent(ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.linkEvent(ptr[0..len]);
+        }
+        fn deviceEvent(kind: u32) callconv(.c) void {
+            R.deviceEvent(std.enums.fromInt(zui.DeviceEvent, kind) orelse return);
+        }
         fn alloc(len: usize) callconv(.c) ?[*]u8 {
             const buf = zui.allocator.alloc(u8, len) catch return null;
             return buf.ptr;
@@ -282,6 +320,9 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.hostMessage, .{ .name = "zui_host_message" });
     @export(&Entry.mediaEvent, .{ .name = "zui_media_event" });
     @export(&Entry.peerEvent, .{ .name = "zui_peer_event" });
+    @export(&Entry.back, .{ .name = "zui_back" });
+    @export(&Entry.linkEvent, .{ .name = "zui_link_event" });
+    @export(&Entry.deviceEvent, .{ .name = "zui_device_event" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });
     @export(&Entry.free, .{ .name = "zui_free" });
 }

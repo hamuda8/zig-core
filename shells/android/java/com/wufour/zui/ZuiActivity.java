@@ -73,6 +73,24 @@ public final class ZuiActivity extends Activity {
         super.onNewIntent(intent);
         showOverLockScreen(intent);
         ZuiCallService.fromIntent(this, intent);
+        if (intent != null && intent.getData() != null) ZuiDevice.link(intent.getDataString());
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (!ZuiDevice.back()) super.onBackPressed();
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        ZuiDevice.visible(true);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        ZuiDevice.visible(false);
     }
 
     @Override

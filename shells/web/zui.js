@@ -82,6 +82,40 @@ export async function start(wasm, mount = document.body, options = {}) {
   const calls = webCalls(() => ex, () => memory, withBytes, encoder, str);
   const notes = new Map();
 
+  // Navigation: fx.setLink replaces the address, fx.pushLink adds a history entry. While the app
+  // handles Back (ui.onBack) one more entry with the same address sits on top, so the browser's
+  // back button lands in the app: leaving that entry is the app's Back.
+  const here = () => location.pathname + location.search;
+  let currentLink = embedded ? '' : here();
+  let guard = false, wantGuard = false, ignorePops = 0;
+  const GUARD = { zuiBack: true };
+  const pushGuard = () => { history.pushState(GUARD, '', currentLink); guard = true; };
+  const onPop = (e) => {
+    if (ignorePops > 0) { ignorePops--; return; }
+    if (guard) {
+      guard = false;
+      if (here() !== currentLink) history.replaceState(null, '', currentLink);
+      ex.zui_back();
+      if (wantGuard && !guard) pushGuard();
+      return;
+    }
+    // Forward into a guard entry left from before: step back over it.
+    if (e.state && e.state.zuiBack) { ignorePops++; history.back(); return; }
+    currentLink = here();
+    withBytes(encoder.encode(currentLink), (p, n) => ex.zui_link_event(p, n));
+  };
+
+  // The screen kept on (fx.keepAwake): the lock is dropped when the tab hides, so it is asked
+  // for again when it shows.
+  let wakeWanted = false, wakeLock = null, audio = null;
+  const requestWake = () => navigator.wakeLock?.request('screen').then((l) => { if (wakeWanted) wakeLock = l; else l.release(); }, () => {});
+  const onOnline = () => ex.zui_device_event(1);
+  const onOffline = () => ex.zui_device_event(2);
+  const onVisibility = () => {
+    ex.zui_device_event(document.hidden ? 4 : 3);
+    if (!document.hidden && wakeWanted && (!wakeLock || wakeLock.released)) requestWake();
+  };
+
   const imports = {
     zui: {
       zui_create(id, kind) {
@@ -337,7 +371,49 @@ export async function start(wasm, mount = document.body, options = {}) {
       zui_set_link(ptr, len) {
         if (embedded) return;
         const link = str(ptr, len) || location.pathname;
-        if (link !== location.pathname + location.search) history.replaceState(null, '', link);
+        currentLink = link;
+        if (link !== here()) history.replaceState(history.state, '', link);
+      },
+      zui_push_link(ptr, len) {
+        if (embedded) return;
+        const link = str(ptr, len) || location.pathname;
+        currentLink = link;
+        // A guard on top becomes the new entry, and a new guard goes above it.
+        if (guard) { history.replaceState(null, '', link); history.pushState(GUARD, '', link); }
+        else history.pushState(null, '', link);
+      },
+      zui_back_state(handler) {
+        wantGuard = !!handler;
+        if (embedded) return;
+        if (wantGuard && !guard) pushGuard();
+        else if (!wantGuard && guard) { guard = false; ignorePops++; history.back(); }
+      },
+      zui_now() {
+        return Date.now();
+      },
+      zui_tz_offset() {
+        return -new Date().getTimezoneOffset();
+      },
+      zui_vibrate(ms) {
+        try { navigator.vibrate?.(ms); } catch {}
+      },
+      zui_beep() {
+        try {
+          audio = audio || new AudioContext();
+          audio.resume?.();
+          const t = audio.currentTime, o = audio.createOscillator(), g = audio.createGain();
+          o.frequency.value = 880;
+          g.gain.setValueAtTime(0.25, t);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+          o.connect(g).connect(audio.destination);
+          o.start(t);
+          o.stop(t + 0.16);
+        } catch {}
+      },
+      zui_keep_awake(on) {
+        wakeWanted = !!on;
+        if (wakeWanted) { if (!wakeLock || wakeLock.released) requestWake(); }
+        else { wakeLock?.release().catch(() => {}); wakeLock = null; }
       },
       zui_image_filter(id, s, c, b) {
         views.get(id).style.filter = s === 1 && c === 1 && b === 1 ? '' : `saturate(${s}) contrast(${c}) brightness(${b})`;
@@ -470,6 +546,12 @@ export async function start(wasm, mount = document.body, options = {}) {
     send(text);
   };
   if (!embedded) addEventListener('message', onMessage);
+  if (!embedded) addEventListener('popstate', onPop);
+  addEventListener('online', onOnline);
+  addEventListener('offline', onOffline);
+  document.addEventListener('visibilitychange', onVisibility);
+  if (!navigator.onLine) onOffline();
+  if (document.hidden) ex.zui_device_event(4);
   return {
     instance,
     send,
@@ -477,6 +559,12 @@ export async function start(wasm, mount = document.body, options = {}) {
       observer?.disconnect();
       removeEventListener('resize', onResize);
       removeEventListener('message', onMessage);
+      removeEventListener('popstate', onPop);
+      removeEventListener('online', onOnline);
+      removeEventListener('offline', onOffline);
+      document.removeEventListener('visibilitychange', onVisibility);
+      wakeLock?.release().catch(() => {});
+      audio?.close().catch(() => {});
       dark.removeEventListener('change', onDark);
       if (watchId !== null) navigator.geolocation?.clearWatch(watchId);
       for (const s of sockets.values()) s.close();

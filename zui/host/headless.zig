@@ -213,6 +213,34 @@ pub fn openUrl(url: []const u8, _: bool) void {
 pub fn closeSocket(_: u32) void {
     socket_id = 0;
 }
+/// The wall clock tests see (2025-10-12T12:00:00Z unless a test sets it) and the time zone.
+pub var wall_ms: i64 = 1_760_270_400_000;
+pub var tz_minutes: i32 = 0;
+pub fn now() i64 {
+    return wall_ms;
+}
+pub fn tzOffset() i32 {
+    return tz_minutes;
+}
+pub var vibrated_ms: u32 = 0;
+pub var beeps: u32 = 0;
+pub var awake = false;
+pub fn vibrate(ms: u32) void {
+    vibrated_ms = ms;
+}
+pub fn beep() void {
+    beeps += 1;
+}
+pub fn keepAwake(on: bool) void {
+    awake = on;
+}
+/// Whether the app handles Back, and whether there are links to go back to.
+pub var back_handler = false;
+pub var back_history = false;
+pub fn backState(handler: bool, has_history: bool, _: bool) void {
+    back_handler = handler;
+    back_history = has_history;
+}
 pub fn rootBackground(argb: u32) void {
     root_background = argb;
 }
@@ -260,6 +288,23 @@ pub fn Driver(comptime App: type) type {
             socket_url.clearRetainingCapacity();
             socket_id = 0;
             frame_requested = false;
+            vibrated_ms = 0;
+            beeps = 0;
+            awake = false;
+        }
+
+        /// Back (Android's button, the iOS swipe). Returns whether the app took it.
+        pub fn back() bool {
+            return R.back();
+        }
+
+        /// The address changed from outside (the browser's forward button, a deep link).
+        pub fn openLink(l: []const u8) void {
+            R.linkEvent(l);
+        }
+
+        pub fn device(e: zui.DeviceEvent) void {
+            R.deviceEvent(e);
         }
 
         /// Answers the oldest pending request whose URL contains `part`. Returns false if none.
@@ -492,4 +537,102 @@ test "a call: media, a peer, its signals, state and the other side's video" {
     var videos: usize = 0;
     for (views.values()) |v| videos += @intFromBool(v.kind == .video);
     try std.testing.expectEqual(@as(usize, 1), videos);
+}
+
+// Navigation: links with history, Back, and the app's own Back handler.
+const Nav = struct {
+    pub const Msg = union(enum) { open: []const u8, close_sheet, open_sheet, link: []const u8, device: zui.DeviceEvent };
+    pub const State = struct { sheet: bool = false, page: [32]u8 = undefined, page_len: usize = 0, events: u32 = 0, offline: bool = false, now: i64 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    pub fn linkEvent(l: []const u8) ?Msg {
+        return .{ .link = l };
+    }
+    pub fn deviceEvent(e: zui.DeviceEvent) ?Msg {
+        return .{ .device = e };
+    }
+    fn setPage(s: *State, l: []const u8) void {
+        s.page_len = @min(l.len, s.page.len);
+        @memcpy(s.page[0..s.page_len], l[0..s.page_len]);
+    }
+    pub fn update(s: *State, msg: Msg, env: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        s.now = env.now_ms;
+        switch (msg) {
+            .open => |l| {
+                fx.pushLink(l);
+                setPage(s, l);
+            },
+            .link => |l| setPage(s, l),
+            .open_sheet => s.sheet = true,
+            .close_sheet => s.sheet = false,
+            .device => |e| {
+                s.events += 1;
+                s.offline = !env.online;
+                if (e == .hidden) fx.keepAwake(false);
+            },
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{});
+        ui.text(if (s.page_len == 0) "/" else s.page[0..s.page_len], .{});
+        ui.begin(.{}, .{ .on_press = .{ .open = "/a" } });
+        ui.text("A", .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .{ .open = "/b" } });
+        ui.text("B", .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .open_sheet });
+        ui.text("Sheet", .{});
+        ui.end();
+        if (s.sheet) {
+            ui.text("Sheet open", .{});
+            ui.onBack(.close_sheet);
+        }
+        if (!ui.env.online) ui.text("Offline", .{});
+        ui.end();
+    }
+};
+
+test "links: pushLink makes history, Back walks it, the app's onBack comes first" {
+    const D = Driver(Nav);
+    D.start(200, 400);
+    defer D.reset();
+    try std.testing.expect(!D.back()); // nothing to go back to: the platform's default
+    try std.testing.expect(!back_history);
+    try D.press("A");
+    try D.press("B");
+    try std.testing.expectEqualStrings("/b", link.items);
+    try std.testing.expect(back_history);
+    try D.press("Sheet");
+    try std.testing.expect(back_handler);
+    try std.testing.expect(D.back()); // closes the sheet, stays on /b
+    try std.testing.expect(D.findText("Sheet open") == 0);
+    try std.testing.expect(D.findText("/b") != 0);
+    try std.testing.expect(!back_handler);
+    try std.testing.expect(D.back()); // to /a
+    try std.testing.expect(D.findText("/a") != 0);
+    try std.testing.expectEqualStrings("/a", link.items);
+    try std.testing.expectEqualStrings("/a", D.R.appState().page[0..2]);
+    try std.testing.expect(D.back()); // to the start
+    try std.testing.expect(!D.back());
+    try std.testing.expect(!back_history);
+    D.openLink("/deep");
+    try std.testing.expect(D.findText("/deep") != 0);
+}
+
+test "device events, the wall clock" {
+    const D = Driver(Nav);
+    wall_ms = 1_700_000_000_000;
+    defer wall_ms = 1_760_270_400_000;
+    D.start(200, 400);
+    defer D.reset();
+    D.device(.offline);
+    try std.testing.expect(D.findText("Offline") != 0);
+    try std.testing.expect(D.R.appState().offline);
+    D.device(.online);
+    try std.testing.expect(D.findText("Offline") == 0);
+    try std.testing.expectEqual(@as(u32, 2), D.R.appState().events);
+    try std.testing.expectEqual(@as(i64, 1_700_000_000_000), D.R.appState().now);
+    try std.testing.expectEqual(@as(i64, 1_700_000_000_000), zui.now());
 }

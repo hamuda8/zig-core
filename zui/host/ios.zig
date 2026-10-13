@@ -14,6 +14,8 @@ extern "UIKit" var NSFontAttributeName: id;
 extern "UIKit" var NSForegroundColorAttributeName: id;
 extern "UIKit" var NSParagraphStyleAttributeName: id;
 extern "UIKit" var NSBaselineOffsetAttributeName: id;
+extern "UIKit" var UIApplicationWillEnterForegroundNotification: id;
+extern "UIKit" var UIApplicationDidEnterBackgroundNotification: id;
 
 /// UIControlEventEditingChanged, ...DidBegin, ...DidEnd, ...DidEndOnExit (return key).
 const editing_changed: usize = 1 << 17;
@@ -38,6 +40,7 @@ var rt: struct {
     location: *const fn (zui.Location) void,
     socket: *const fn (u32, zui.SocketEvent.Kind, []const u8) void,
     call: *const fn (zui.CallEvent.Kind, []const u8) void,
+    device: *const fn (zui.DeviceEvent) void,
 } = undefined;
 /// NSStringDrawingUsesLineFragmentOrigin
 const uses_line_fragment_origin: isize = 1;
@@ -314,7 +317,7 @@ pub fn exportEntry(comptime App: type) void {
         var started = false;
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
-            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent };
+            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent };
             if (@hasDecl(App, "rtc")) {
                 Media.defineClasses();
                 Media.setPump(&R.callsPump);
@@ -362,6 +365,9 @@ pub fn exportEntry(comptime App: type) void {
                 .{ "ended:", @ptrCast(&inputEnded), "v@:@" },
                 .{ "submitted:", @ptrCast(&inputSubmitted), "v@:@" },
                 .{ "frame:", @ptrCast(&displayFrame), "v@:@" },
+                .{ "edgeSwipe:", @ptrCast(&edgeSwipe), "v@:@" },
+                .{ "appVisible:", @ptrCast(&appVisible), "v@:@" },
+                .{ "appHidden:", @ptrCast(&appHidden), "v@:@" },
             });
             return UIApplicationMain(argc, argv, null, objc.nsString("ZuiAppDelegate"));
         }
@@ -374,6 +380,24 @@ pub fn exportEntry(comptime App: type) void {
             objc.sendVoid1(controller, "setView:", root);
             objc.sendVoid1(window, "setRootViewController:", controller);
             objc.sendVoid(window, "makeKeyAndVisible");
+            const center = objc.send(objc.class("NSNotificationCenter"), "defaultCenter");
+            const observe = objc.msgSend(*const fn (id, objc.SEL, id, objc.SEL, id, id) callconv(.c) void);
+            observe(center, objc.sel("addObserver:selector:name:object:"), target, objc.sel("appVisible:"), UIApplicationWillEnterForegroundNotification, null);
+            observe(center, objc.sel("addObserver:selector:name:object:"), target, objc.sel("appHidden:"), UIApplicationDidEnterBackgroundNotification, null);
+        }
+
+        /// The edge swipe (UIScreenEdgePanGestureRecognizer), once the finger lifts.
+        fn edgeSwipe(_: id, _: objc.SEL, gesture: id) callconv(.c) void {
+            if (objc.sendInt(gesture, "state") == 3) _ = R.back(); // UIGestureRecognizerStateEnded
+        }
+        fn appVisible(_: id, _: objc.SEL, _: id) callconv(.c) void {
+            R.deviceEvent(.visible);
+        }
+        fn appHidden(_: id, _: objc.SEL, _: id) callconv(.c) void {
+            R.deviceEvent(.hidden);
+        }
+        fn deviceEvent(e: zui.DeviceEvent) void {
+            R.deviceEvent(e);
         }
 
         fn isDark(self: id) bool {
@@ -392,6 +416,7 @@ pub fn exportEntry(comptime App: type) void {
                 const first = objc.send(langs, "firstObject");
                 const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(first, objc.sel("UTF8String"));
                 R.start(zui.allocator, .{ .width = @floatCast(bounds.w), .height = @floatCast(bounds.h), .dark = isDark(self), .safe = insets }, if (utf8) |p| std.mem.span(p) else "en");
+                watchNetwork();
             } else {
                 R.setInsets(insets);
                 R.resize(@floatCast(bounds.w), @floatCast(bounds.h));
@@ -1357,4 +1382,89 @@ fn performEnd(_: id, _: objc.SEL, _: id, action: id) callconv(.c) void {
 fn performStart(_: id, _: objc.SEL, p: id, action: id) callconv(.c) void {
     objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(p, objc.sel("reportOutgoingCallWithUUID:startedConnectingAtDate:"), objc.send(action, "callUUID"), null);
     objc.sendVoid(action, "fulfill");
+}
+
+// ---- The device: clock, Back, screen, vibration and sound, the network ----
+
+const clock = @import("../platform/clock.zig");
+pub const now = clock.now;
+pub const tzOffset = clock.tzOffset;
+
+extern "c" fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
+extern "c" fn dlsym(handle: ?*anyopaque, name: [*:0]const u8) ?*anyopaque;
+/// RTLD_DEFAULT on Darwin.
+const rtld_default: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -2))));
+
+/// A function of a system framework zui does not link (AudioToolbox, Network), or null.
+fn systemFunction(comptime F: type, framework: [*:0]const u8, name: [*:0]const u8) ?F {
+    _ = dlopen(framework, 1); // RTLD_LAZY; already loaded is fine
+    const f = dlsym(rtld_default, name) orelse return null;
+    return @ptrCast(@alignCast(f));
+}
+
+fn systemSound(sound: u32) void {
+    const S = struct {
+        var play: ?*const fn (u32) callconv(.c) void = null;
+        var looked = false;
+    };
+    if (!S.looked) {
+        S.looked = true;
+        S.play = systemFunction(*const fn (u32) callconv(.c) void, "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", "AudioServicesPlaySystemSound");
+    }
+    if (S.play) |play| play(sound);
+}
+
+/// iPhones have one vibration (kSystemSoundID_Vibrate); its length is fixed.
+pub fn vibrate(_: u32) void {
+    systemSound(4095);
+}
+
+/// The system's short "tink".
+pub fn beep() void {
+    systemSound(1057);
+}
+
+pub fn keepAwake(on: bool) void {
+    objc.sendVoidBool(objc.send(objc.class("UIApplication"), "sharedApplication"), "setIdleTimerDisabled:", on);
+}
+
+var edge_swipe: id = null;
+
+/// Back on iOS is the swipe in from the leading edge, enabled while the app handles it.
+pub fn backState(handler: bool, has_history: bool, rtl: bool) void {
+    if (edge_swipe == null) {
+        const make = objc.msgSend(*const fn (id, objc.SEL, id, objc.SEL) callconv(.c) id);
+        edge_swipe = make(objc.send(objc.class("UIScreenEdgePanGestureRecognizer"), "alloc"), objc.sel("initWithTarget:action:"), target, objc.sel("edgeSwipe:"));
+        objc.sendVoid1(root, "addGestureRecognizer:", edge_swipe);
+    }
+    objc.sendVoidInt(edge_swipe, "setEdges:", if (rtl) 8 else 2); // UIRectEdgeRight / UIRectEdgeLeft
+    objc.sendVoidBool(edge_swipe, "setEnabled:", handler or has_history);
+}
+
+// The network through Network.framework's path monitor, on the main queue.
+const PathBlock = extern struct { header: objc.BlockHeader };
+const path_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(PathBlock) };
+const path_block: PathBlock = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&pathChanged), .descriptor = &path_descriptor } };
+var path_status: ?*const fn (?*anyopaque) callconv(.c) c_int = null;
+var was_online = true;
+
+fn watchNetwork() void {
+    const lib = "/System/Library/Frameworks/Network.framework/Network";
+    const make = systemFunction(*const fn () callconv(.c) ?*anyopaque, lib, "nw_path_monitor_create") orelse return;
+    const set_queue = systemFunction(*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, lib, "nw_path_monitor_set_queue") orelse return;
+    const set_handler = systemFunction(*const fn (?*anyopaque, *const PathBlock) callconv(.c) void, lib, "nw_path_monitor_set_update_handler") orelse return;
+    const start = systemFunction(*const fn (?*anyopaque) callconv(.c) void, lib, "nw_path_monitor_start") orelse return;
+    path_status = systemFunction(*const fn (?*anyopaque) callconv(.c) c_int, lib, "nw_path_get_status") orelse return;
+    const monitor = make() orelse return;
+    set_queue(monitor, @ptrCast(&_dispatch_main_q));
+    set_handler(monitor, &path_block);
+    start(monitor);
+}
+
+fn pathChanged(_: *const PathBlock, nw_path: ?*anyopaque) callconv(.c) void {
+    const status = path_status orelse return;
+    const online = status(nw_path) == 1; // nw_path_status_satisfied
+    if (online == was_online) return;
+    was_online = online;
+    rt.device(if (online) .online else .offline);
 }

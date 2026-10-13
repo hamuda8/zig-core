@@ -145,6 +145,7 @@ public final class Zui {
             nativeStart(w / density, h / density, dark, insetTop, insetRight, insetBottom, insetLeft, java.util.Locale.getDefault().toLanguageTag(), link);
             for (Object[] e : pendingCalls) nativeCall((Integer) e[0], (String) e[1]);
             pendingCalls.clear();
+            ZuiDevice.watchNetwork();
         } else {
             nativeResize(w / density, h / density);
         }

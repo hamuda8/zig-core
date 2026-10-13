@@ -58,6 +58,50 @@ var methods: struct {
     video: jni.jmethodID,
 } = undefined;
 
+/// ZuiDevice.java: Back, the screen kept on, vibration, sound, pickers, files.
+var device_class: jni.jclass = null;
+var device: struct {
+    back_state: jni.jmethodID,
+    keep_awake: jni.jmethodID,
+    vibrate: jni.jmethodID,
+    beep: jni.jmethodID,
+} = undefined;
+
+fn bindDevice(e: *jni.Env) void {
+    const f = e.functions;
+    const local = f.FindClass(e, "com/wufour/zui/ZuiDevice");
+    device_class = f.NewGlobalRef(e, local);
+    f.DeleteLocalRef(e, local);
+    inline for (.{
+        .{ "back_state", "backState", "(ZZZ)V" },
+        .{ "keep_awake", "keepAwake", "(Z)V" },
+        .{ "vibrate", "vibrate", "(I)V" },
+        .{ "beep", "beep", "()V" },
+    }) |m| @field(device, m[0]) = f.GetStaticMethodID(e, device_class, m[1], m[2]);
+}
+
+fn callDevice(method: jni.jmethodID, args: []const jni.jvalue) void {
+    env.functions.CallStaticVoidMethodA(env, device_class, method, args.ptr);
+    check();
+}
+
+const clock = @import("../platform/clock.zig");
+pub const now = clock.now;
+pub const tzOffset = clock.tzOffset;
+
+pub fn backState(handler: bool, has_history: bool, rtl: bool) void {
+    callDevice(device.back_state, &.{ boolean(handler), boolean(has_history), boolean(rtl) });
+}
+pub fn keepAwake(on: bool) void {
+    callDevice(device.keep_awake, &.{boolean(on)});
+}
+pub fn vibrate(ms: u32) void {
+    callDevice(device.vibrate, &.{int(ms)});
+}
+pub fn beep() void {
+    callDevice(device.beep, &.{});
+}
+
 /// The UI thread's JNI environment (for the media backend's calls into Java).
 pub fn uiEnv() *jni.Env {
     return env;
@@ -114,6 +158,7 @@ fn bind(e: *jni.Env) void {
         .{ "copy", "copy", "(Ljava/lang/String;)V" },
         .{ "open_url", "openUrl", "(Ljava/lang/String;)V" },
     }) |m| @field(methods, m[0]) = f.GetStaticMethodID(e, class, m[1], m[2]);
+    bindDevice(e);
 }
 
 fn call(method: jni.jmethodID, args: []const jni.jvalue) void {
@@ -327,6 +372,19 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.callsPump();
         }
+        fn back(e: *jni.Env, _: jni.jclass) callconv(.c) jni.jboolean {
+            bind(e);
+            return @intFromBool(R.back());
+        }
+        fn linkEvent(e: *jni.Env, _: jni.jclass, link: jni.jstring) callconv(.c) void {
+            bind(e);
+            var buf: [2048]u8 = undefined;
+            R.linkEvent(javaString(link, &buf));
+        }
+        fn deviceEvent(e: *jni.Env, _: jni.jclass, kind: jni.jint) callconv(.c) void {
+            bind(e);
+            R.deviceEvent(std.enums.fromInt(zui.DeviceEvent, @as(u8, @intCast(kind))) orelse return);
+        }
         fn textEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, s: jni.jstring) callconv(.c) void {
             bind(e);
             var buf: [4096]u8 = undefined;
@@ -349,6 +407,9 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.socketEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeSocket" });
     @export(&Entry.callEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeCall" });
     @export(&Entry.callsPump, .{ .name = "Java_com_wufour_zui_Zui_nativeCallsPump" });
+    @export(&Entry.back, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeBack" });
+    @export(&Entry.linkEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeLink" });
+    @export(&Entry.deviceEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeDevice" });
 }
 
 extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;

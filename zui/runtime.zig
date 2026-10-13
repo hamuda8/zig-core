@@ -38,9 +38,23 @@ pub const Env = struct {
     /// Time of the current display frame, in milliseconds on a monotonic clock: animations
     /// move by the time passed, so they run at the same speed at 60 and 120 frames a second.
     time_ms: f64 = 0,
-    /// The address the app was opened with (web: path and query; phones: a deep link), else "".
+    /// The address the app was opened with (web: path and query; phones: a deep link), else "";
+    /// later the one set by `fx.setLink` / `fx.pushLink` or reached by going back.
     link: []const u8 = "",
+    /// Wall-clock time in milliseconds since 1970-01-01 UTC, read when the message or frame
+    /// arrived (`zui.now()` reads it at any moment).
+    now_ms: i64 = 0,
+    /// The device's local time zone at `now_ms`: minutes east of UTC (Damascus: +180).
+    tz_offset_min: i32 = 0,
+    /// The device has a network connection (as far as the platform knows).
+    online: bool = true,
+    /// The app is on screen (not in the background, not a hidden browser tab).
+    visible: bool = true,
 };
+
+/// The app's `pub fn deviceEvent(e: zui.DeviceEvent) ?Msg` hears these (env.online and
+/// env.visible change with them too).
+pub const DeviceEvent = enum(u8) { online = 1, offline = 2, visible = 3, hidden = 4 };
 
 pub const Method = enum { GET, POST, PUT, PATCH, DELETE };
 
@@ -215,6 +229,10 @@ pub fn Fx(comptime Msg: type) type {
             start_call: *const fn (Call) void,
             call_connected: *const fn ([]const u8) void,
             end_call: *const fn ([]const u8) void,
+            push_link: *const fn ([]const u8) void,
+            vibrate: *const fn (u32) void,
+            beep: *const fn () void,
+            keep_awake: *const fn (bool) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -238,10 +256,33 @@ pub fn Fx(comptime Msg: type) type {
             fx.vt.speak(text);
         }
 
-        /// The address to reopen this state with (the web page's URL); other platforms keep it
-        /// for sharing.
+        /// The address to reopen this state with (the web page's URL), in place of the current
+        /// one: no new history entry. Other platforms keep it for sharing.
         pub fn setLink(fx: Self, link: []const u8) void {
             fx.vt.set_link(link);
+        }
+
+        /// Goes to a new address with a history entry behind it: Back (the browser's, Android's,
+        /// the iOS edge swipe) returns to the current one, and the app hears it through
+        /// `pub fn linkEvent(link: []const u8) ?Msg` (env.link changes too). The web uses the
+        /// browser's history; the phones keep the same history in zui.
+        pub fn pushLink(fx: Self, link: []const u8) void {
+            fx.vt.push_link(link);
+        }
+
+        /// Vibrates for about `ms` milliseconds (iOS has one fixed vibration).
+        pub fn vibrate(fx: Self, ms: u32) void {
+            fx.vt.vibrate(ms);
+        }
+
+        /// A short beep (a scan was read, a new job arrived).
+        pub fn beep(fx: Self) void {
+            fx.vt.beep();
+        }
+
+        /// Keeps the screen on while `on` (a courier's navigation, a scanner).
+        pub fn keepAwake(fx: Self, on: bool) void {
+            fx.vt.keep_awake(on);
         }
 
         /// Puts the cursor in the input with this key (after the next draw).
@@ -396,6 +437,8 @@ pub fn Ui(comptime Msg: type) type {
         changes: std.ArrayList(Binding(*const fn ([]const u8) Msg)) = .empty,
         inputs: std.ArrayList(Binding(InputHandlers(Msg))) = .empty,
         background: ?Color = null,
+        /// What Back sends while this frame is on screen (`onBack`).
+        back_msg: ?Msg = null,
         /// Set if memory ran out while building; the frame is then dropped.
         failed: bool = false,
 
@@ -535,6 +578,13 @@ pub fn Ui(comptime Msg: type) type {
             return i18n.tf(ui.arena(), template, args);
         }
 
+        /// While this frame is on screen, Back (Android's button or gesture, the browser's back
+        /// button, the iOS edge swipe) sends `msg` instead of going back through the history:
+        /// close a sheet, leave a form. Call it in every frame where it applies.
+        pub fn onBack(ui: *Self, msg: Msg) void {
+            ui.back_msg = msg;
+        }
+
         /// Color behind everything, including the status bar area.
         pub fn setBackground(ui: *Self, c: Color) void {
             ui.background = c;
@@ -618,7 +668,111 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .start_call = fxStartCall,
             .call_connected = fxCallConnected,
             .end_call = fxEndCall,
+            .push_link = fxPushLink,
+            .vibrate = fxVibrate,
+            .beep = fxBeep,
+            .keep_awake = fxKeepAwake,
         };
+
+        fn fxVibrate(ms: u32) void {
+            H.vibrate(ms);
+        }
+
+        fn fxBeep() void {
+            H.beep();
+        }
+
+        fn fxKeepAwake(on: bool) void {
+            H.keepAwake(on);
+        }
+
+        // ---- Navigation: links, their history and Back ----
+        // The web has the browser's history (H.pushLink); elsewhere zui keeps the links behind
+        // the current one. Links are kept for the life of the app (the app may hold slices of
+        // env.link), each distinct one once.
+        const native_history = @hasDecl(H, "pushLink");
+        var links: std.StringHashMapUnmanaged(void) = .empty;
+        var history: std.ArrayList([]const u8) = .empty;
+        var back_msg: ?Msg = null;
+        /// What the host was last told: the app handles Back / there is history to go back to.
+        var back_told: ?[3]bool = null;
+
+        fn intern(link: []const u8) []const u8 {
+            if (links.getKey(link)) |k| return k;
+            const owned = gpa.dupe(u8, link) catch return "";
+            links.put(gpa, owned, {}) catch {};
+            return owned;
+        }
+
+        fn fxSetLink(link: []const u8) void {
+            env.link = intern(link);
+            H.setLink(link);
+        }
+
+        fn fxPushLink(link: []const u8) void {
+            if (native_history) {
+                env.link = intern(link);
+                return H.pushLink(link);
+            }
+            history.append(gpa, env.link) catch {};
+            fxSetLink(link);
+        }
+
+        /// Back was pressed (Android), swiped (iOS) or the browser left the entry zui keeps while
+        /// the app handles Back (web). Returns whether the app took it; if not, the platform does
+        /// what it does by default (Android leaves the app).
+        pub fn back() bool {
+            if (!started) return false;
+            if (back_msg) |m| {
+                dispatch(m);
+                return true;
+            }
+            if (native_history) return false;
+            const prev = history.pop() orelse return false;
+            env.link = prev;
+            H.setLink(prev);
+            linkChanged();
+            return true;
+        }
+
+        /// The address changed from outside: the browser went back or forward, or the phone was
+        /// opened with a new deep link.
+        pub fn linkEvent(link: []const u8) void {
+            if (!started) return;
+            env.link = intern(link);
+            linkChanged();
+        }
+
+        fn linkChanged() void {
+            if (@hasDecl(App, "linkEvent")) {
+                if (App.linkEvent(env.link)) |m| return dispatch(m);
+            }
+            render();
+        }
+
+        pub fn deviceEvent(kind: DeviceEvent) void {
+            switch (kind) {
+                .online => env.online = true,
+                .offline => env.online = false,
+                .visible => env.visible = true,
+                .hidden => env.visible = false,
+            }
+            if (!started) return;
+            if (@hasDecl(App, "deviceEvent")) {
+                if (App.deviceEvent(kind)) |m| return dispatch(m);
+            }
+            render();
+        }
+
+        /// The host is told when Back starts or stops being the app's (Android registers its
+        /// back callback, the web keeps a history entry to catch the browser's back button,
+        /// iOS enables its edge swipe).
+        fn syncBack() void {
+            const now = [3]bool{ back_msg != null, !native_history and history.items.len > 0, env.rtl };
+            if (back_told) |was| if (std.mem.eql(bool, &was, &now)) return;
+            back_told = now;
+            H.backState(now[0], now[1], now[2]);
+        }
 
         // The system's call screens; a host without them (the web) leaves it to the app.
         const has_system_calls = @hasDecl(H, "ringCall");
@@ -774,10 +928,6 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             H.speak(text, i18n.language());
         }
 
-        fn fxSetLink(link: []const u8) void {
-            H.setLink(link);
-        }
-
         fn fxFocus(k: u64) void {
             focus_key = k;
         }
@@ -789,6 +939,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             trees = .{ Tree.init(gpa), Tree.init(gpa) };
             rec = .{ .gpa = gpa };
             env = e;
+            env.link = intern(e.link);
             if (@hasDecl(App, "locales")) {
                 const global = if (@hasDecl(App, "global_locale")) App.global_locale else "{}";
                 i18n.init(gpa, global, App.locales) catch {};
@@ -957,6 +1108,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         /// `update` without drawing: `update(state, msg)`, `update(state, msg, env)` or
         /// `update(state, msg, env, fx)`.
         fn apply(msg: Msg) void {
+            readClock();
             switch (@typeInfo(@TypeOf(App.update)).@"fn".param_types.len) {
                 2 => App.update(&state, msg),
                 3 => App.update(&state, msg, env),
@@ -964,7 +1116,13 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             }
         }
 
+        fn readClock() void {
+            env.now_ms = H.now();
+            env.tz_offset_min = H.tzOffset();
+        }
+
         fn render() void {
+            readClock();
             rendering = true;
             defer rendering = false;
             dirty = false;
@@ -999,6 +1157,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             }
             frame_msg = ui.frame_msg;
             if (frame_msg != null) H.requestFrame();
+            back_msg = ui.back_msg;
+            syncBack();
 
             // One layout pass for all of this frame's changes, on hosts that need to be told.
             if (@hasDecl(H, "commit")) H.commit();

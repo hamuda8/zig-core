@@ -52,6 +52,7 @@ pub const PeerEvent = runtime.PeerEvent;
 pub const Video = tree.Video;
 pub const Call = runtime.Call;
 pub const CallEvent = runtime.CallEvent;
+pub const DeviceEvent = runtime.DeviceEvent;
 pub const Transform = style.Transform;
 pub const ImageFilter = style.ImageFilter;
 pub const Path = tree.Path;
@@ -100,6 +101,16 @@ test {
     _ = host;
     _ = icon;
     _ = calls;
+}
+
+/// Wall-clock time: milliseconds since 1970-01-01 UTC.
+pub fn now() i64 {
+    return host.now();
+}
+
+/// The local time zone now: minutes east of UTC (Damascus: +180).
+pub fn tzOffset() i32 {
+    return host.tzOffset();
 }
 
 /// Writes a line to the platform's log: logcat on Android, stderr (the device log) on iOS,
