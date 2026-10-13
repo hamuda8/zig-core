@@ -452,7 +452,10 @@ public final class Zui {
         wanted.computeIfPresent(url, (k, n) -> n > 1 ? n - 1 : null);
     }
 
-    static void image(int id, String url, String headers) {
+    static void image(int id, String address, String headers) {
+        // Pictures are kept by address and headers: one fetched with a token is not shown in
+        // place of the same address without it.
+        final String url = headers.isEmpty() ? address : address + "\n" + headers;
         ImageView v = (ImageView) views.get(id);
         if (url.equals(v.getTag())) return;
         if (v.getTag() instanceof String) unwant((String) v.getTag());
@@ -479,7 +482,7 @@ public final class Zui {
                 return;
             }
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                HttpURLConnection c = (HttpURLConnection) new URL(address).openConnection();
                 c.setConnectTimeout(10000);
                 c.setReadTimeout(15000);
                 c.setUseCaches(true);
