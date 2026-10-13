@@ -42,6 +42,7 @@ var rt: struct {
     call: *const fn (zui.CallEvent.Kind, []const u8) void,
     device: *const fn (zui.DeviceEvent) void,
     pick: *const fn ([]const u8) void,
+    file: *const fn ([]const u8, []const u8, []const u8, u32, u32) void,
 } = undefined;
 /// NSStringDrawingUsesLineFragmentOrigin
 const uses_line_fragment_origin: isize = 1;
@@ -391,7 +392,7 @@ pub fn exportEntry(comptime App: type) void {
         var started = false;
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
-            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent, .pick = pickDone };
+            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent, .pick = pickDone, .file = fileDone };
             if (@hasDecl(App, "rtc")) {
                 Media.defineClasses();
                 Media.setPump(&R.callsPump);
@@ -433,7 +434,11 @@ pub fn exportEntry(comptime App: type) void {
             // A view backed by a CAShapeLayer, for route lines.
             objc.defineClass("ZuiPathView", "UIView", &.{}, &.{});
             objc.addClassMethod("ZuiPathView", "layerClass", @ptrCast(&shapeLayerClass), "#@:");
-            objc.defineClass("ZuiTarget", "NSObject", &.{"UITextViewDelegate"}, &.{
+            objc.defineClass("ZuiTarget", "NSObject", &.{ "UITextViewDelegate", "UIImagePickerControllerDelegate", "UINavigationControllerDelegate", "UIDocumentPickerDelegate" }, &.{
+                .{ "imagePickerController:didFinishPickingMediaWithInfo:", @ptrCast(&photoPicked), "v@:@@" },
+                .{ "imagePickerControllerDidCancel:", @ptrCast(&photoCancelled), "v@:@" },
+                .{ "documentPicker:didPickDocumentsAtURLs:", @ptrCast(&documentsPicked), "v@:@@" },
+                .{ "documentPickerWasCancelled:", @ptrCast(&documentsCancelled), "v@:@" },
                 .{ "textViewDidChange:", @ptrCast(&textViewChanged), "v@:@" },
                 .{ "textViewDidBeginEditing:", @ptrCast(&inputBegan), "v@:@" },
                 .{ "textViewDidEndEditing:", @ptrCast(&inputEnded), "v@:@" },
@@ -633,6 +638,9 @@ pub fn exportEntry(comptime App: type) void {
             const value = if (utf8) |p| std.mem.span(p) else "";
             if (i < placeholders.items.len and placeholders.items[i] != null) objc.sendVoidBool(placeholders.items[i], "setHidden:", value.len > 0);
             R.textEvent(i, value);
+        }
+        fn fileDone(data: []const u8, name: []const u8, mime: []const u8, w: u32, h: u32) void {
+            R.fileDone(data, name, mime, w, h);
         }
         fn pickDone(value: []const u8) void {
             R.pickDone(value);
@@ -1724,5 +1732,143 @@ fn pickOption(title: []const u8, options: []const u8, selected: i32) void {
         objc.sendVoid1(popover, "setSourceView:", root);
         objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(popover, objc.sel("setSourceRect:"), .{ .x = last_touch.x, .y = last_touch.y, .w = 1, .h = 1 });
     }
+    present(sheet);
+}
+
+// ---- Photos and files: UIImagePickerController, UIDocumentPickerViewController, the share sheet ----
+
+extern "UIKit" var UIImagePickerControllerOriginalImage: id;
+extern "UIKit" fn UIGraphicsBeginImageContextWithOptions(size: objc.CGSize, is_opaque: bool, scale: CGFloat) void;
+extern "UIKit" fn UIGraphicsGetImageFromCurrentImageContext() id;
+extern "UIKit" fn UIGraphicsEndImageContext() void;
+extern "UIKit" fn UIImageJPEGRepresentation(image: id, quality: CGFloat) id;
+extern "Foundation" fn NSTemporaryDirectory() id;
+
+var photo_max: u32 = 1600;
+var photo_quality: u8 = 85;
+
+fn stringOf(s: id) []const u8 {
+    if (s == null) return "";
+    const p = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(s, objc.sel("UTF8String")) orelse return "";
+    return std.mem.span(p);
+}
+
+fn dataBytes(data: id) []const u8 {
+    if (data == null) return "";
+    const n: usize = @intCast(objc.sendInt(data, "length"));
+    const bytes = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*]const u8)(data, objc.sel("bytes")) orelse return "";
+    return bytes[0..n];
+}
+
+/// Points an iPad popover at the last touch (phones show the controller as a sheet).
+fn anchorPopover(controller: id) void {
+    const popover = objc.send(controller, "popoverPresentationController");
+    if (popover == null) return;
+    objc.sendVoid1(popover, "setSourceView:", root);
+    objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(popover, objc.sel("setSourceRect:"), .{ .x = last_touch.x, .y = last_touch.y, .w = 1, .h = 1 });
+}
+
+pub fn pickPhoto(camera: bool, max_size: u32, quality: u8) void {
+    if (root_controller == null) return;
+    photo_max = max_size;
+    photo_quality = quality;
+    const cls = objc.class("UIImagePickerController");
+    const available = objc.msgSend(*const fn (id, objc.SEL, isize) callconv(.c) bool)(cls, objc.sel("isSourceTypeAvailable:"), 1);
+    const picker = objc.new("UIImagePickerController");
+    defer objc.release(picker);
+    objc.sendVoidInt(picker, "setSourceType:", if (camera and available) 1 else 0); // camera / photo library
+    objc.sendVoid1(picker, "setDelegate:", target);
+    anchorPopover(picker);
+    present(picker);
+}
+
+fn dismissPicker(picker: id) void {
+    objc.msgSend(*const fn (id, objc.SEL, bool, ?*anyopaque) callconv(.c) void)(picker, objc.sel("dismissViewControllerAnimated:completion:"), true, null);
+}
+
+/// The photo, drawn upright at the size wanted, as JPEG.
+fn photoPicked(_: id, _: objc.SEL, picker: id, info: id) callconv(.c) void {
+    dismissPicker(picker);
+    const img = objc.send1(info, "objectForKey:", UIImagePickerControllerOriginalImage);
+    if (img == null) return;
+    const size = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) objc.CGSize)(img, objc.sel("size"));
+    if (size.w <= 0 or size.h <= 0) return;
+    const k = @min(1.0, @as(CGFloat, @floatFromInt(photo_max)) / @max(size.w, size.h));
+    const w = @max(1, @round(size.w * k));
+    const h = @max(1, @round(size.h * k));
+    UIGraphicsBeginImageContextWithOptions(.{ .w = w, .h = h }, true, 1);
+    objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(img, objc.sel("drawInRect:"), .{ .w = w, .h = h });
+    const scaled = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    if (scaled == null) return;
+    const jpeg = UIImageJPEGRepresentation(scaled, @as(CGFloat, @floatFromInt(photo_quality)) / 100);
+    rt.file(dataBytes(jpeg), "photo.jpg", "image/jpeg", @intFromFloat(w), @intFromFloat(h));
+}
+
+fn photoCancelled(_: id, _: objc.SEL, picker: id) callconv(.c) void {
+    dismissPicker(picker);
+}
+
+fn utType(identifier: []const u8) id {
+    const s = objc.nsString(identifier);
+    defer objc.release(s);
+    return objc.send1(objc.class("UTType"), "typeWithIdentifier:", s);
+}
+
+pub fn pickFile(accept: []const u8) void {
+    if (root_controller == null) return;
+    _ = dlopen("/System/Library/Frameworks/UniformTypeIdentifiers.framework/UniformTypeIdentifiers", 1);
+    const types = objc.send(objc.class("NSMutableArray"), "array");
+    var parts = std.mem.tokenizeScalar(u8, accept, ',');
+    while (parts.next()) |raw| {
+        const t = std.mem.trim(u8, raw, " ");
+        var ty: id = null;
+        if (std.mem.endsWith(u8, t, "/*")) {
+            const family = t[0 .. t.len - 2];
+            ty = utType(if (std.mem.eql(u8, family, "image")) "public.image" else if (std.mem.eql(u8, family, "video")) "public.movie" else if (std.mem.eql(u8, family, "audio")) "public.audio" else if (std.mem.eql(u8, family, "text")) "public.text" else "public.item");
+        } else if (std.mem.startsWith(u8, t, ".")) {
+            const ext = objc.nsString(t[1..]);
+            defer objc.release(ext);
+            ty = objc.send1(objc.class("UTType"), "typeWithFilenameExtension:", ext);
+        } else if (std.mem.indexOfScalar(u8, t, '/') != null) {
+            const m = objc.nsString(t);
+            defer objc.release(m);
+            ty = objc.send1(objc.class("UTType"), "typeWithMIMEType:", m);
+        }
+        if (ty != null) objc.sendVoid1(types, "addObject:", ty);
+    }
+    if (objc.sendInt(types, "count") == 0) objc.sendVoid1(types, "addObject:", utType("public.item"));
+    const make = objc.msgSend(*const fn (id, objc.SEL, id, bool) callconv(.c) id);
+    const picker = make(objc.send(objc.class("UIDocumentPickerViewController"), "alloc"), objc.sel("initForOpeningContentTypes:asCopy:"), types, true);
+    defer objc.release(picker);
+    objc.sendVoid1(picker, "setDelegate:", target);
+    present(picker);
+}
+
+fn documentsPicked(_: id, _: objc.SEL, _: id, urls: id) callconv(.c) void {
+    const url = objc.send(urls, "firstObject");
+    if (url == null) return;
+    const data = objc.send1(objc.class("NSData"), "dataWithContentsOfURL:", url);
+    if (data == null) return;
+    const ty = objc.send1(objc.class("UTType"), "typeWithFilenameExtension:", objc.send(url, "pathExtension"));
+    const mime = if (ty != null) stringOf(objc.send(ty, "preferredMIMEType")) else "";
+    rt.file(dataBytes(data), stringOf(objc.send(url, "lastPathComponent")), if (mime.len > 0) mime else "application/octet-stream", 0, 0);
+}
+
+fn documentsCancelled(_: id, _: objc.SEL, _: id) callconv(.c) void {}
+
+/// A file in the temporary folder, offered by the share sheet (which also saves to Files).
+pub fn saveFile(name: []const u8, _: []const u8, data: []const u8, _: bool) void {
+    if (root_controller == null) return;
+    const n = objc.nsString(if (name.len > 0) name else "file");
+    defer objc.release(n);
+    const file_path = objc.send1(NSTemporaryDirectory(), "stringByAppendingPathComponent:", n);
+    if (!objc.msgSend(*const fn (id, objc.SEL, id, bool) callconv(.c) bool)(nsData(data), objc.sel("writeToFile:atomically:"), file_path, true)) return;
+    const url = objc.send1(objc.class("NSURL"), "fileURLWithPath:", file_path);
+    const items = objc.send1(objc.class("NSArray"), "arrayWithObject:", url);
+    const make = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) id);
+    const sheet = make(objc.send(objc.class("UIActivityViewController"), "alloc"), objc.sel("initWithActivityItems:applicationActivities:"), items, null);
+    defer objc.release(sheet);
+    anchorPopover(sheet);
     present(sheet);
 }

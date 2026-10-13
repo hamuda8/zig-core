@@ -221,4 +221,248 @@ final class ZuiDevice {
             b.show();
         }
     }
+
+    // ---- Photos and files: the camera, the photo picker, the document picker, Downloads ----
+
+    static final int REQUEST_CAMERA = 7101, REQUEST_PERMISSION = 7102, REQUEST_PHOTO = 7103, REQUEST_FILE = 7104;
+    /** A file the user chose: bytes, name, MIME type, and a photo's size after scaling. */
+    static native void nativeFileDone(byte[] data, String name, String mime, int width, int height);
+
+    static int photoMax = 1600, photoQuality = 85;
+    /** Where the camera writes the photo (MediaStore, removed once read). */
+    static android.net.Uri cameraUri;
+    static final java.util.concurrent.ExecutorService files = java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    static void fileDone(byte[] data, String name, String mime, int w, int h) {
+        Zui.main.post(() -> {
+            if (Zui.started) nativeFileDone(data, name, mime, w, h);
+        });
+    }
+
+    /** Whether the manifest asks for a permission: an app that declares CAMERA must hold it to
+     *  start the camera app, one that does not can start it without. */
+    static boolean declares(String permission) {
+        try {
+            String[] all = Zui.activity.getPackageManager().getPackageInfo(Zui.activity.getPackageName(), android.content.pm.PackageManager.GET_PERMISSIONS).requestedPermissions;
+            if (all != null) for (String p : all) if (p.equals(permission)) return true;
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    static void pickPhoto(boolean camera, int max, int quality) {
+        photoMax = max;
+        photoQuality = quality;
+        android.app.Activity a = Zui.activity;
+        if (!camera) {
+            Intent i = Build.VERSION.SDK_INT >= 33 ? new Intent(android.provider.MediaStore.ACTION_PICK_IMAGES).setType("image/*")
+                    : new Intent(Intent.ACTION_GET_CONTENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE);
+            start(i, REQUEST_PHOTO);
+            return;
+        }
+        if (declares(android.Manifest.permission.CAMERA) && a.checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            a.requestPermissions(new String[] {android.Manifest.permission.CAMERA}, REQUEST_PERMISSION);
+            return;
+        }
+        openCamera();
+    }
+
+    static void openCamera() {
+        Intent i = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+        cameraUri = null;
+        if (Build.VERSION.SDK_INT >= 29) {
+            android.content.ContentValues v = new android.content.ContentValues();
+            v.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "zui-" + System.currentTimeMillis() + ".jpg");
+            v.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+            try {
+                cameraUri = Zui.activity.getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+            } catch (Exception ignored) {
+            }
+            if (cameraUri != null) {
+                i.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, cameraUri);
+                i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            }
+        }
+        start(i, REQUEST_CAMERA);
+    }
+
+    static void start(Intent i, int code) {
+        try {
+            Zui.activity.startActivityForResult(i, code);
+        } catch (Exception e) {
+            // no app for it
+        }
+    }
+
+    static void pickFile(String accept) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE);
+        java.util.ArrayList<String> types = new java.util.ArrayList<>();
+        boolean extensions = false;
+        for (String t : accept.split(",")) {
+            t = t.trim();
+            if (t.isEmpty()) continue;
+            if (t.contains("/")) types.add(t);
+            // Android files CSV as text/comma-separated-values.
+            if (t.equals("text/csv")) types.add("text/comma-separated-values");
+            else extensions = true;
+        }
+        // Extensions (".csv") cannot be asked for here: then anything.
+        if (extensions) types.clear();
+        if (types.size() == 1) i.setType(types.get(0));
+        else {
+            i.setType("*/*");
+            if (types.size() > 1) i.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+        }
+        start(i, REQUEST_FILE);
+    }
+
+    /** From the activity. */
+    static boolean permissionResult(int code, int[] results) {
+        if (code != REQUEST_PERMISSION) return false;
+        if (results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) openCamera();
+        return true;
+    }
+
+    /** From the activity: whether the result was one of ours. */
+    static boolean activityResult(int code, int result, Intent data) {
+        if (code != REQUEST_CAMERA && code != REQUEST_PHOTO && code != REQUEST_FILE) return false;
+        android.content.ContentResolver cr = Zui.activity.getContentResolver();
+        final android.net.Uri camera = cameraUri;
+        cameraUri = null;
+        if (result != android.app.Activity.RESULT_OK) {
+            if (camera != null) files.execute(() -> delete(cr, camera));
+            return true;
+        }
+        final int max = photoMax, quality = photoQuality;
+        if (code == REQUEST_CAMERA) {
+            if (camera != null) {
+                files.execute(() -> {
+                    photo(cr, camera, "photo.jpg", max, quality);
+                    delete(cr, camera);
+                });
+            } else if (data != null && data.getExtras() != null && data.getExtras().get("data") instanceof android.graphics.Bitmap) {
+                // Android 9 and older without a place to write: the camera's small preview.
+                android.graphics.Bitmap b = (android.graphics.Bitmap) data.getExtras().get("data");
+                files.execute(() -> jpeg(b, 0, max, quality, "photo.jpg"));
+            }
+            return true;
+        }
+        final android.net.Uri uri = data != null ? data.getData() : null;
+        if (uri == null) return true;
+        if (code == REQUEST_PHOTO) files.execute(() -> photo(cr, uri, baseName(displayName(cr, uri, "photo")) + ".jpg", max, quality));
+        else files.execute(() -> {
+            byte[] bytes = read(cr, uri);
+            String mime = cr.getType(uri);
+            if (bytes != null) fileDone(bytes, displayName(cr, uri, "file"), mime != null ? mime : "application/octet-stream", 0, 0);
+        });
+        return true;
+    }
+
+    static void delete(android.content.ContentResolver cr, android.net.Uri uri) {
+        try {
+            cr.delete(uri, null, null);
+        } catch (Exception ignored) {
+        }
+    }
+
+    static String displayName(android.content.ContentResolver cr, android.net.Uri uri, String fallback) {
+        try (android.database.Cursor c = cr.query(uri, new String[] {android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && c.getString(0) != null) return c.getString(0);
+        } catch (Exception ignored) {
+        }
+        return fallback;
+    }
+
+    static String baseName(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
+    }
+
+    static byte[] read(android.content.ContentResolver cr, android.net.Uri uri) {
+        try (java.io.InputStream in = cr.openInputStream(uri)) {
+            if (in == null) return null;
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] chunk = new byte[65536];
+            for (int n; (n = in.read(chunk)) > 0; ) out.write(chunk, 0, n);
+            return out.toByteArray();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** On the files thread: decode at about the size wanted, turn upright (EXIF), scale, JPEG. */
+    static void photo(android.content.ContentResolver cr, android.net.Uri uri, String name, int max, int quality) {
+        byte[] bytes = read(cr, uri);
+        if (bytes == null) return;
+        android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options();
+        o.inJustDecodeBounds = true;
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
+        if (o.outWidth <= 0 || o.outHeight <= 0) return;
+        int sample = 1;
+        while (Math.max(o.outWidth, o.outHeight) / (sample * 2) >= max) sample *= 2;
+        o = new android.graphics.BitmapFactory.Options();
+        o.inSampleSize = sample;
+        android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
+        if (b == null) return;
+        int rotate = 0;
+        try {
+            android.media.ExifInterface exif = new android.media.ExifInterface(new java.io.ByteArrayInputStream(bytes));
+            switch (exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1)) {
+                case 6: rotate = 90; break;
+                case 3: rotate = 180; break;
+                case 8: rotate = 270; break;
+            }
+        } catch (Exception ignored) {
+        }
+        jpeg(b, rotate, max, quality, name);
+    }
+
+    static void jpeg(android.graphics.Bitmap b, int rotate, int max, int quality, String name) {
+        float k = Math.min(1f, (float) max / Math.max(b.getWidth(), b.getHeight()));
+        android.graphics.Matrix m = new android.graphics.Matrix();
+        m.postScale(k, k);
+        m.postRotate(rotate);
+        android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+        java.io.ByteArrayOutputStream jpeg = new java.io.ByteArrayOutputStream();
+        out.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, jpeg);
+        fileDone(jpeg.toByteArray(), name, "image/jpeg", out.getWidth(), out.getHeight());
+    }
+
+    /** Into Downloads (Android 10+: MediaStore, no permission; older: the app's own Downloads
+     *  folder), then the share sheet when asked. */
+    static void saveFile(String name, String mime, byte[] data, boolean share) {
+        android.app.Activity a = Zui.activity;
+        files.execute(() -> {
+            android.net.Uri uri = null;
+            try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    android.content.ContentValues v = new android.content.ContentValues();
+                    v.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name);
+                    v.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime);
+                    uri = a.getContentResolver().insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                    if (uri == null) return;
+                    try (java.io.OutputStream out = a.getContentResolver().openOutputStream(uri)) {
+                        out.write(data);
+                    }
+                } else {
+                    java.io.File dir = a.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS);
+                    if (dir == null) return;
+                    try (java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dir, name))) {
+                        out.write(data);
+                    }
+                }
+            } catch (Exception e) {
+                return;
+            }
+            final android.net.Uri saved = uri;
+            Zui.main.post(() -> {
+                if (share && saved != null) {
+                    Intent send = new Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, saved).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    start(Intent.createChooser(send, null).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), 7105);
+                } else {
+                    android.widget.Toast.makeText(a, name, android.widget.Toast.LENGTH_SHORT).show();
+                }
+            });
+        });
+    }
 }

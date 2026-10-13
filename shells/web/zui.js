@@ -104,6 +104,43 @@ export async function start(wasm, mount = document.body, options = {}) {
     document.body.appendChild(cover);
   };
 
+  // Files (fx.pickPhoto, pickFile): a hidden <input type=file>, opened during the press.
+  let fileInput = null;
+  const chooseFile = (accept, capture, then) => {
+    fileInput?.remove();
+    const el = document.createElement('input');
+    el.type = 'file';
+    if (accept) el.accept = accept;
+    if (capture) el.setAttribute('capture', 'environment');
+    el.style.cssText = 'position:fixed;left:-100px;top:0;width:1px;height:1px;opacity:0;';
+    document.body.appendChild(el);
+    fileInput = el;
+    el.addEventListener('change', () => {
+      const f = el.files && el.files[0];
+      el.remove();
+      if (fileInput === el) fileInput = null;
+      if (f) then(f);
+    });
+    el.click();
+  };
+  const fileDone = (data, name, mime, w = 0, h = 0) => withBytes(data, (dp, dn) => withBytes(encoder.encode(name), (np, nn) =>
+    withBytes(encoder.encode(mime), (mp, mn) => ex.zui_file_done(dp, dn, np, nn, mp, mn, w, h))));
+  // A photo scaled to fit max x max, as JPEG; the browser turns it upright (EXIF) when decoding.
+  const toJpeg = async (file, max, quality) => {
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const k = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width * k)), h = Math.max(1, Math.round(bitmap.height * k));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const g = canvas.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close?.();
+    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', quality / 100));
+    return { data: new Uint8Array(await blob.arrayBuffer()), w, h };
+  };
+
   // Copies bytes into wasm memory for one call.
   const withBytes = (bytes, fn) => {
     const ptr = ex.zui_alloc(Math.max(1, bytes.length));
@@ -297,6 +334,7 @@ export async function start(wasm, mount = document.body, options = {}) {
       },
       zui_pick(kind, vptr, vlen, minPtr, minLen, maxPtr, maxLen, tptr, tlen, optr, olen, selected) {
         picker?.remove();
+      fileInput?.remove();
         const options = kind === PICK_OPTION ? str(optr, olen).split('\n') : [];
         const el = document.createElement(kind === PICK_OPTION ? 'select' : 'input');
         // Invisible, where the finger or mouse last went down: the browser opens its picker there.
@@ -324,6 +362,34 @@ export async function start(wasm, mount = document.body, options = {}) {
         if (kind === PICK_OPTION) return void menu(el, options, selected, str(tptr, tlen));
         el.focus();
         el.click();
+      },
+      zui_pick_photo(camera, max, quality) {
+        chooseFile('image/*', !!camera, (f) => {
+          toJpeg(f, max, quality).then(({ data, w, h }) => {
+            const name = (f.name || 'photo').replace(/\.[^.]*$/, '') + '.jpg';
+            fileDone(data, name, 'image/jpeg', w, h);
+          }, (e) => console.error('zui: photo', e));
+        });
+      },
+      zui_pick_file(ptr, len) {
+        chooseFile(str(ptr, len), false, (f) => {
+          f.arrayBuffer().then((b) => fileDone(new Uint8Array(b), f.name, f.type || 'application/octet-stream'));
+        });
+      },
+      zui_save_file(nptr, nlen, mptr, mlen, dptr, dlen, share) {
+        const name = str(nptr, nlen), type = str(mptr, mlen) || 'application/octet-stream';
+        const data = dlen === 0 ? new Uint8Array(0) : new Uint8Array(memory.buffer, dptr >>> 0, dlen).slice();
+        const file = new File([data], name, { type });
+        if (share && navigator.canShare?.({ files: [file] })) return void navigator.share({ files: [file] }).catch(() => {});
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
       },
       zui_content(id, w, h) {
         const el = views.get(id);

@@ -50,6 +50,9 @@ const js = struct {
     extern "zui" fn zui_video(id: u32, stream: u32, mirror: u32, cover: u32) void;
     extern "zui" fn zui_input_type(id: u32, keyboard: u32, return_key: u32, secure: u32) void;
     extern "zui" fn zui_pick(kind: u32, value: [*]const u8, value_len: usize, min: [*]const u8, min_len: usize, max: [*]const u8, max_len: usize, title: [*]const u8, title_len: usize, options: [*]const u8, options_len: usize, selected: i32) void;
+    extern "zui" fn zui_pick_photo(camera: u32, max_size: u32, quality: u32) void;
+    extern "zui" fn zui_pick_file(accept: [*]const u8, accept_len: usize) void;
+    extern "zui" fn zui_save_file(name: [*]const u8, name_len: usize, mime: [*]const u8, mime_len: usize, data: [*]const u8, data_len: usize, share: u32) void;
     extern "zui" fn zui_now() f64;
     extern "zui" fn zui_tz_offset() i32;
     extern "zui" fn zui_vibrate(ms: u32) void;
@@ -89,6 +92,15 @@ pub fn inputType(id: u32, t: zui.InputType) void {
 }
 pub fn pick(kind: zui.PickKind, value: []const u8, min: []const u8, max: []const u8, title: []const u8, options: []const u8, selected: i32) void {
     js.zui_pick(@intFromEnum(kind), value.ptr, value.len, min.ptr, min.len, max.ptr, max.len, title.ptr, title.len, options.ptr, options.len, selected);
+}
+pub fn pickPhoto(camera: bool, max_size: u32, quality: u8) void {
+    js.zui_pick_photo(@intFromBool(camera), max_size, quality);
+}
+pub fn pickFile(accept: []const u8) void {
+    js.zui_pick_file(accept.ptr, accept.len);
+}
+pub fn saveFile(name: []const u8, mime: []const u8, data: []const u8, share: bool) void {
+    js.zui_save_file(name.ptr, name.len, mime.ptr, mime.len, data.ptr, data.len, @intFromBool(share));
 }
 pub fn content(id: u32, s: zui.Size) void {
     js.zui_content(id, s.w, s.h);
@@ -294,6 +306,9 @@ pub fn exportEntry(comptime App: type) void {
         fn inputEvent(id: u32, kind: u32) callconv(.c) void {
             R.inputEvent(id, std.enums.fromInt(zui.InputEvent, kind) orelse return);
         }
+        fn fileDone(data: [*]const u8, data_len: usize, name: [*]const u8, name_len: usize, mime: [*]const u8, mime_len: usize, w: u32, h: u32) callconv(.c) void {
+            R.fileDone(data[0..data_len], name[0..name_len], mime[0..mime_len], w, h);
+        }
         fn pickDone(ptr: [*]const u8, len: usize) callconv(.c) void {
             R.pickDone(ptr[0..len]);
         }
@@ -333,6 +348,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.peerEvent, .{ .name = "zui_peer_event" });
     @export(&Entry.back, .{ .name = "zui_back" });
     @export(&Entry.pickDone, .{ .name = "zui_pick_done" });
+    @export(&Entry.fileDone, .{ .name = "zui_file_done" });
     @export(&Entry.linkEvent, .{ .name = "zui_link_event" });
     @export(&Entry.deviceEvent, .{ .name = "zui_device_event" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });

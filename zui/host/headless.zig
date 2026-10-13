@@ -86,6 +86,26 @@ pub fn content(_: u32, _: zui.Size) void {}
 pub fn inputType(id: u32, t: zui.InputType) void {
     if (views.getPtr(id)) |v| v.input_type = t;
 }
+/// What the app asked for: a photo (camera or not, its size), a file (what it accepts), and the
+/// last file it saved.
+pub var photo_asked: ?struct { camera: bool, max_size: u32, quality: u8 } = null;
+pub var file_accept: ?[]const u8 = null;
+pub var saved_name: std.ArrayList(u8) = .empty;
+pub var saved_data: std.ArrayList(u8) = .empty;
+pub var saved_share = false;
+pub fn pickPhoto(camera: bool, max_size: u32, quality: u8) void {
+    photo_asked = .{ .camera = camera, .max_size = max_size, .quality = quality };
+}
+pub fn pickFile(accept: []const u8) void {
+    file_accept = gpa.dupe(u8, accept) catch "";
+}
+pub fn saveFile(name: []const u8, _: []const u8, data: []const u8, share: bool) void {
+    saved_name.clearRetainingCapacity();
+    saved_name.appendSlice(gpa, name) catch {};
+    saved_data.clearRetainingCapacity();
+    saved_data.appendSlice(gpa, data) catch {};
+    saved_share = share;
+}
 /// The picker the app opened and what it was given (options one a line).
 pub var picker: ?zui.PickKind = null;
 pub var picker_value: std.ArrayList(u8) = .empty;
@@ -309,6 +329,8 @@ pub fn Driver(comptime App: type) type {
             beeps = 0;
             awake = false;
             picker = null;
+            photo_asked = null;
+            file_accept = null;
         }
 
         /// Back (Android's button, the iOS swipe). Returns whether the app took it.
@@ -357,6 +379,13 @@ pub fn Driver(comptime App: type) type {
         /// A position fix from the "device".
         pub fn locate(lat: f64, lng: f64) void {
             R.locationEvent(.{ .fix = .{ .lat = lat, .lng = lng, .accuracy = 5 } });
+        }
+
+        /// The user chose a photo or a file.
+        pub fn giveFile(f: zui.File) void {
+            photo_asked = null;
+            file_accept = null;
+            R.fileDone(f.data, f.name, f.mime, f.width, f.height);
         }
 
         /// The user chooses in the open picker: a date, a time, or an option's index ("2").
@@ -754,4 +783,55 @@ test "inputs: password, keyboards, a text area that grows; date, time and option
     try D.choose("2");
     try std.testing.expect(D.findText("Homs") != 0);
     try std.testing.expectError(error.NoPicker, D.choose("1"));
+}
+
+const Files = struct {
+    pub const Msg = union(enum) { photo, file, save, got: zui.File };
+    pub const State = struct { got: [64]u8 = undefined, got_len: usize = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    fn onFile(f: zui.File) Msg {
+        return .{ .got = f };
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .photo => fx.pickPhoto(.{ .camera = true, .max_size = 1024 }, onFile),
+            .file => fx.pickFile(.{ .accept = "text/csv" }, onFile),
+            .save => fx.saveFile(.{ .name = "report.csv", .mime = "text/csv", .data = "a,b\n1,2\n", .share = true }),
+            .got => |f| s.got_len = if (std.fmt.bufPrint(&s.got, "{s} {s} {d} {d}x{d}", .{ f.name, f.mime, f.data.len, f.width, f.height })) |w| w.len else |_| 0,
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{});
+        ui.begin(.{}, .{ .on_press = .photo });
+        ui.text("Photo", .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .file });
+        ui.text("File", .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .save });
+        ui.text("Save", .{});
+        ui.end();
+        ui.text(s.got[0..s.got_len], .{});
+        ui.end();
+    }
+};
+
+test "photos, files, saving" {
+    const D = Driver(Files);
+    D.start(200, 400);
+    defer D.reset();
+    try D.press("Photo");
+    try std.testing.expect(photo_asked.?.camera and photo_asked.?.max_size == 1024 and photo_asked.?.quality == 85);
+    D.giveFile(.{ .data = "\xff\xd8jpeg", .name = "photo.jpg", .mime = "image/jpeg", .width = 1024, .height = 768 });
+    try std.testing.expect(D.findText("photo.jpg image/jpeg 6 1024x768") != 0);
+    try D.press("File");
+    try std.testing.expectEqualStrings("text/csv", file_accept.?);
+    D.giveFile(.{ .data = "x,y", .name = "a.csv", .mime = "text/csv" });
+    try std.testing.expect(D.findText("a.csv text/csv 3 0x0") != 0);
+    try D.press("Save");
+    try std.testing.expectEqualStrings("report.csv", saved_name.items);
+    try std.testing.expectEqualStrings("a,b\n1,2\n", saved_data.items);
+    try std.testing.expect(saved_share);
 }

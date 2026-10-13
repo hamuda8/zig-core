@@ -77,6 +77,11 @@ public final class ZuiActivity extends Activity {
     }
 
     @Override
+    protected void onActivityResult(int code, int result, android.content.Intent data) {
+        if (!ZuiDevice.activityResult(code, result, data)) super.onActivityResult(code, result, data);
+    }
+
+    @Override
     public void onBackPressed() {
         if (!ZuiDevice.back()) super.onBackPressed();
     }
@@ -95,6 +100,7 @@ public final class ZuiActivity extends Activity {
 
     @Override
     public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        if (ZuiDevice.permissionResult(code, results)) return;
         if (code == ZuiMedia.PERMISSION_REQUEST) {
             ZuiMedia.permissionResult(permissions, results);
             return;

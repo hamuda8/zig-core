@@ -218,6 +218,44 @@ pub const OptionPick = struct {
     selected: ?u32 = null,
 };
 
+/// A photo from the camera or the gallery (`fx.pickPhoto`), as JPEG.
+pub const PhotoPick = struct {
+    /// Take one with the camera (else choose one from the gallery). Where there is no camera
+    /// (a desktop browser) the browser asks for a file.
+    camera: bool = false,
+    /// The longest side, in pixels, after scaling down (a phone's photo is 4000 or more).
+    max_size: u32 = 1600,
+    /// JPEG quality, 1 to 100.
+    quality: u8 = 85,
+};
+
+pub const FilePick = struct {
+    /// What can be chosen: MIME types and patterns, comma-separated ("image/*,application/pdf",
+    /// "text/csv"); "" for anything.
+    accept: []const u8 = "",
+};
+
+/// A file the user chose. Only valid during `update`: copy what you keep.
+pub const File = struct {
+    data: []const u8,
+    name: []const u8 = "",
+    mime: []const u8 = "",
+    /// Photos: the size after scaling.
+    width: u32 = 0,
+    height: u32 = 0,
+};
+
+/// A file the app made, for `fx.saveFile`.
+pub const SaveFile = struct {
+    name: []const u8,
+    mime: []const u8 = "application/octet-stream",
+    data: []const u8,
+    /// Offer it to other apps (the share sheet) rather than only saving it. The web downloads
+    /// it unless the browser can share files; iOS always shows its share sheet (which saves to
+    /// Files too); Android saves it to Downloads, and with `share` also opens the share sheet.
+    share: bool = false,
+};
+
 /// What `update` may ask of the platform. Each result arrives later as a message.
 pub fn Fx(comptime Msg: type) type {
     return struct {
@@ -260,6 +298,9 @@ pub fn Fx(comptime Msg: type) type {
             pick_date: *const fn (DatePick, *const fn ([]const u8) Msg) void,
             pick_time: *const fn (TimePick, *const fn ([]const u8) Msg) void,
             pick_option: *const fn (OptionPick, *const fn (u32) Msg) void,
+            pick_photo: *const fn (PhotoPick, *const fn (File) Msg) void,
+            pick_file: *const fn (FilePick, *const fn (File) Msg) void,
+            save_file: *const fn (SaveFile) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -323,6 +364,24 @@ pub fn Fx(comptime Msg: type) type {
         /// sheet); `done` gets the index of the one chosen.
         pub fn pickOption(fx: Self, o: OptionPick, done: *const fn (u32) Msg) void {
             fx.vt.pick_option(o, done);
+        }
+
+        /// A photo, taken with the camera or chosen from the gallery, scaled down to
+        /// `max_size` and sent to `done` as JPEG (web <input type=file capture>, Android's
+        /// camera and photo picker, iOS UIImagePickerController). Nothing comes back when the
+        /// user cancels. iOS apps need NSCameraUsageDescription in their Info.plist.
+        pub fn pickPhoto(fx: Self, o: PhotoPick, done: *const fn (File) Msg) void {
+            fx.vt.pick_photo(o, done);
+        }
+
+        /// Any file: its bytes, name and MIME type.
+        pub fn pickFile(fx: Self, o: FilePick, done: *const fn (File) Msg) void {
+            fx.vt.pick_file(o, done);
+        }
+
+        /// Saves or shares a file the app made (a report, a label): see `SaveFile.share`.
+        pub fn saveFile(fx: Self, f: SaveFile) void {
+            fx.vt.save_file(f);
         }
 
         /// Keeps the screen on while `on` (a courier's navigation, a scanner).
@@ -736,7 +795,34 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .pick_date = fxPickDate,
             .pick_time = fxPickTime,
             .pick_option = fxPickOption,
+            .pick_photo = fxPickPhoto,
+            .pick_file = fxPickFile,
+            .save_file = fxSaveFile,
         };
+
+        // ---- Files: one pick at a time ----
+        var file_cb: ?*const fn (File) Msg = null;
+
+        fn fxPickPhoto(o: PhotoPick, done: *const fn (File) Msg) void {
+            file_cb = done;
+            H.pickPhoto(o.camera, @max(16, o.max_size), @max(1, @min(100, o.quality)));
+        }
+
+        fn fxPickFile(o: FilePick, done: *const fn (File) Msg) void {
+            file_cb = done;
+            H.pickFile(o.accept);
+        }
+
+        fn fxSaveFile(f: SaveFile) void {
+            H.saveFile(f.name, f.mime, f.data, f.share);
+        }
+
+        /// The file the user chose (only read during this call).
+        pub fn fileDone(data: []const u8, name: []const u8, mime: []const u8, width: u32, height: u32) void {
+            const cb = file_cb orelse return;
+            file_cb = null;
+            if (started) dispatch(cb(.{ .data = data, .name = name, .mime = mime, .width = width, .height = height }));
+        }
 
         // ---- Pickers: one at a time; a new one replaces the callback of the last ----
         var picking: union(enum) { none, text: *const fn ([]const u8) Msg, index: *const fn (u32) Msg } = .none;
@@ -852,6 +938,14 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         }
 
         pub fn deviceEvent(kind: DeviceEvent) void {
+            // Platforms repeat the current state (Android's network callback on registering).
+            const same = switch (kind) {
+                .online => env.online,
+                .offline => !env.online,
+                .visible => env.visible,
+                .hidden => !env.visible,
+            };
+            if (same) return;
             switch (kind) {
                 .online => env.online = true,
                 .offline => env.online = false,

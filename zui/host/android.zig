@@ -67,6 +67,9 @@ var device: struct {
     beep: jni.jmethodID,
     input_type: jni.jmethodID,
     pick: jni.jmethodID,
+    pick_photo: jni.jmethodID,
+    pick_file: jni.jmethodID,
+    save_file: jni.jmethodID,
 } = undefined;
 
 fn bindDevice(e: *jni.Env) void {
@@ -80,6 +83,9 @@ fn bindDevice(e: *jni.Env) void {
         .{ "vibrate", "vibrate", "(I)V" },
         .{ "beep", "beep", "()V" },
         .{ "input_type", "inputType", "(IIIZ)V" },
+        .{ "pick_photo", "pickPhoto", "(ZII)V" },
+        .{ "pick_file", "pickFile", "(Ljava/lang/String;)V" },
+        .{ "save_file", "saveFile", "(Ljava/lang/String;Ljava/lang/String;[BZ)V" },
         .{ "pick", "pick", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V" },
     }) |m| @field(device, m[0]) = f.GetStaticMethodID(e, device_class, m[1], m[2]);
 }
@@ -104,6 +110,25 @@ pub fn vibrate(ms: u32) void {
 }
 pub fn beep() void {
     callDevice(device.beep, &.{});
+}
+pub fn pickPhoto(camera: bool, max_size: u32, quality: u8) void {
+    callDevice(device.pick_photo, &.{ boolean(camera), int(max_size), int(quality) });
+}
+pub fn pickFile(accept: []const u8) void {
+    const ja = newString(accept);
+    defer env.functions.DeleteLocalRef(env, ja);
+    callDevice(device.pick_file, &.{object(ja)});
+}
+pub fn saveFile(name: []const u8, mime: []const u8, data: []const u8, share: bool) void {
+    const f = env.functions;
+    const jn = newString(name);
+    defer f.DeleteLocalRef(env, jn);
+    const jm = newString(mime);
+    defer f.DeleteLocalRef(env, jm);
+    const jd = f.NewByteArray(env, @intCast(data.len));
+    defer f.DeleteLocalRef(env, jd);
+    if (data.len > 0) f.SetByteArrayRegion(env, jd, 0, @intCast(data.len), data.ptr);
+    callDevice(device.save_file, &.{ object(jn), object(jm), object(jd), boolean(share) });
 }
 pub fn inputType(id: u32, t: zui.InputType) void {
     callDevice(device.input_type, &.{ int(id), int(@intFromEnum(t.keyboard)), int(@intFromEnum(t.return_key)), boolean(t.secure) });
@@ -386,6 +411,17 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.callsPump();
         }
+        fn fileDone(e: *jni.Env, _: jni.jclass, data: jni.jobject, name: jni.jstring, mime: jni.jstring, w: jni.jint, h: jni.jint) callconv(.c) void {
+            bind(e);
+            const f = e.functions;
+            const n: usize = @intCast(f.GetArrayLength(e, data));
+            const buf = zui.allocator.alloc(u8, n) catch return;
+            defer zui.allocator.free(buf);
+            if (n > 0) f.GetByteArrayRegion(e, data, 0, @intCast(n), buf.ptr);
+            var name_buf: [512]u8 = undefined;
+            var mime_buf: [128]u8 = undefined;
+            R.fileDone(buf, javaString(name, &name_buf), javaString(mime, &mime_buf), @intCast(@max(0, w)), @intCast(@max(0, h)));
+        }
         fn pickDone(e: *jni.Env, _: jni.jclass, value: jni.jstring) callconv(.c) void {
             bind(e);
             var buf: [64]u8 = undefined;
@@ -428,6 +464,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.callsPump, .{ .name = "Java_com_wufour_zui_Zui_nativeCallsPump" });
     @export(&Entry.back, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeBack" });
     @export(&Entry.pickDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativePickDone" });
+    @export(&Entry.fileDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeFileDone" });
     @export(&Entry.linkEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeLink" });
     @export(&Entry.deviceEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeDevice" });
 }
