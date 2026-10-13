@@ -127,6 +127,9 @@ const opus_format: AudioStreamBasicDescription = .{ .sample_rate = 48000, .forma
 extern "c" const AVMediaTypeVideo: id;
 extern "c" const AVMediaTypeAudio: id;
 extern "c" const AVCaptureSessionPreset640x480: id;
+extern "c" const AVCaptureSessionPreset352x288: id;
+extern "c" fn CVPixelBufferGetWidth(buf: CFTypeRef) usize;
+extern "c" fn CVPixelBufferGetHeight(buf: CFTypeRef) usize;
 extern "c" const AVCaptureDeviceTypeBuiltInWideAngleCamera: id;
 extern "c" const AVLayerVideoGravityResizeAspectFill: id;
 extern "c" const AVLayerVideoGravityResizeAspect: id;
@@ -166,7 +169,20 @@ const Local = struct {
     opus: ?*anyopaque = null,
     mic_ring: common.Ring = .{},
     pending_permissions: u8 = 0,
+    // Bitrate adaptation (see `adapt`).
+    rates: [8]Rate = undefined,
+    rate_count: usize = 0,
+    bps: u32 = 900_000,
+    applied_bps: u32 = 0,
+    level: usize = 0,
+    level_changed_at: i64 = 0,
+    clean_since: i64 = 0,
+    adapted_at: i64 = 0,
+    enc_w: i32 = width,
+    enc_h: i32 = height,
 };
+
+const Rate = struct { peer: u32, bps: u32, loss: f32 };
 
 const Remote = struct {
     id: u32,
@@ -377,6 +393,24 @@ pub fn remoteVideo(stream: u32, annexb: []const u8, keyframe: bool, rotation: u1
     dispatch_async_f(mainQueue(), job, enqueueOnMain);
 }
 
+/// The engine's target for what connection `peer` sends of local stream `stream` (0: gone).
+/// The encoder follows the lowest.
+pub fn setBitrate(stream: u32, peer: u32, bps: u32, loss: f32) void {
+    mutex.lock();
+    defer mutex.unlock();
+    const l = findLocal(stream) orelse return;
+    for (l.rates[0..l.rate_count], 0..) |*r, i| if (r.peer == peer) {
+        if (bps == 0) {
+            l.rates[i] = l.rates[l.rate_count - 1];
+            l.rate_count -= 1;
+        } else r.* = .{ .peer = peer, .bps = bps, .loss = loss };
+        return;
+    };
+    if (bps == 0 or l.rate_count == l.rates.len) return;
+    l.rates[l.rate_count] = .{ .peer = peer, .bps = bps, .loss = loss };
+    l.rate_count += 1;
+}
+
 pub fn requestKeyframe(stream: u32) void {
     mutex.lock();
     defer mutex.unlock();
@@ -496,18 +530,59 @@ fn startCamera(l: *Local) bool {
     l.session = session;
     l.output = output;
 
-    var encoder: CFTypeRef = null;
-    if (VTCompressionSessionCreate(null, width, height, codec_h264, null, null, null, encoded, l, &encoder) != 0) return false;
-    _ = VTSessionSetProperty(encoder, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
-    _ = VTSessionSetProperty(encoder, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel);
-    _ = VTSessionSetProperty(encoder, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-    setInt(encoder, kVTCompressionPropertyKey_AverageBitRate, 900_000);
-    setInt(encoder, kVTCompressionPropertyKey_MaxKeyFrameInterval, 90);
-    _ = VTCompressionSessionPrepareToEncodeFrames(encoder);
-    l.encoder = encoder;
+    l.encoder = newEncoder(l, width, height) orelse return false;
     // startRunning blocks: off the main thread.
     dispatch_async_f(capture_queue.?, session, startRunning);
     return true;
+}
+
+fn newEncoder(l: *Local, w: i32, h: i32) CFTypeRef {
+    var encoder: CFTypeRef = null;
+    if (VTCompressionSessionCreate(null, w, h, codec_h264, null, null, null, encoded, l, &encoder) != 0) return null;
+    _ = VTSessionSetProperty(encoder, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
+    _ = VTSessionSetProperty(encoder, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel);
+    _ = VTSessionSetProperty(encoder, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+    setInt(encoder, kVTCompressionPropertyKey_AverageBitRate, @intCast(l.bps));
+    setInt(encoder, kVTCompressionPropertyKey_MaxKeyFrameInterval, 90);
+    _ = VTCompressionSessionPrepareToEncodeFrames(encoder);
+    l.enc_w = w;
+    l.enc_h = h;
+    return encoder;
+}
+
+/// Follows the engine's target: the encoder's bitrate at once, and the capture size with
+/// hysteresis (640x480 down to 352x288 on loss or a very low target, back after 10 quiet
+/// seconds). Runs on the capture queue.
+fn adapt(l: *Local, now: i64) void {
+    if (now < l.adapted_at + 500) return;
+    l.adapted_at = now;
+    mutex.lock();
+    var bps: u32 = std.math.maxInt(u32);
+    var loss: f32 = 0;
+    for (l.rates[0..l.rate_count]) |r| {
+        bps = @min(bps, r.bps);
+        loss = @max(loss, r.loss);
+    }
+    const count = l.rate_count;
+    mutex.unlock();
+    if (count == 0) return;
+    l.bps = bps;
+    if (l.encoder != null and (l.applied_bps == 0 or bps * 20 < l.applied_bps * 19 or bps * 20 > l.applied_bps * 21)) {
+        setInt(l.encoder, kVTCompressionPropertyKey_AverageBitRate, @intCast(bps));
+        l.applied_bps = bps;
+    }
+    if (loss >= 0.02) l.clean_since = now;
+    if (now < l.level_changed_at + 3000 or l.session == null) return;
+    var next = l.level;
+    if (l.level == 0 and ((loss >= 0.05 and bps < 450_000) or bps < 200_000)) next = 1;
+    if (l.level == 1 and bps >= 550_000 and now >= l.clean_since + 10_000) next = 0;
+    if (next == l.level) return;
+    l.level = next;
+    l.level_changed_at = now;
+    objc.sendVoid(l.session, "beginConfiguration");
+    objc.sendVoid1(l.session, "setSessionPreset:", if (next == 0) AVCaptureSessionPreset640x480 else AVCaptureSessionPreset352x288);
+    objc.sendVoid(l.session, "commitConfiguration");
+    // The next frame has the new size: `captured` makes a new encoder for it.
 }
 
 fn setInt(session: CFTypeRef, key: CFTypeRef, v: i32) void {
@@ -531,6 +606,19 @@ fn captured(_: id, _: objc.SEL, output: id, sample: CFTypeRef, _: id) callconv(.
     const l = target orelse return;
     if (!l.video_on.load(.acquire)) return;
     const image = CMSampleBufferGetImageBuffer(sample) orelse return;
+    adapt(l, nowMs());
+    const w: i32 = @intCast(CVPixelBufferGetWidth(image));
+    const h: i32 = @intCast(CVPixelBufferGetHeight(image));
+    if (w != l.enc_w or h != l.enc_h) {
+        // Another capture size: a new encoder for it (it starts with a keyframe).
+        if (l.encoder) |e| {
+            VTCompressionSessionInvalidate(e);
+            CFRelease(e);
+        }
+        l.encoder = newEncoder(l, w, h);
+        l.applied_bps = l.bps;
+        if (l.encoder == null) return;
+    }
     var props: CFTypeRef = null;
     if (l.want_key.swap(false, .acq_rel)) {
         const keys = [_]CFTypeRef{kVTEncodeFrameOptionKey_ForceKeyFrame};
