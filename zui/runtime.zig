@@ -516,10 +516,18 @@ pub fn Ui(comptime Msg: type) type {
             ui.frame_msg = msg;
         }
 
-        /// The translation of `english` (Lassan bundles).
+        /// The translation of `english` (Lassan bundles). "Open|task" shows "Open" and is looked
+        /// up as "Open|task" first (see i18n.t).
         pub fn t(ui: *Self, english: []const u8) []const u8 {
             _ = ui;
             return i18n.t(english);
+        }
+
+        /// `english` translated in `context` ("Open" a task vs "Open" as a state): the bundle key
+        /// "english|context" first, then "english".
+        pub fn tc(ui: *Self, context: []const u8, english: []const u8) []const u8 {
+            _ = ui;
+            return i18n.tc(context, english);
         }
 
         /// Translates `template` and fills `{name}` from `args`.

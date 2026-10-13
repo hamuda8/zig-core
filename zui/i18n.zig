@@ -83,16 +83,55 @@ pub fn isRtl() bool {
     return false;
 }
 
-/// The translation of `english` in the current language, or `english` itself.
-pub fn t(english: []const u8) []const u8 {
-    const key = std.mem.trim(u8, english, " \t\r\n");
-    if (std.mem.eql(u8, language(), "en")) return english;
+/// The translation of `text` in the current language, or the English text itself.
+///
+/// The same English text can need different translations in different places ("Open" a task,
+/// "Open" as a state). Such a text carries its context after a bar: `t("Open|task")` shows
+/// "Open" in English and looks up the key "Open|task" first, then "Open". The bundles stay flat
+/// `{"English": "translation"}` objects; a contextual key is a key with a bar in it. A bar
+/// counts as a context only when what follows it is non-empty and has no spaces.
+pub fn t(text: []const u8) []const u8 {
+    if (splitContext(text)) |c| return tc(c.context, c.text);
+    if (std.mem.eql(u8, language(), "en")) return text;
+    return lookup(std.mem.trim(u8, text, " \t\r\n")) orelse text;
+}
+
+/// `text` translated in `context`: the key "text|context" first, then "text" alone. English
+/// shows `text`.
+pub fn tc(context: []const u8, text: []const u8) []const u8 {
+    if (std.mem.eql(u8, language(), "en")) return text;
+    const key = std.mem.trim(u8, text, " \t\r\n");
+    var buf: [512]u8 = undefined;
+    if (key.len + 1 + context.len <= buf.len) {
+        @memcpy(buf[0..key.len], key);
+        buf[key.len] = '|';
+        @memcpy(buf[key.len + 1 ..][0..context.len], context);
+        if (lookup(buf[0 .. key.len + 1 + context.len])) |v| return v;
+    }
+    return lookup(key) orelse text;
+}
+
+const Split = struct { text: []const u8, context: []const u8 };
+
+fn splitContext(s: []const u8) ?Split {
+    const bar = std.mem.lastIndexOfScalar(u8, s, '|') orelse return null;
+    const context = s[bar + 1 ..];
+    if (bar == 0 or context.len == 0 or std.mem.indexOfAny(u8, context, " \t\r\n") != null) return null;
+    return .{ .text = s[0..bar], .context = context };
+}
+
+/// The English text of `s` without its context ("Open|task" -> "Open").
+pub fn english(s: []const u8) []const u8 {
+    return if (splitContext(s)) |c| c.text else s;
+}
+
+fn lookup(key: []const u8) ?[]const u8 {
     if (global.get(key)) |v| return v;
     if (active) |l| {
         if (l.hand.get(key)) |v| return v;
         if (l.machine.get(key)) |v| return v;
     }
-    return english;
+    return null;
 }
 
 /// Translates `template`, then fills `{name}` with the field `name` of `args`.
@@ -143,4 +182,30 @@ test "tf fills named fields" {
     defer arena.deinit();
     setLanguage("en");
     try testing.expectEqualStrings("3 new messages from Sara", tf(arena.allocator(), "{n} new messages from {who}", .{ .n = 3, .who = "Sara" }));
+}
+
+test "a context tells apart the same English text" {
+    try init(testing.allocator, "{}", &.{.{
+        .lang = "ar",
+        .json =
+        \\{"Open": "فتح", "Open|state": "مفتوح", "a | b": "أ | ب"}
+        ,
+    }});
+    defer deinit();
+    setLanguage("en");
+    try testing.expectEqualStrings("Open", t("Open|state"));
+    try testing.expectEqualStrings("Open", tc("state", "Open"));
+    try testing.expectEqualStrings("Open", english("Open|state"));
+    setLanguage("ar");
+    try testing.expectEqualStrings("مفتوح", t("Open|state"));
+    try testing.expectEqualStrings("مفتوح", tc("state", "Open"));
+    // No contextual key: the plain one.
+    try testing.expectEqualStrings("فتح", t("Open|task"));
+    try testing.expectEqualStrings("فتح", t("Open"));
+    // A bar followed by a space is text, not a context.
+    try testing.expectEqualStrings("أ | ب", t("a | b"));
+    setLanguage("en");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("3 open", tf(arena.allocator(), "{n} open|count", .{ .n = 3 }));
 }
