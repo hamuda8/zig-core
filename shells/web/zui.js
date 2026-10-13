@@ -10,7 +10,7 @@
 // maps on a page compile once). options.onPost receives the app's fx.post messages (else they
 // go to the parent page); the returned send(json) reaches the app's hostMessage.
 
-const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4, KIND_IMAGE = 5, KIND_PATH = 6, KIND_VIDEO = 7, KIND_TEXT_AREA = 8;
+const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4, KIND_IMAGE = 5, KIND_PATH = 6, KIND_VIDEO = 7, KIND_TEXT_AREA = 8, KIND_TEXT_SELECT = 9;
 // Input types: keyboards (tree.Keyboard) and enter-key labels (tree.ReturnKey).
 const INPUT_MODE = ['text', 'email', 'numeric', 'tel', 'url', 'decimal'];
 const ENTER_HINT = ['', 'done', 'go', 'next', 'search', 'send'];
@@ -30,7 +30,8 @@ const css = (argb) => {
 // Placeholders use the text color at 45% opacity on every platform.
 const faded = (argb) => css(((Math.round((argb >>> 24) * 0.45) << 24) | (argb & 0xffffff)) >>> 0);
 
-function setFont(el, size, weight, lineHeight, mono) {
+function setFont(el, size, weight, lineHeight, mono, letter = 0) {
+  el.style.letterSpacing = letter ? letter + "px" : "";
   el.style.fontSize = size + 'px';
   el.style.fontWeight = String(weight);
   el.style.lineHeight = lineHeight + 'px';
@@ -63,7 +64,10 @@ export async function start(wasm, mount = document.body, options = {}) {
   if (embedded && getComputedStyle(mount).position === 'static') mount.style.position = 'relative';
   mount.replaceChildren(root);
   const sheet = document.createElement('style');
-  sheet.textContent = 'input::placeholder,textarea::placeholder{color:var(--zui-placeholder);opacity:1}';
+  sheet.textContent = 'input::placeholder,textarea::placeholder{color:var(--zui-placeholder);opacity:1}' +
+    // Borders are drawn over the box, not around its content: children stay where zui put them.
+    '.zui-b::before{content:"";position:absolute;inset:0;box-sizing:border-box;border-style:solid;border-width:var(--zui-bw);border-color:var(--zui-bc);border-radius:inherit;pointer-events:none}' +
+    '.zui-sel,.zui-sel *{user-select:text;-webkit-user-select:text;cursor:text}';
   document.head.appendChild(sheet);
   const views = new Map([[0, root]]);
   let frameRequested = false;
@@ -182,6 +186,7 @@ export async function start(wasm, mount = document.body, options = {}) {
   let watchId = null;
   const sockets = new Map();
   const calls = webCalls(() => ex, () => memory, withBytes, encoder, str);
+  const style = webStyle(views, () => ex, () => memory, str, decoder, measurer);
   const recordings = webMedia(() => ex, () => memory, withBytes, encoder, str, calls.streams);
   const notes = new Map();
 
@@ -227,10 +232,13 @@ export async function start(wasm, mount = document.body, options = {}) {
         el.style.position = 'absolute';
         el.style.boxSizing = 'border-box';
         el.style.margin = '0';
-        if (kind === KIND_TEXT) {
+        // Elements that cannot draw their border over themselves (a ::before) use a real one.
+        el._realBorder = kind === KIND_INPUT || kind === KIND_TEXT_AREA || kind === KIND_IMAGE || kind === KIND_VIDEO || kind === KIND_PATH || kind === KIND_SCROLL || kind === KIND_SCROLL_X;
+        if (kind === KIND_TEXT || kind === KIND_TEXT_SELECT) {
           el.style.whiteSpace = 'pre-wrap';
           el.style.overflowWrap = 'break-word';
           el.dir = 'auto';
+          if (kind === KIND_TEXT_SELECT) el.className = 'zui-sel';
         } else if (kind === KIND_INPUT || kind === KIND_TEXT_AREA) {
           el.style.border = '0';
           el.style.padding = '0';
@@ -273,6 +281,9 @@ export async function start(wasm, mount = document.body, options = {}) {
           el.style.overflow = 'hidden';
           el.style.overscrollBehavior = 'contain';
           el.style.scrollbarWidth = 'thin';
+          // Where it is, for zui (anchoring, the app's on_scroll).
+          el._horizontal = kind === KIND_SCROLL_X;
+          el.addEventListener('scroll', () => ex.zui_scroll(id, el._horizontal ? el.scrollLeft : el.scrollTop), { passive: true });
           const content = document.createElement('div');
           content.style.cssText = 'position:relative;';
           el.appendChild(content);
@@ -305,10 +316,12 @@ export async function start(wasm, mount = document.body, options = {}) {
         s.height = h + 'px';
       },
       zui_box(id, bg, radius, borderWidth, borderColor, opacity) {
-        const s = views.get(id).style;
+        const el = views.get(id), s = el.style;
+        // Resets what a decoration (zui_decor, called after this when there is one) sets.
         s.background = css(bg);
         s.borderRadius = radius + 'px';
-        s.border = borderWidth > 0 ? `${borderWidth}px solid ${css(borderColor)}` : '0';
+        s.boxShadow = '';
+        setBorders(el, [borderWidth, borderWidth, borderWidth, borderWidth], [borderColor, borderColor, borderColor, borderColor]);
         s.opacity = String(opacity);
       },
       zui_pressable(id, on) {
@@ -324,7 +337,15 @@ export async function start(wasm, mount = document.body, options = {}) {
         el.setAttribute('role', 'button');
         el.tabIndex = 0;
         let down = false;
-        el.onpointerdown = (e) => { down = true; el.setPointerCapture?.(e.pointerId); ex.zui_event(id, EVENT_PRESS_IN); };
+        el.onpointerdown = (e) => {
+          // The innermost pressable takes the press (not the ones around it), and only with the
+          // main button: a right click is a context menu.
+          e.stopPropagation();
+          if (e.button !== 0) return;
+          down = true;
+          el.setPointerCapture?.(e.pointerId);
+          ex.zui_event(id, EVENT_PRESS_IN);
+        };
         el.onpointerup = (e) => {
           if (!down) return;
           down = false;
@@ -335,10 +356,10 @@ export async function start(wasm, mount = document.body, options = {}) {
         el.onpointercancel = () => { if (down) { down = false; ex.zui_event(id, EVENT_PRESS_OUT); } };
         el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); ex.zui_event(id, EVENT_PRESS); } };
       },
-      zui_text(id, ptr, len, size, weight, lineHeight, mono, maxLines, color, align) {
+      zui_text(id, ptr, len, size, weight, lineHeight, mono, maxLines, color, align, letter) {
         const el = views.get(id);
         el.textContent = str(ptr, len);
-        setFont(el, size, weight, lineHeight, mono);
+        setFont(el, size, weight, lineHeight, mono, letter);
         setMaxLines(el, maxLines);
         el.style.color = css(color);
         el.style.textAlign = ALIGN[align];
@@ -685,6 +706,7 @@ export async function start(wasm, mount = document.body, options = {}) {
         sockets.delete(id);
       },
       ...calls.imports,
+      ...style.imports,
       ...recordings.imports,
       zui_video(id, stream, mirror, cover) {
         const el = views.get(id);
@@ -706,9 +728,9 @@ export async function start(wasm, mount = document.body, options = {}) {
       zui_log(ptr, len) {
         console.error(str(ptr, len));
       },
-      zui_measure(ptr, len, size, weight, lineHeight, mono, maxLines, maxWidth, out) {
+      zui_measure(ptr, len, size, weight, lineHeight, mono, maxLines, maxWidth, out, letter) {
         measurer.textContent = str(ptr, len);
-        setFont(measurer, size, weight, lineHeight, mono);
+        setFont(measurer, size, weight, lineHeight, mono, letter);
         measurer.style.maxWidth = Number.isFinite(maxWidth) ? maxWidth + 'px' : 'none';
         const r = measurer.getBoundingClientRect();
         let h = r.height;
@@ -1131,4 +1153,152 @@ function webCalls(getEx, getMemory, withBytes, encoder, str) {
       for (const id of [...streams.keys()]) imports.zui_media_close(id);
     },
   };
+}
+
+// Borders are drawn over the box (a ::before), as Android and iOS draw them, so children stay
+// where zui put them; inputs, pictures and scroll views keep real ones.
+function setBorders(el, widths, colors) {
+  if (el._realBorder) {
+    const sides = ['Top', 'Right', 'Bottom', 'Left'];
+    for (let k = 0; k < 4; k++) el.style['border' + sides[k]] = widths[k] > 0 ? `${widths[k]}px solid ${css(colors[k])}` : '0';
+    return;
+  }
+  if (!(widths[0] > 0 || widths[1] > 0 || widths[2] > 0 || widths[3] > 0)) {
+    if (el._bordered) {
+      el.classList.remove('zui-b');
+      el._bordered = false;
+    }
+    return;
+  }
+  el._bordered = true;
+  el.classList.add('zui-b');
+  el.style.setProperty('--zui-bw', widths.map((w) => w + 'px').join(' '));
+  el.style.setProperty('--zui-bc', colors.map(css).join(' '));
+}
+
+// Styling and interaction: decorations (per-corner radii, per-side borders, a shadow, a
+// gradient), rich text with links, long press / context menu / hover, pictures from memory,
+// how pictures fit, transitions, spinners, scrolling.
+function webStyle(views, getEx, getMemory, str, decoder, measurer) {
+  // Spans travel as 5 words: start, length (bytes), flags, colour, link.
+  const fillRich = (el, ptr, len, sptr, count, weight, id) => {
+    const mem = getMemory().buffer;
+    const w = count === 0 ? [] : new Int32Array(mem, sptr >>> 0, count * 5);
+    const bytes = len === 0 ? new Uint8Array(0) : new Uint8Array(mem, ptr >>> 0, len);
+    const text = (a, b) => decoder.decode(bytes.subarray(a, b));
+    const parts = [];
+    let at = 0;
+    for (let k = 0; k < count; k++) {
+      const start = w[5 * k], n = w[5 * k + 1], flags = w[5 * k + 2], color = w[5 * k + 3] >>> 0, link = w[5 * k + 4];
+      if (start > at) parts.push(document.createTextNode(text(at, start)));
+      const sp = document.createElement('span');
+      sp.textContent = text(start, start + n);
+      if (flags & 1) sp.style.fontWeight = String(Math.max(weight, 700));
+      if (flags & 2) sp.style.fontStyle = 'italic';
+      if (flags & 4) sp.style.fontFamily = 'var(--zui-mono, monospace)';
+      const lines = [flags & 8 ? 'underline' : '', flags & 16 ? 'line-through' : ''].filter(Boolean).join(' ');
+      if (lines) sp.style.textDecoration = lines;
+      if (color >>> 24) sp.style.color = css(color);
+      if (link >= 0 && id) {
+        sp.style.cursor = 'pointer';
+        // The link takes the press, not a pressable view around the text.
+        sp.onpointerdown = (e) => e.stopPropagation();
+        sp.onclick = (e) => { e.stopPropagation(); getEx().zui_span_press(id, link); };
+      }
+      parts.push(sp);
+      at = start + n;
+    }
+    if (at < len) parts.push(document.createTextNode(text(at, len)));
+    el.replaceChildren(...parts);
+  };
+
+  const memImages = new Map();
+
+  const imports = {
+    zui_decor(id, ptr) {
+      const el = views.get(id), s = el.style;
+      const mem = getMemory().buffer;
+      const f = new Float32Array(mem, ptr >>> 0, 30), u = new Uint32Array(mem, ptr >>> 0, 30);
+      s.borderRadius = `${f[0]}px ${f[1]}px ${f[2]}px ${f[3]}px`;
+      setBorders(el, [f[4], f[5], f[6], f[7]], [u[8], u[9], u[10], u[11]]);
+      s.boxShadow = u[12] >>> 24 ? `${f[13]}px ${f[14]}px ${f[15]}px ${css(u[12])}` : '';
+      const n = u[17];
+      if (n > 0) {
+        const stops = [];
+        for (let k = 0; k < n; k++) stops.push(`${css(u[18 + k])} ${(f[24 + k] * 100).toFixed(3)}%`);
+        s.backgroundImage = `linear-gradient(${f[16]}deg, ${stops.join(', ')})`;
+      }
+    },
+    zui_rich_text(id, ptr, len, sptr, count, size, weight, lineHeight, mono, maxLines, color, align, letter) {
+      const el = views.get(id);
+      fillRich(el, ptr, len, sptr, count, weight, id);
+      setFont(el, size, weight, lineHeight, mono, letter);
+      setMaxLines(el, maxLines);
+      el.style.color = css(color);
+      el.style.textAlign = ALIGN[align];
+    },
+    zui_measure_rich(ptr, len, sptr, count, size, weight, lineHeight, mono, maxLines, maxWidth, out, letter) {
+      fillRich(measurer, ptr, len, sptr, count, weight, 0);
+      setFont(measurer, size, weight, lineHeight, mono, letter);
+      measurer.style.maxWidth = Number.isFinite(maxWidth) ? maxWidth + 'px' : 'none';
+      const r = measurer.getBoundingClientRect();
+      let h = r.height;
+      if (maxLines > 0) h = Math.min(h, maxLines * lineHeight);
+      new Float32Array(getMemory().buffer, out, 2).set([Math.ceil(r.width), Math.ceil(h)]);
+    },
+    zui_gestures(id, flags) {
+      const el = views.get(id);
+      // Long press (1) or context menu (2): the browser's own menu (and iOS's callout) give way.
+      const menu = (flags & 3) !== 0;
+      el.oncontextmenu = menu ? (e) => { e.preventDefault(); e.stopPropagation(); getEx().zui_event(id, 4); } : null;
+      el.style.webkitTouchCallout = menu ? 'none' : '';
+      // Hover (4): the mouse only, not a finger.
+      el._hover = (flags & 4) !== 0;
+      if (el._hover && !el._hoverListening) {
+        el._hoverListening = true;
+        el.addEventListener('pointerenter', (e) => { if (el._hover && e.pointerType === 'mouse') getEx().zui_event(id, 5); });
+        el.addEventListener('pointerleave', (e) => { if (el._hover && e.pointerType === 'mouse') getEx().zui_event(id, 6); });
+      }
+    },
+    zui_image_bytes(id, kptr, klen, bptr, blen) {
+      const el = views.get(id);
+      const key = str(kptr, klen);
+      el._want = '\n' + key;
+      let url = memImages.get(key);
+      if (url) {
+        memImages.delete(key);
+        memImages.set(key, url);
+      } else {
+        const data = blen === 0 ? new Uint8Array(0) : new Uint8Array(getMemory().buffer, bptr >>> 0, blen).slice();
+        url = URL.createObjectURL(new Blob([data]));
+        memImages.set(key, url);
+        if (memImages.size > 200) {
+          const [oldest, u] = memImages.entries().next().value;
+          memImages.delete(oldest);
+          setTimeout(() => URL.revokeObjectURL(u), 10000);
+        }
+      }
+      if (el.getAttribute('src') !== url) el.src = url;
+    },
+    zui_image_fit(id, fit) {
+      views.get(id).style.objectFit = ['fill', 'cover', 'contain'][fit] || 'fill';
+    },
+    zui_transition(id, ms, x1, y1, x2, y2) {
+      const el = views.get(id);
+      if (!ms) return void (el.style.transition = '');
+      const how = `${ms}ms cubic-bezier(${x1},${y1},${x2},${y2})`;
+      el.style.transition = ['opacity', 'transform', 'left', 'top', 'width', 'height'].map((p) => `${p} ${how}`).join(',');
+    },
+    zui_spin(id, ms) {
+      const el = views.get(id);
+      el._spin?.cancel();
+      // The `rotate` property turns on top of the view's own transform.
+      el._spin = ms ? el.animate([{ rotate: '0deg' }, { rotate: '360deg' }], { duration: ms, iterations: Infinity }) : null;
+    },
+    zui_scroll_to(id, offset, animated) {
+      const el = views.get(id);
+      el.scrollTo({ [el._horizontal ? 'left' : 'top']: offset, behavior: animated ? 'smooth' : 'instant' });
+    },
+  };
+  return { imports };
 }

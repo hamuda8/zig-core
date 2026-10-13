@@ -11,7 +11,7 @@ const js = struct {
     extern "zui" fn zui_frame(id: u32, x: f32, y: f32, w: f32, h: f32) void;
     extern "zui" fn zui_box(id: u32, background: u32, radius: f32, border_width: f32, border_color: u32, opacity: f32) void;
     extern "zui" fn zui_pressable(id: u32, on: u32) void;
-    extern "zui" fn zui_text(id: u32, ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, color: u32, text_align: u32) void;
+    extern "zui" fn zui_text(id: u32, ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, color: u32, text_align: u32, letter_spacing: f32) void;
     extern "zui" fn zui_input(id: u32, value: [*]const u8, value_len: usize, placeholder: [*]const u8, placeholder_len: usize, size: f32, weight: u32, line_height: f32, mono: u32, color: u32, text_align: u32) void;
     extern "zui" fn zui_content(id: u32, w: f32, h: f32) void;
     extern "zui" fn zui_root_background(argb: u32) void;
@@ -66,7 +66,7 @@ const js = struct {
     extern "zui" fn zui_keep_awake(on: u32) void;
     extern "zui" fn zui_push_link(ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_back_state(handler: u32, has_history: u32, rtl: u32) void;
-    extern "zui" fn zui_measure(ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, max_width: f32, out: *[2]f32) void;
+    extern "zui" fn zui_measure(ptr: [*]const u8, len: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, max_width: f32, out: *[2]f32, letter_spacing: f32) void;
 };
 
 pub fn create(id: u32, kind: zui.tree.Kind) void {
@@ -83,12 +83,16 @@ pub fn frame(id: u32, r: zui.Rect) void {
 }
 pub fn box(id: u32, b: zui.Box) void {
     js.zui_box(id, b.background, b.radius, b.border_width, b.border_color, b.opacity);
+    if (!b.isSimple()) {
+        const w = Wire.of(b.decor);
+        js_style.zui_decor(id, &w);
+    }
 }
 pub fn pressable(id: u32, on: bool) void {
     js.zui_pressable(id, @intFromBool(on));
 }
 pub fn text(id: u32, s: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
-    js.zui_text(id, s.ptr, s.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, color, @backingInt(a));
+    js.zui_text(id, s.ptr, s.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, color, @backingInt(a), f.letter_spacing);
 }
 pub fn input(id: u32, value: []const u8, placeholder: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
     js.zui_input(id, value.ptr, value.len, placeholder.ptr, placeholder.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), color, @backingInt(a));
@@ -269,7 +273,7 @@ pub fn rootBackground(argb: u32) void {
 }
 pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
     var out: [2]f32 = .{ 0, 0 };
-    js.zui_measure(s.ptr, s.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, max_width, &out);
+    js.zui_measure(s.ptr, s.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, max_width, &out, f.letter_spacing);
     return .{ .w = out[0], .h = out[1] };
 }
 
@@ -402,10 +406,115 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.deviceEvent, .{ .name = "zui_device_event" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });
     @export(&Entry.free, .{ .name = "zui_free" });
+    exportStyle(R);
 }
 
 extern "zui" fn zui_log(ptr: [*]const u8, len: usize) void;
 
 pub fn log(line: []const u8) void {
     zui_log(line.ptr, line.len);
+}
+
+// ---- Styling and interaction: decorations, rich text, gestures, pictures from memory,
+// transitions, spinners, scroll control ----
+
+const js_style = struct {
+    extern "zui" fn zui_decor(id: u32, wire: *const Wire) void;
+    extern "zui" fn zui_rich_text(id: u32, ptr: [*]const u8, len: usize, spans: [*]const SpanWire, count: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, color: u32, text_align: u32, letter_spacing: f32) void;
+    extern "zui" fn zui_measure_rich(ptr: [*]const u8, len: usize, spans: [*]const SpanWire, count: usize, size: f32, weight: u32, line_height: f32, mono: u32, max_lines: u32, max_width: f32, out: *[2]f32, letter_spacing: f32) void;
+    extern "zui" fn zui_gestures(id: u32, flags: u32) void;
+    extern "zui" fn zui_image_bytes(id: u32, key: [*]const u8, key_len: usize, bytes: [*]const u8, len: usize) void;
+    extern "zui" fn zui_image_fit(id: u32, fit: u32) void;
+    extern "zui" fn zui_transition(id: u32, duration_ms: u32, x1: f32, y1: f32, x2: f32, y2: f32) void;
+    extern "zui" fn zui_spin(id: u32, period_ms: u32) void;
+    extern "zui" fn zui_scroll_to(id: u32, offset: f32, animated: u32) void;
+};
+
+/// A box's decoration as the shim reads it: 30 words.
+const Wire = extern struct {
+    radii: [4]f32,
+    widths: [4]f32,
+    colors: [4]u32,
+    shadow_color: u32,
+    shadow: [3]f32,
+    angle: f32,
+    count: u32,
+    stop_colors: [6]u32,
+    stop_at: [6]f32,
+
+    fn of(d: zui.Decor) Wire {
+        return .{
+            .radii = d.radii,
+            .widths = d.border_widths,
+            .colors = d.border_colors,
+            .shadow_color = d.shadow_color,
+            .shadow = d.shadow,
+            .angle = d.gradient_angle,
+            .count = d.gradient_count,
+            .stop_colors = d.gradient_colors,
+            .stop_at = d.gradient_at,
+        };
+    }
+};
+
+/// A span as the shim reads it: start, length (bytes), flags (bold 1, italic 2, mono 4,
+/// underline 8, strike 16), colour, link (-1: none).
+const SpanWire = extern struct { start: u32, len: u32, flags: u32, color: u32, link: i32 };
+
+fn spanWires(spans: []const zui.Span, buf: []SpanWire) []SpanWire {
+    const n = @min(spans.len, buf.len);
+    for (spans[0..n], buf[0..n]) |s, *w| w.* = .{
+        .start = s.start,
+        .len = s.len,
+        .flags = @as(u32, @intFromBool(s.bold)) | @as(u32, @intFromBool(s.italic)) << 1 | @as(u32, @intFromBool(s.mono)) << 2 | @as(u32, @intFromBool(s.underline)) << 3 | @as(u32, @intFromBool(s.strike)) << 4,
+        .color = s.color,
+        .link = s.link,
+    };
+    return buf[0..n];
+}
+
+pub fn richText(id: u32, s: []const u8, spans: []const zui.Span, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
+    var buf: [256]SpanWire = undefined;
+    const w = spanWires(spans, &buf);
+    js_style.zui_rich_text(id, s.ptr, s.len, w.ptr, w.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, color, @backingInt(a), f.letter_spacing);
+}
+pub fn measureRich(s: []const u8, spans: []const zui.Span, f: zui.Font, max_width: f32) zui.Size {
+    var buf: [256]SpanWire = undefined;
+    const w = spanWires(spans, &buf);
+    var out: [2]f32 = .{ 0, 0 };
+    js_style.zui_measure_rich(s.ptr, s.len, w.ptr, w.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, max_width, &out, f.letter_spacing);
+    return .{ .w = out[0], .h = out[1] };
+}
+pub fn gestures(id: u32, g: zui.Gestures) void {
+    js_style.zui_gestures(id, @as(u8, @bitCast(g)));
+}
+pub fn imageBytes(id: u32, key: []const u8, bytes: []const u8) void {
+    js_style.zui_image_bytes(id, key.ptr, key.len, bytes.ptr, bytes.len);
+}
+pub fn imageFit(id: u32, f: zui.Fit) void {
+    js_style.zui_image_fit(id, @intFromEnum(f));
+}
+pub fn transition(id: u32, t: ?zui.Transition) void {
+    const tr = t orelse return js_style.zui_transition(id, 0, 0, 0, 1, 1);
+    const p = tr.easing.controlPoints();
+    js_style.zui_transition(id, tr.duration_ms, p[0], p[1], p[2], p[3]);
+}
+pub fn spin(id: u32, period_ms: u16) void {
+    js_style.zui_spin(id, period_ms);
+}
+pub fn scrollTo(id: u32, offset: f32, animated: bool) void {
+    js_style.zui_scroll_to(id, offset, @intFromBool(animated));
+}
+
+fn exportStyle(comptime R: type) void {
+    const Entry = struct {
+        fn spanPress(id: u32, index: u32) callconv(.c) void {
+            R.spanPress(id, index);
+        }
+        fn scroll(id: u32, offset: f32) callconv(.c) void {
+            R.scrollEvent(id, offset);
+        }
+    };
+    @export(&Entry.spanPress, .{ .name = "zui_span_press" });
+    @export(&Entry.scroll, .{ .name = "zui_scroll" });
 }
