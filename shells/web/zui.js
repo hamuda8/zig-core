@@ -178,7 +178,7 @@ export async function start(wasm, mount = document.body, options = {}) {
 
   // Secure keys (zui/keys.zig): WebCrypto keys made non-extractable, kept in IndexedDB, so the
   // page can use them and nobody can read them. Requests answer later through zui_key_done.
-  let keyDbP = null;
+  let keyDbP = null, keyChain = Promise.resolve();
   const keyStore = (mode, fn) => (keyDbP ||= new Promise((res, rej) => {
     const r = indexedDB.open('zui-keys', 1);
     r.onupgradeneeded = () => r.result.createObjectStore('keys');
@@ -534,7 +534,8 @@ export async function start(wasm, mount = document.body, options = {}) {
         const bytes = (ptr, len) => (len === 0 ? new Uint8Array(0) : new Uint8Array(memory.buffer, ptr >>> 0, len).slice());
         const args = [op, kind, str(np, nl), bytes(dp, dl), bytes(pp, pl), bytes(ip, il), bytes(ap, al), bytes(sp, sl), bytes(fp, fl), str(tp, tl)];
         const reply = ([status, data = new Uint8Array(0)]) => withBytes(data, (p, n) => ex.zui_key_done(id, status, p, n));
-        (subtle ? runKey(...args) : Promise.resolve([3])).then(reply, () => reply([FAILED]));
+        // One at a time, in order: a key imported or derived is there for the next request.
+        keyChain = keyChain.then(() => (subtle ? runKey(...args) : [3])).then(reply, () => reply([FAILED]));
       },
       zui_content(id, w, h) {
         const el = views.get(id);
