@@ -72,6 +72,8 @@ final class ZuiMedia {
     static final ArrayList<Local> waitingPermission = new ArrayList<>();
     /** Remote stream sizes as the decoders reported them: {width, height, rotation}. */
     static final HashMap<Integer, int[]> remoteSizes = new HashMap<>();
+    /** One GL renderer per remote stream: its decoder draws once, the renderer into every view. */
+    static final HashMap<Integer, ZuiStreamRenderer> renderers = new HashMap<>();
     static HandlerThread cameraThread;
     static Handler camera;
     static int audioUsers;
@@ -415,7 +417,10 @@ final class ZuiMedia {
         }
         v.mirror = mirror;
         v.cover = cover;
-        transform(v);
+        if (isRemote(stream)) {
+            ZuiStreamRenderer r = renderers.get(stream);
+            if (r != null && v.surface != null) r.attach(v.view.getSurfaceTexture(), mirror, cover);
+        } else transform(v);
     }
 
     static boolean isRemote(int stream) {
@@ -425,13 +430,22 @@ final class ZuiMedia {
     static void attach(VideoView v) {
         if (v.surface == null || v.stream == 0) return;
         if (isRemote(v.stream)) {
-            int[] size = remoteSizes.get(v.stream);
-            if (size != null) {
-                v.width = size[0];
-                v.height = size[1];
-                v.rotation = size[2];
+            ZuiStreamRenderer r = renderers.get(v.stream);
+            if (r == null) {
+                r = new ZuiStreamRenderer();
+                synchronized (renderers) {
+                    renderers.put(v.stream, r);
+                }
+                int[] size = remoteSizes.get(v.stream);
+                if (size != null) {
+                    r.width = size[0];
+                    r.height = size[1];
+                    r.rotation = size[2];
+                }
+                nativeRemoteSurface(v.stream, r.surface);
             }
-            nativeRemoteSurface(v.stream, v.surface);
+            v.view.setTransform(null);
+            r.attach(v.view.getSurfaceTexture(), v.mirror, v.cover);
         } else {
             Local l = locals.get(v.stream);
             // The camera writes in its sensor's orientation; TextureView shows it upright.
@@ -445,7 +459,8 @@ final class ZuiMedia {
     static void detach(VideoView v) {
         if (v.stream == 0) return;
         if (isRemote(v.stream)) {
-            if (v.surface != null) nativeRemoteSurface(v.stream, null);
+            ZuiStreamRenderer r = renderers.get(v.stream);
+            if (r != null && v.view.getSurfaceTexture() != null) r.detach(v.view.getSurfaceTexture());
         } else {
             Local l = locals.get(v.stream);
             int s = v.stream;
@@ -457,6 +472,16 @@ final class ZuiMedia {
 
     /** From a decoder thread: a remote stream's picture size and rotation. */
     static void remoteSize(int stream, int w, int h, int rotation) {
+        ZuiStreamRenderer renderer;
+        synchronized (renderers) {
+            renderer = renderers.get(stream);
+        }
+        if (renderer != null) {
+            renderer.width = w;
+            renderer.height = h;
+            renderer.rotation = rotation;
+            renderer.refresh();
+        }
         Zui.main.post(() -> {
             remoteSizes.put(stream, new int[] {w, h, rotation});
             for (int i = 0; i < videos.size(); i++) {
@@ -470,7 +495,19 @@ final class ZuiMedia {
         });
     }
 
-    /** Fits (or, with cover, fills) the picture into the view, turned and mirrored. */
+    /** From native: a remote stream ended; its renderer goes. */
+    static void remoteClosed(int stream) {
+        Zui.main.post(() -> {
+            remoteSizes.remove(stream);
+            ZuiStreamRenderer r;
+            synchronized (renderers) {
+                r = renderers.remove(stream);
+            }
+            if (r != null) r.release();
+        });
+    }
+
+    /** Fits (or, with cover, fills) the camera preview into the view, mirrored if asked. */
     static void transform(VideoView v) {
         float vw = v.view.getWidth(), vh = v.view.getHeight();
         if (vw <= 0 || vh <= 0 || v.width <= 0 || v.height <= 0) return;

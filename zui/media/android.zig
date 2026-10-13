@@ -105,6 +105,7 @@ var j: struct {
     wake: jni.jmethodID,
     pick_size: jni.jmethodID,
     swap_encoder: jni.jmethodID,
+    remote_closed: jni.jmethodID,
 } = undefined;
 
 /// JNI for this thread: the UI thread's, or an attachment (as a daemon, never detached).
@@ -282,6 +283,7 @@ pub fn init(h: calls.MediaHooks) void {
         .wake = f.GetStaticMethodID(e, media_class, "wake", "()V"),
         .pick_size = f.GetStaticMethodID(e, media_class, "pickSize", "(III)J"),
         .swap_encoder = f.GetStaticMethodID(e, media_class, "swapEncoder", "(ILandroid/view/Surface;I)V"),
+        .remote_closed = f.GetStaticMethodID(e, media_class, "remoteClosed", "(I)V"),
     };
 }
 
@@ -377,6 +379,7 @@ pub fn closeRemote(id: u32) void {
     const r = found orelse return;
     slot_used[r.slot].store(false, .release);
     if (r.vdec) |c| deleteCodec(c);
+    if (threadEnv()) |e| callJava(e, j.remote_closed, &.{int(id)});
     if (r.adec) |c| deleteCodec(c);
     if (r.window) |w| ANativeWindow_release(w);
     if (r.new_window) |w| ANativeWindow_release(w);
