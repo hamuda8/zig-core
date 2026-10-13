@@ -300,13 +300,13 @@ final class ZuiStyle {
                     float[] q = quads[s];
                     // The quad from the outer corners to the inner ones, pushed out past the
                     // round corners.
-                    float mx = (q[0] + q[2] + q[4] + q[6]) / 4, my = (q[1] + q[3] + q[5] + q[7]) / 4;
+                    // Outer corners pushed far out along the diagonals to their inner corners.
                     side.reset();
                     for (int k = 0; k < 4; k++) {
                         float px = q[2 * k], py = q[2 * k + 1];
                         if (k < 2) {
-                            px += (px - mx) * 2;
-                            py += (py - my) * 2;
+                            px += (px - q[2 * (3 - k)]) * 100;
+                            py += (py - q[2 * (3 - k) + 1]) * 100;
                         }
                         if (k == 0) side.moveTo(px, py); else side.lineTo(px, py);
                     }

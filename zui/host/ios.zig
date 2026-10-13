@@ -194,8 +194,9 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
         // With a call engine (App.rtc) a video view hosts the camera preview or a remote
         // picture; without one it is an empty box.
         .video => if (calls_enabled) Media.createView() else objc.new("ZuiView"),
-        .text, .text_select => blk: {
-            const l = objc.new("UILabel");
+        .text_select => styleSelectable(),
+        .text => blk: {
+            const l = objc.new("ZuiLabel");
             objc.sendVoidInt(l, "setNumberOfLines:", 0);
             break :blk l;
         },
@@ -234,6 +235,7 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
     views.items[i] = v;
     pressables.items[i] = false;
     pointers.items[i] = false;
+    styleCreated(i, kind, v);
 }
 
 pub fn destroy(i: u32) void {
@@ -267,6 +269,7 @@ pub fn insert(parent: u32, i: u32, index: u32) void {
 /// Bounds and centre rather than frame: a view with a 3D transform (the map layer) has no
 /// well-defined frame.
 pub fn frame(i: u32, r: zui.Rect) void {
+    if (styleFrame(i, r)) return;
     if (i < frames.items.len) frames.items[i] = r;
     place(i, r);
     placePlaceholder(i);
@@ -296,6 +299,8 @@ fn place(i: u32, r: zui.Rect) void {
 
 pub fn box(i: u32, b: zui.Box) void {
     const v = view(i);
+    const old_alpha = alphaOf(v);
+    defer styleBox(i, b, old_alpha);
     // A transparent color, never nil: opaque views such as UILabel fill a nil background black.
     objc.sendVoid1(v, "setBackgroundColor:", if (b.background >> 24 == 0) objc.send(objc.class("UIColor"), "clearColor") else color(b.background));
     objc.sendVoidBool(v, "setOpaque:", false);
@@ -311,6 +316,7 @@ pub fn pressable(i: u32, on: bool) void {
 }
 
 pub fn text(i: u32, s: []const u8, f: zui.Font, argb: u32, a: zui.PhysicalAlign) void {
+    if (f.letter_spacing != 0) return richText(i, s, &.{}, f, argb, a);
     const l = view(i);
     const str = attributed(s, attributes(f, argb, a));
     defer objc.release(str);
@@ -387,6 +393,7 @@ pub fn rootBackground(argb: u32) void {
 }
 
 pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
+    if (f.letter_spacing != 0) return measureRich(s, &.{}, f, max_width);
     if (s.len == 0) return .{ .w = 0, .h = f.line_height };
     const str = attributed(s, attributes(f, 0xff000000, .left));
     defer objc.release(str);
@@ -472,6 +479,7 @@ pub fn exportEntry(comptime App: type) void {
                 .{ "appVisible:", @ptrCast(&appVisible), "v@:@" },
                 .{ "appHidden:", @ptrCast(&appHidden), "v@:@" },
             });
+            styleInit(R);
             return UIApplicationMain(argc, argv, null, objc.nsString("ZuiAppDelegate"));
         }
 
@@ -2151,4 +2159,499 @@ test derToRaw {
     try std.testing.expectEqual(@as(u8, 0x81), raw[31]);
     try std.testing.expectEqual(@as(u8, 0x02), raw[63]);
     try std.testing.expectEqual(@as(u8, 0x01), raw[62]);
+}
+
+// ---- Styling and interaction: rich text with links, selectable text, letter spacing,
+// pictures from memory and how they fit, decorations (per-corner radii, per-side borders, a
+// shadow, a gradient) in a layer under the subviews, transitions, spinners, scroll control, the
+// haptic tick of a long press ----
+
+extern "UIKit" var NSKernAttributeName: id;
+extern "UIKit" var NSUnderlineStyleAttributeName: id;
+extern "UIKit" var NSStrikethroughStyleAttributeName: id;
+extern "QuartzCore" var kCAFillRuleEvenOdd: id;
+extern "CoreGraphics" fn CGPathAddArcToPoint(path: CGPath, m: ?*const anyopaque, x1: CGFloat, y1: CGFloat, x2: CGFloat, y2: CGFloat, r: CGFloat) void;
+extern "CoreGraphics" fn CGPathAddPath(path: CGPath, m: ?*const anyopaque, other: CGPath) void;
+
+const NSRange = extern struct { location: usize, length: usize };
+
+var style_rt: struct {
+    span: *const fn (u32, u32) void,
+    scroll: *const fn (u32, f32) void,
+} = undefined;
+
+fn styleInit(comptime R: type) void {
+    const Cb = struct {
+        fn span(i: u32, index: u32) void {
+            R.spanPress(i, index);
+        }
+        fn scroll(i: u32, offset: f32) void {
+            R.scrollEvent(i, offset);
+        }
+    };
+    style_rt = .{ .span = Cb.span, .scroll = Cb.scroll };
+    objc.defineClass("ZuiLabel", "UILabel", &.{}, &.{
+        .{ "touchesBegan:withEvent:", @ptrCast(&labelBegan), "v@:@@" },
+        .{ "touchesEnded:withEvent:", @ptrCast(&labelEnded), "v@:@@" },
+        .{ "touchesCancelled:withEvent:", @ptrCast(&labelCancelled), "v@:@@" },
+    });
+    objc.defineClass("ZuiScrollDelegate", "NSObject", &.{"UIScrollViewDelegate"}, &.{
+        .{ "scrollViewDidScroll:", @ptrCast(&didScroll), "v@:@" },
+    });
+}
+
+/// Per view: whether it scrolls sideways, its transition, its decoration.
+var horizontal: std.AutoHashMapUnmanaged(u32, void) = .empty;
+var transitions: std.AutoHashMapUnmanaged(u32, zui.Transition) = .empty;
+const DecorEntry = struct { background: u32, decor: zui.Decor, layer: id = null };
+var decors: std.AutoHashMapUnmanaged(u32, DecorEntry) = .empty;
+var scroll_delegate: id = null;
+
+fn styleSelectable() id {
+    const tv = objc.new("UITextView");
+    objc.sendVoidBool(tv, "setEditable:", false);
+    objc.sendVoidBool(tv, "setSelectable:", true);
+    objc.sendVoidBool(tv, "setScrollEnabled:", false);
+    objc.sendVoid1(tv, "setBackgroundColor:", objc.send(objc.class("UIColor"), "clearColor"));
+    objc.msgSend(*const fn (id, objc.SEL, objc.UIEdgeInsets) callconv(.c) void)(tv, objc.sel("setTextContainerInset:"), .{ .top = 0, .left = 0, .bottom = 0, .right = 0 });
+    objc.sendVoidFloat(objc.send(tv, "textContainer"), "setLineFragmentPadding:", 0);
+    return tv;
+}
+
+fn styleCreated(i: u32, kind: zui.tree.Kind, v: id) void {
+    _ = horizontal.remove(i);
+    _ = transitions.remove(i);
+    if (decors.fetchRemove(i)) |e| if (e.value.layer != null) objc.release(e.value.layer);
+    if (kind == .scroll or kind == .scroll_x) {
+        if (kind == .scroll_x) horizontal.put(zui.allocator, i, {}) catch {};
+        if (scroll_delegate == null) scroll_delegate = objc.new("ZuiScrollDelegate");
+        objc.sendVoid1(v, "setDelegate:", scroll_delegate);
+    }
+}
+
+// ---- Rich text ----
+
+fn nsNumberInt(v: isize) id {
+    return objc.msgSend(*const fn (id, objc.SEL, isize) callconv(.c) id)(objc.class("NSNumber"), objc.sel("numberWithInteger:"), v);
+}
+
+fn utf16Len(s: []const u8) usize {
+    return std.unicode.calcUtf16LeLen(s) catch s.len;
+}
+
+/// The text with its spans' looks and links (+1 retained).
+fn richAttributed(s: []const u8, spans: []const zui.Span, f: zui.Font, argb: u32, a: zui.PhysicalAlign) id {
+    const base = attributes(f, argb, a);
+    const attrs = objc.send(base, "mutableCopy");
+    defer objc.release(attrs);
+    const set = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void);
+    if (f.letter_spacing != 0) set(attrs, objc.sel("setObject:forKey:"), objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) id)(objc.class("NSNumber"), objc.sel("numberWithDouble:"), f.letter_spacing), NSKernAttributeName);
+    const str = objc.nsString(s);
+    defer objc.release(str);
+    const m = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) id)(objc.send(objc.class("NSMutableAttributedString"), "alloc"), objc.sel("initWithString:attributes:"), str, attrs);
+    const add = objc.msgSend(*const fn (id, objc.SEL, id, id, NSRange) callconv(.c) void);
+    for (spans) |sp| {
+        const lo = @min(s.len, sp.start);
+        const hi = @min(s.len, sp.start + sp.len);
+        const r: NSRange = .{ .location = utf16Len(s[0..lo]), .length = utf16Len(s[lo..hi]) };
+        if (r.length == 0) continue;
+        if (sp.bold or sp.italic or sp.mono) {
+            var ff = f;
+            if (sp.bold) ff.weight = @max(f.weight, 700);
+            if (sp.mono) ff.mono = true;
+            var uf = font(ff);
+            if (sp.italic) {
+                const desc = objc.send(uf, "fontDescriptor");
+                const traits: u32 = @intCast(objc.msgSend(*const fn (id, objc.SEL) callconv(.c) u32)(desc, objc.sel("symbolicTraits")));
+                const it = objc.msgSend(*const fn (id, objc.SEL, u32) callconv(.c) id)(desc, objc.sel("fontDescriptorWithSymbolicTraits:"), traits | 1);
+                if (it != null) uf = objc.msgSend(*const fn (id, objc.SEL, id, CGFloat) callconv(.c) id)(objc.class("UIFont"), objc.sel("fontWithDescriptor:size:"), it, 0);
+            }
+            add(m, objc.sel("addAttribute:value:range:"), NSFontAttributeName, uf, r);
+        }
+        if (sp.color >> 24 != 0) add(m, objc.sel("addAttribute:value:range:"), NSForegroundColorAttributeName, color(sp.color), r);
+        if (sp.underline) add(m, objc.sel("addAttribute:value:range:"), NSUnderlineStyleAttributeName, nsNumberInt(1), r);
+        if (sp.strike) add(m, objc.sel("addAttribute:value:range:"), NSStrikethroughStyleAttributeName, nsNumberInt(1), r);
+        if (sp.link >= 0) {
+            const key = objc.nsString("ZuiLink");
+            defer objc.release(key);
+            add(m, objc.sel("addAttribute:value:range:"), key, nsNumberInt(sp.link), r);
+        }
+    }
+    return m;
+}
+
+pub fn richText(i: u32, s: []const u8, spans: []const zui.Span, f: zui.Font, argb: u32, a: zui.PhysicalAlign) void {
+    const v = view(i);
+    const str = richAttributed(s, spans, f, argb, a);
+    defer objc.release(str);
+    objc.sendVoid1(v, "setAttributedText:", str);
+    const is_label = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) bool)(v, objc.sel("isKindOfClass:"), objc.class("UILabel"));
+    if (is_label) {
+        objc.sendVoidInt(v, "setNumberOfLines:", f.max_lines);
+        var links = false;
+        for (spans) |sp| links = links or sp.link >= 0;
+        // Taps reach a label only when it has links; the rest go on to the views around.
+        objc.sendVoidBool(v, "setUserInteractionEnabled:", links);
+    } else {
+        objc.sendVoidInt(objc.send(v, "textContainer"), "setMaximumNumberOfLines:", f.max_lines);
+    }
+}
+
+pub fn measureRich(s: []const u8, spans: []const zui.Span, f: zui.Font, max_width: f32) zui.Size {
+    if (s.len == 0) return .{ .w = 0, .h = f.line_height };
+    const str = richAttributed(s, spans, f, 0xff000000, .left);
+    defer objc.release(str);
+    const bound = objc.msgSend(*const fn (id, objc.SEL, objc.CGSize, isize, id) callconv(.c) objc.CGRect);
+    const width: CGFloat = if (std.math.isFinite(max_width)) max_width else 1e7;
+    const r = bound(str, objc.sel("boundingRectWithSize:options:context:"), .{ .w = width, .h = 1e7 }, uses_line_fragment_origin, null);
+    var h: f32 = @floatCast(@ceil(r.h));
+    if (f.max_lines > 0) h = @min(h, @as(f32, @floatFromInt(f.max_lines)) * f.line_height);
+    return .{ .w = @floatCast(@ceil(r.w)), .h = h };
+}
+
+/// The link under `p` in a label, or -1: the label's text laid out again with TextKit.
+fn linkAt(label: id, p: objc.CGPoint) isize {
+    const text_ = objc.send(label, "attributedText");
+    if (text_ == null) return -1;
+    const b = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) objc.CGRect)(label, objc.sel("bounds"));
+    const storage = objc.send1(objc.send(objc.class("NSTextStorage"), "alloc"), "initWithAttributedString:", text_);
+    defer objc.release(storage);
+    const lm = objc.new("NSLayoutManager");
+    defer objc.release(lm);
+    const text_box = objc.msgSend(*const fn (id, objc.SEL, objc.CGSize) callconv(.c) id)(objc.send(objc.class("NSTextContainer"), "alloc"), objc.sel("initWithSize:"), .{ .w = b.w, .h = 1e7 });
+    defer objc.release(text_box);
+    objc.sendVoidFloat(text_box, "setLineFragmentPadding:", 0);
+    objc.sendVoidInt(text_box, "setMaximumNumberOfLines:", objc.sendInt(label, "numberOfLines"));
+    objc.sendVoid1(lm, "addTextContainer:", text_box);
+    objc.sendVoid1(storage, "addLayoutManager:", lm);
+    const glyph = objc.msgSend(*const fn (id, objc.SEL, objc.CGPoint, id, ?*CGFloat) callconv(.c) usize)(lm, objc.sel("glyphIndexForPoint:inTextContainer:fractionOfDistanceThroughGlyph:"), p, text_box, null);
+    const rect = objc.msgSend(*const fn (id, objc.SEL, NSRange, id) callconv(.c) objc.CGRect)(lm, objc.sel("boundingRectForGlyphRange:inTextContainer:"), .{ .location = glyph, .length = 1 }, text_box);
+    if (p.x < rect.x or p.x > rect.x + rect.w or p.y < rect.y or p.y > rect.y + rect.h) return -1;
+    const ci = objc.msgSend(*const fn (id, objc.SEL, usize) callconv(.c) usize)(lm, objc.sel("characterIndexForGlyphAtIndex:"), glyph);
+    const key = objc.nsString("ZuiLink");
+    defer objc.release(key);
+    const v = objc.msgSend(*const fn (id, objc.SEL, id, usize, ?*NSRange) callconv(.c) id)(text_, objc.sel("attribute:atIndex:effectiveRange:"), key, ci, null);
+    return if (v != null) objc.sendInt(v, "integerValue") else -1;
+}
+
+var pending_link: struct { id: u32 = 0, index: isize = -1 } = .{};
+
+fn labelBegan(self: id, _: objc.SEL, touches: id, ev: id) callconv(.c) void {
+    const p = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) objc.CGPoint)(objc.send(touches, "anyObject"), objc.sel("locationInView:"), self);
+    const link = linkAt(self, p);
+    if (link < 0) {
+        pending_link = .{};
+        return objc.sendSuper2(self, "ZuiLabel", "touchesBegan:withEvent:", touches, ev);
+    }
+    pending_link = .{ .id = @intCast(objc.sendInt(self, "tag")), .index = link };
+}
+
+fn labelEnded(self: id, _: objc.SEL, touches: id, ev: id) callconv(.c) void {
+    const i: u32 = @intCast(objc.sendInt(self, "tag"));
+    if (pending_link.index < 0 or pending_link.id != i) return objc.sendSuper2(self, "ZuiLabel", "touchesEnded:withEvent:", touches, ev);
+    const link = pending_link.index;
+    pending_link = .{};
+    style_rt.span(i, @intCast(link));
+}
+
+fn labelCancelled(self: id, _: objc.SEL, touches: id, ev: id) callconv(.c) void {
+    if (pending_link.index >= 0) {
+        pending_link = .{};
+        return;
+    }
+    objc.sendSuper2(self, "ZuiLabel", "touchesCancelled:withEvent:", touches, ev);
+}
+
+// ---- Pictures from memory ----
+
+pub fn imageBytes(i: u32, key: []const u8, bytes: []const u8) void {
+    var kb: [600]u8 = undefined;
+    const tag = std.fmt.bufPrint(&kb, "\nmem:{s}", .{key}) catch return;
+    if (image_urls.items[i]) |old| {
+        if (std.mem.eql(u8, old, tag)) return;
+        zui.allocator.free(old);
+    }
+    image_urls.items[i] = zui.allocator.dupe(u8, tag) catch null;
+    if (image_cache == null) image_cache = objc.new("NSCache");
+    const k = objc.nsString(tag);
+    defer objc.release(k);
+    var img = objc.send1(image_cache, "objectForKey:", k);
+    if (img == null) {
+        img = objc.send1(objc.class("UIImage"), "imageWithData:", nsData(bytes));
+        if (img != null) objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(image_cache, objc.sel("setObject:forKey:"), img, k);
+    }
+    objc.sendVoid1(view(i), "setImage:", img);
+}
+
+pub fn imageFit(i: u32, fit: zui.Fit) void {
+    const v = view(i);
+    // UIViewContentModeScaleToFill, ScaleAspectFill, ScaleAspectFit.
+    objc.sendVoidInt(v, "setContentMode:", switch (fit) {
+        .fill => 0,
+        .cover => 2,
+        .contain => 1,
+    });
+    if (fit == .cover) objc.sendVoidBool(v, "setClipsToBounds:", true);
+}
+
+// ---- Long press, hover ----
+
+pub fn gestures(_: u32, _: zui.Gestures) void {}
+
+pub fn haptic() void {
+    const g = objc.msgSend(*const fn (id, objc.SEL, isize) callconv(.c) id)(objc.send(objc.class("UIImpactFeedbackGenerator"), "alloc"), objc.sel("initWithStyle:"), 1);
+    defer objc.release(g);
+    objc.sendVoid(g, "impactOccurred");
+}
+
+// ---- Scroll views ----
+
+fn didScroll(_: id, _: objc.SEL, sv: id) callconv(.c) void {
+    const i: u32 = @intCast(objc.sendInt(sv, "tag"));
+    const o = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) objc.CGPoint)(sv, objc.sel("contentOffset"));
+    style_rt.scroll(i, @floatCast(if (horizontal.contains(i)) o.x else o.y));
+}
+
+pub fn scrollTo(i: u32, offset: f32, animated: bool) void {
+    const p: objc.CGPoint = if (horizontal.contains(i)) .{ .x = offset, .y = 0 } else .{ .x = 0, .y = offset };
+    objc.msgSend(*const fn (id, objc.SEL, objc.CGPoint, bool) callconv(.c) void)(view(i), objc.sel("setContentOffset:animated:"), p, animated);
+}
+
+// ---- Transitions and spinners ----
+
+pub fn transition(i: u32, t: ?zui.Transition) void {
+    if (t) |tr| transitions.put(zui.allocator, i, tr) catch {} else _ = transitions.remove(i);
+}
+
+const AnimBlock = extern struct { header: objc.BlockHeader };
+const anim_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(AnimBlock) };
+var anim_work: ?*const fn () void = null;
+fn animInvoke(_: *const AnimBlock) callconv(.c) void {
+    if (anim_work) |w| w();
+}
+const anim_block: AnimBlock = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&animInvoke), .descriptor = &anim_descriptor } };
+
+/// Runs `work` inside a UIView animation with the transition's duration and curve (the four
+/// curves UIKit, CSS and Android share).
+fn animate(tr: zui.Transition, work: *const fn () void) void {
+    const curve: usize = switch (tr.easing) {
+        .ease_in_out => 0,
+        .ease_in => 1,
+        .ease_out => 2,
+        .linear => 3,
+    };
+    anim_work = work;
+    defer anim_work = null;
+    const f = objc.msgSend(*const fn (id, objc.SEL, f64, f64, usize, *const AnimBlock, ?*anyopaque) callconv(.c) void);
+    f(objc.class("UIView"), objc.sel("animateWithDuration:delay:options:animations:completion:"), @as(f64, @floatFromInt(tr.duration_ms)) / 1000, 0, (curve << 16) | 2, &anim_block, null);
+}
+
+var anim_view: u32 = 0;
+var anim_rect: zui.Rect = .{};
+var anim_alpha: CGFloat = 1;
+
+fn placeWork() void {
+    place(anim_view, anim_rect);
+}
+
+fn alphaWork() void {
+    objc.sendVoidFloat(view(anim_view), "setAlpha:", anim_alpha);
+}
+
+fn styleFrame(i: u32, r: zui.Rect) bool {
+    defer if (decors.contains(i)) applyDecor(i, r);
+    const tr = transitions.get(i) orelse return false;
+    if (i >= frames.items.len or frames.items[i].w <= 0 and frames.items[i].h <= 0) return false;
+    frames.items[i] = r;
+    anim_view = i;
+    anim_rect = r;
+    animate(tr, placeWork);
+    return true;
+}
+
+fn alphaOf(v: id) CGFloat {
+    return objc.msgSend(*const fn (id, objc.SEL) callconv(.c) CGFloat)(v, objc.sel("alpha"));
+}
+
+fn styleBox(i: u32, b: zui.Box, old_alpha: CGFloat) void {
+    if (b.isSimple()) {
+        if (decors.fetchRemove(i)) |e| if (e.value.layer != null) {
+            objc.sendVoid(e.value.layer, "removeFromSuperlayer");
+            objc.release(e.value.layer);
+        };
+    } else {
+        const gop = decors.getOrPut(zui.allocator, i) catch return;
+        if (!gop.found_existing) gop.value_ptr.* = .{ .background = 0, .decor = .{} };
+        gop.value_ptr.background = b.background;
+        gop.value_ptr.decor = b.decor;
+        // Drawn by the decoration layer instead.
+        const v = view(i);
+        objc.sendVoid1(v, "setBackgroundColor:", objc.send(objc.class("UIColor"), "clearColor"));
+        const layer = objc.send(v, "layer");
+        objc.sendVoidFloat(layer, "setBorderWidth:", 0);
+        objc.sendVoidFloat(layer, "setCornerRadius:", if (b.decor.uniformCorners()) b.decor.radii[0] else 0);
+        if (i < frames.items.len) applyDecor(i, frames.items[i]);
+    }
+    if (transitions.get(i)) |tr| if (old_alpha != b.opacity) {
+        objc.sendVoidFloat(view(i), "setAlpha:", old_alpha);
+        anim_view = i;
+        anim_alpha = b.opacity;
+        animate(tr, alphaWork);
+    };
+}
+
+pub fn spin(i: u32, period_ms: u16) void {
+    const layer = objc.send(view(i), "layer");
+    const key = objc.nsString("zuiSpin");
+    defer objc.release(key);
+    objc.sendVoid1(layer, "removeAnimationForKey:", key);
+    if (period_ms == 0) return;
+    const path_ = objc.nsString("transform.rotation.z");
+    defer objc.release(path_);
+    const a = objc.send1(objc.class("CABasicAnimation"), "animationWithKeyPath:", path_);
+    const num = objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) id);
+    objc.sendVoid1(a, "setFromValue:", num(objc.class("NSNumber"), objc.sel("numberWithDouble:"), 0));
+    objc.sendVoid1(a, "setToValue:", num(objc.class("NSNumber"), objc.sel("numberWithDouble:"), 2 * std.math.pi));
+    objc.sendVoidFloat(a, "setDuration:", @as(f64, @floatFromInt(period_ms)) / 1000);
+    objc.msgSend(*const fn (id, objc.SEL, f32) callconv(.c) void)(a, objc.sel("setRepeatCount:"), std.math.inf(f32));
+    objc.sendVoidBool(a, "setRemovedOnCompletion:", false);
+    objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(layer, objc.sel("addAnimation:forKey:"), a, key);
+}
+
+// ---- Decorations: a layer under the subviews, drawn as CSS draws a box ----
+
+/// A rectangle with corners top-left, top-right, bottom-right, bottom-left, the radii scaled
+/// down as CSS does when they do not fit (+1 retained).
+fn roundedPath(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat, radii: [4]CGFloat) CGPath {
+    var k: CGFloat = 1;
+    const sums = [4]CGFloat{ radii[0] + radii[1], radii[3] + radii[2], radii[0] + radii[3], radii[1] + radii[2] };
+    const lens = [4]CGFloat{ w, w, h, h };
+    for (sums, lens) |s, l| if (s > 0 and l < s) {
+        k = @min(k, l / s);
+    };
+    var r: [4]CGFloat = undefined;
+    for (radii, &r) |a, *o| o.* = @max(0, a * k);
+    const p = CGPathCreateMutable();
+    CGPathMoveToPoint(p, null, x + r[0], y);
+    CGPathAddArcToPoint(p, null, x + w, y, x + w, y + h, r[1]);
+    CGPathAddArcToPoint(p, null, x + w, y + h, x, y + h, r[2]);
+    CGPathAddArcToPoint(p, null, x, y + h, x, y, r[3]);
+    CGPathAddArcToPoint(p, null, x, y, x + w, y, r[0]);
+    CGPathCloseSubpath(p);
+    return p;
+}
+
+fn shapeLayer(path_: CGPath, fill: u32) id {
+    const l = objc.new("CAShapeLayer");
+    const set_ptr = objc.msgSend(*const fn (id, objc.SEL, ?*anyopaque) callconv(.c) void);
+    set_ptr(l, objc.sel("setPath:"), path_);
+    set_ptr(l, objc.sel("setFillColor:"), @ptrCast(objc.send(color(fill), "CGColor")));
+    return l;
+}
+
+fn applyDecor(i: u32, r: zui.Rect) void {
+    const e = decors.getPtr(i) orelse return;
+    const d = e.decor;
+    const v = view(i);
+    const set_rect = objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void);
+    const set_ptr = objc.msgSend(*const fn (id, objc.SEL, ?*anyopaque) callconv(.c) void);
+    if (e.layer == null) {
+        e.layer = objc.new("CALayer");
+        objc.msgSend(*const fn (id, objc.SEL, id, u32) callconv(.c) void)(objc.send(v, "layer"), objc.sel("insertSublayer:atIndex:"), e.layer, 0);
+    }
+    const root_layer = e.layer;
+    objc.sendVoid1(root_layer, "setSublayers:", null);
+    const w: CGFloat = r.w;
+    const h: CGFloat = r.h;
+    set_rect(root_layer, objc.sel("setFrame:"), .{ .w = w, .h = h });
+    const radii = [4]CGFloat{ d.radii[0], d.radii[1], d.radii[2], d.radii[3] };
+    const outer = roundedPath(0, 0, w, h, radii);
+    defer CGPathRelease(outer);
+
+    // Shadow and background.
+    const bg = shapeLayer(outer, e.background);
+    defer objc.release(bg);
+    if (d.shadow_color >> 24 != 0) {
+        set_ptr(bg, objc.sel("setShadowPath:"), outer);
+        set_ptr(bg, objc.sel("setShadowColor:"), @ptrCast(objc.send(color(d.shadow_color | 0xff000000), "CGColor")));
+        objc.msgSend(*const fn (id, objc.SEL, f32) callconv(.c) void)(bg, objc.sel("setShadowOpacity:"), @as(f32, @floatFromInt(d.shadow_color >> 24)) / 255);
+        objc.msgSend(*const fn (id, objc.SEL, objc.CGSize) callconv(.c) void)(bg, objc.sel("setShadowOffset:"), .{ .w = d.shadow[0], .h = d.shadow[1] });
+        // CSS blur B is a Gaussian of sigma B/2, which is what shadowRadius is.
+        objc.sendVoidFloat(bg, "setShadowRadius:", d.shadow[2] / 2);
+    }
+    objc.sendVoid1(root_layer, "addSublayer:", bg);
+
+    // Gradient, cut to the shape.
+    if (d.gradient_count > 0) {
+        const g = objc.new("CAGradientLayer");
+        defer objc.release(g);
+        set_rect(g, objc.sel("setFrame:"), .{ .w = w, .h = h });
+        var cols: [zui.Gradient.max_stops]id = undefined;
+        var locs: [zui.Gradient.max_stops]id = undefined;
+        const n: usize = d.gradient_count;
+        const num = objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) id);
+        for (0..n) |k| {
+            cols[k] = objc.send(color(d.gradient_colors[k]), "CGColor");
+            locs[k] = num(objc.class("NSNumber"), objc.sel("numberWithDouble:"), d.gradient_at[k]);
+        }
+        const array = objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id);
+        objc.sendVoid1(g, "setColors:", array(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &cols, n));
+        objc.sendVoid1(g, "setLocations:", array(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &locs, n));
+        // The CSS gradient line, in unit coordinates of the box.
+        const ang = std.math.degreesToRadians(@as(f64, d.gradient_angle));
+        const dx = @sin(ang);
+        const dy = -@cos(ang);
+        const len = @abs(w * dx) + @abs(h * dy);
+        const set_point = objc.msgSend(*const fn (id, objc.SEL, objc.CGPoint) callconv(.c) void);
+        if (w > 0 and h > 0) {
+            set_point(g, objc.sel("setStartPoint:"), .{ .x = 0.5 - dx * len / 2 / w, .y = 0.5 - dy * len / 2 / h });
+            set_point(g, objc.sel("setEndPoint:"), .{ .x = 0.5 + dx * len / 2 / w, .y = 0.5 + dy * len / 2 / h });
+        }
+        const mask = shapeLayer(outer, 0xff000000);
+        defer objc.release(mask);
+        objc.sendVoid1(g, "setMask:", mask);
+        objc.sendVoid1(root_layer, "addSublayer:", g);
+    }
+
+    // Borders: each side is the ring between the box and its inside, cut along the diagonals
+    // between its outer and inner corners.
+    const bw = d.border_widths;
+    const t: CGFloat = bw[0];
+    const rw: CGFloat = bw[1];
+    const bt: CGFloat = bw[2];
+    const l: CGFloat = bw[3];
+    if (t > 0 or rw > 0 or bt > 0 or l > 0) {
+        const inner_r = [4]CGFloat{ @max(0, radii[0] - @max(l, t)), @max(0, radii[1] - @max(rw, t)), @max(0, radii[2] - @max(rw, bt)), @max(0, radii[3] - @max(l, bt)) };
+        const ring = CGPathCreateMutable();
+        defer CGPathRelease(ring);
+        CGPathAddPath(ring, null, outer);
+        if (w - l - rw > 0 and h - t - bt > 0) {
+            const inner = roundedPath(l, t, w - l - rw, h - t - bt, inner_r);
+            defer CGPathRelease(inner);
+            CGPathAddPath(ring, null, inner);
+        }
+        const outer_c = [4][2]CGFloat{ .{ 0, 0 }, .{ w, 0 }, .{ w, h }, .{ 0, h } };
+        const inner_c = [4][2]CGFloat{ .{ l, t }, .{ w - rw, t }, .{ w - rw, h - bt }, .{ l, h - bt } };
+        for (0..4) |s| {
+            if (bw[s] <= 0 or d.border_colors[s] >> 24 == 0) continue;
+            const side = shapeLayer(ring, d.border_colors[s]);
+            defer objc.release(side);
+            objc.sendVoid1(side, "setFillRule:", kCAFillRuleEvenOdd);
+            const q = CGPathCreateMutable();
+            defer CGPathRelease(q);
+            // Side s runs from corner s to corner s+1: its outer corners pushed far out along
+            // the diagonals, then its inner corners.
+            const a = s;
+            const b2 = (s + 1) % 4;
+            CGPathMoveToPoint(q, null, outer_c[a][0] + (outer_c[a][0] - inner_c[a][0]) * 100, outer_c[a][1] + (outer_c[a][1] - inner_c[a][1]) * 100);
+            CGPathAddLineToPoint(q, null, outer_c[b2][0] + (outer_c[b2][0] - inner_c[b2][0]) * 100, outer_c[b2][1] + (outer_c[b2][1] - inner_c[b2][1]) * 100);
+            CGPathAddLineToPoint(q, null, inner_c[b2][0], inner_c[b2][1]);
+            CGPathAddLineToPoint(q, null, inner_c[a][0], inner_c[a][1]);
+            CGPathCloseSubpath(q);
+            const mask = shapeLayer(q, 0xff000000);
+            defer objc.release(mask);
+            objc.sendVoid1(side, "setMask:", mask);
+            objc.sendVoid1(root_layer, "addSublayer:", side);
+        }
+    }
 }
