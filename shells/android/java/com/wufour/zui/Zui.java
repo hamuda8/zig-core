@@ -481,7 +481,14 @@ public final class Zui {
                 activity.runOnUiThread(() -> waiting.remove(url));
                 return;
             }
-            try {
+            // A picture in the address itself (a photo just taken, as a data: URL).
+            if (address.startsWith("data:")) {
+                try {
+                    byte[] bytes = android.util.Base64.decode(address.substring(address.indexOf(',') + 1), android.util.Base64.DEFAULT);
+                    b = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                } catch (Exception ignored) {
+                }
+            } else try {
                 HttpURLConnection c = (HttpURLConnection) new URL(address).openConnection();
                 c.setConnectTimeout(10000);
                 c.setReadTimeout(15000);
