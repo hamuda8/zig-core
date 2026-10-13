@@ -13,6 +13,8 @@ pub const Icon = struct {
     box: f32 = 24,
     /// Top-left corner of the box (Material Symbols use "0 -960 960 960").
     origin: [2]f32 = .{ 0, 0 },
+    /// Points a way (back, forward, a chevron): drawn mirrored in right-to-left languages.
+    rtl_mirror: bool = false,
 };
 
 /// Marks the start of a new sub-path in a point list.

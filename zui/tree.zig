@@ -8,8 +8,46 @@ pub const none: u32 = std.math.maxInt(u32);
 
 /// `scroll` scrolls vertically, `scroll_x` horizontally (Android needs a different view for each).
 /// `image` shows a picture from a URL; `path` draws a line (routes on a map); `video` shows a
-/// call's camera stream; `text_area` is an input of several lines that grows with its text.
-pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4, image = 5, path = 6, video = 7, text_area = 8 };
+/// call's camera stream; `text_area` is an input of several lines that grows with its text;
+/// `text_select` is text the user can select and copy (iOS needs a different view for it).
+pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4, image = 5, path = 6, video = 7, text_area = 8, text_select = 9 };
+
+/// A run of a text node's text drawn differently (rich text). Ranges are in bytes of the
+/// node's text, in order, not overlapping.
+pub const Span = struct {
+    start: u32,
+    len: u32,
+    bold: bool = false,
+    italic: bool = false,
+    mono: bool = false,
+    underline: bool = false,
+    strike: bool = false,
+    /// 0: the text's colour.
+    color: u32 = 0,
+    /// Pressing it sends a message: its number among the node's links, else -1.
+    link: i32 = -1,
+};
+
+/// What a pressable view listens for besides the press.
+pub const Gestures = packed struct(u8) {
+    long_press: bool = false,
+    /// Secondary click (the web's context menu).
+    context: bool = false,
+    /// The mouse coming and going (desktop web).
+    hover: bool = false,
+    _: u5 = 0,
+};
+
+/// How a scroll view behaves besides scrolling.
+pub const ScrollMode = packed struct(u8) {
+    /// Starts at the end, and stays at the end while content is added there (a chat).
+    anchor_end: bool = false,
+    /// Content added above what is on screen does not move it.
+    keep_position: bool = false,
+    /// The app hears where it is (`on_scroll`).
+    report: bool = false,
+    _: u5 = 0,
+};
 
 /// The keyboard an input asks for.
 pub const Keyboard = enum(u8) { text = 0, email = 1, number = 2, phone = 3, url = 4, decimal = 5 };
@@ -68,6 +106,13 @@ pub const Node = struct {
     input_type: InputType = .{},
     /// Images: request headers, one "name: value\n" line each (a Bearer token).
     headers: []const u8 = "",
+    /// Images from memory: the picture's bytes (`text` is then its cache key). Not copied: only
+    /// read while this tree is drawn.
+    bytes: ?[]const u8 = null,
+    /// Text: runs drawn differently (rich text).
+    spans: []const Span = &.{},
+    gestures: Gestures = .{},
+    scroll_mode: ScrollMode = .{},
 
     parent: u32 = none,
     first_child: u32 = none,
@@ -120,6 +165,7 @@ pub const Tree = struct {
         n.text = try a.dupe(u8, node.text);
         n.placeholder = try a.dupe(u8, node.placeholder);
         n.headers = try a.dupe(u8, node.headers);
+        n.spans = try a.dupe(Span, node.spans);
         if (node.path) |p| {
             // Every field as given; only the points are copied into the tree's memory.
             var copy = p;

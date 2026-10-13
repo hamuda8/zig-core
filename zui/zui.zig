@@ -74,6 +74,22 @@ pub const ServerEvent = runtime.ServerEvent;
 pub const sse = @import("sse.zig");
 pub const Transform = style.Transform;
 pub const ImageFilter = style.ImageFilter;
+pub const Shadow = style.Shadow;
+pub const Gradient = style.Gradient;
+pub const Stop = style.Stop;
+pub const Borders = style.Borders;
+pub const Side = style.Side;
+pub const Corners = style.Corners;
+pub const Grid = style.Grid;
+pub const Fit = style.Fit;
+pub const Easing = style.Easing;
+pub const Transition = style.Transition;
+pub const Decor = style.Decor;
+pub const Span = tree.Span;
+pub const Gestures = tree.Gestures;
+pub const ScrollEvent = runtime.ScrollEvent;
+pub const ScrollTarget = runtime.ScrollTarget;
+pub const text = @import("text.zig");
 pub const Path = tree.Path;
 pub const Ui = runtime.Ui;
 pub const key = runtime.key;
@@ -113,6 +129,8 @@ pub fn exportApp(comptime App: type) void {
 
 test {
     _ = color;
+    _ = text;
+    if (platform == .headless) _ = @import("ui_test.zig");
     _ = i18n;
     _ = layout;
     _ = tree;

@@ -21,6 +21,7 @@ const reconcile = @import("reconcile.zig");
 const i18n = @import("i18n.zig");
 const Color = @import("color.zig").Color;
 const icon_mod = @import("icon.zig");
+const text_mod = @import("text.zig");
 const calls = @import("calls.zig");
 const sse = @import("sse.zig");
 
@@ -354,6 +355,7 @@ pub fn Fx(comptime Msg: type) type {
             speak: *const fn ([]const u8) void,
             set_link: *const fn ([]const u8) void,
             focus: *const fn (u64) void,
+            scroll_to: *const fn (u64, ScrollTarget, bool) void,
             post: *const fn ([]const u8) void,
             open_socket: *const fn ([]const u8, *const fn (SocketEvent) Msg) u32,
             send_socket: *const fn (u32, []const u8) void,
@@ -487,6 +489,12 @@ pub fn Fx(comptime Msg: type) type {
         /// Keeps the screen on while `on` (a courier's navigation, a scanner).
         pub fn keepAwake(fx: Self, on: bool) void {
             fx.vt.keep_awake(on);
+        }
+
+        /// Scrolls the scroll view with key `scroll_key` (`beginScrollWith`) to `target`, after the
+        /// next draw, smoothly when `animated`.
+        pub fn scrollTo(fx: Self, scroll_key: u64, target: ScrollTarget, animated: bool) void {
+            fx.vt.scroll_to(scroll_key, target, animated);
         }
 
         /// Puts the cursor in the input with this key (after the next draw).
@@ -643,7 +651,32 @@ pub fn Fx(comptime Msg: type) type {
     };
 }
 
-pub const Event = enum(u8) { press_in = 1, press_out = 2, press = 3 };
+/// What a host reports about a pressable view. `context` is a secondary click (the web's
+/// context menu); `hover_in` / `hover_out` the mouse coming and going (desktop web).
+pub const Event = enum(u8) { press_in = 1, press_out = 2, press = 3, context = 4, hover_in = 5, hover_out = 6 };
+
+/// Where a scroll view is (`ScrollOptions.on_scroll`), along the way it scrolls, in points.
+pub const ScrollEvent = struct {
+    offset: f32,
+    /// Length of what scrolls, and of the view showing it.
+    content: f32,
+    viewport: f32,
+    at_start: bool,
+    at_end: bool,
+    /// It got to the start / the end with this move (load older messages, the next page).
+    reached_start: bool = false,
+    reached_end: bool = false,
+};
+
+/// Where `fx.scrollTo` goes.
+pub const ScrollTarget = union(enum) {
+    start,
+    end,
+    /// Points from the start.
+    offset: f32,
+    /// The child (at any depth) with this key, at the start of the view.
+    child: u64,
+};
 
 /// A finger, pen or mouse on a view that listens for pointers (`on_pointer`). Coordinates are in
 /// the view's own points.
@@ -656,6 +689,8 @@ pub const Pointer = struct {
     /// Mouse wheel: positive scrolls down (zooms out on a map).
     wheel: f32 = 0,
     time_ms: i64 = 0,
+    /// The key of the view that heard it (`BoxOptions.key`): which of two maps on a page.
+    key: u64 = 0,
 
     pub const Kind = enum(u8) { down = 1, move = 2, up = 3, cancel = 4, wheel = 5 };
 };
@@ -674,7 +709,13 @@ pub fn Ui(comptime Msg: type) type {
         tree: *Tree,
         env: Env,
         presses: std.ArrayList(Binding(Msg)) = .empty,
-        pointers: std.ArrayList(Binding(*const fn (Pointer) Msg)) = .empty,
+        pointers: std.ArrayList(Binding(PointerHandler(Msg))) = .empty,
+        /// Long presses, secondary clicks, hovers, links in text, scroll views.
+        holds: std.ArrayList(Binding(Msg)) = .empty,
+        contexts: std.ArrayList(Binding(Msg)) = .empty,
+        hovers: std.ArrayList(Binding(*const fn (bool) Msg)) = .empty,
+        links: std.ArrayList(Binding(LinkHandler(Msg))) = .empty,
+        scrolls: std.ArrayList(Binding(*const fn (ScrollEvent) Msg)) = .empty,
         /// Sent once at the next display frame (animation), if set.
         frame_msg: ?Msg = null,
         changes: std.ArrayList(Binding(*const fn ([]const u8) Msg)) = .empty,
@@ -690,8 +731,49 @@ pub fn Ui(comptime Msg: type) type {
         pub const BoxOptions = struct {
             key: u64 = 0,
             on_press: ?Msg = null,
-            /// Raw pointer events (gestures): pan, pinch, rotate, wheel.
+            /// Held for half a second (the phones give a haptic tick). Takes the place of the
+            /// press that would follow.
+            on_long_press: ?Msg = null,
+            /// A secondary click (right click, the web's context menu). On touch screens a long
+            /// press sends it when there is no `on_long_press`.
+            on_context: ?Msg = null,
+            /// The mouse comes (true) and goes (false), on desktop web. `hover_background` and
+            /// `hover_opacity` need no message.
+            on_hover: ?*const fn (bool) Msg = null,
+            /// Raw pointer events (gestures): pan, pinch, rotate, wheel. They carry `key`.
             on_pointer: ?*const fn (Pointer) Msg = null,
+        };
+
+        /// A run of text in `richText`.
+        pub const Span = struct {
+            text: []const u8,
+            bold: bool = false,
+            italic: bool = false,
+            mono: bool = false,
+            underline: bool = false,
+            strike: bool = false,
+            /// null: the text's colour.
+            color: ?Color = null,
+            /// Pressing this run sends it (a link). Taps beside links reach the views around.
+            link: ?Msg = null,
+        };
+
+        pub const TextOptions = struct {
+            key: u64 = 0,
+            /// The user can select the text and copy it.
+            selectable: bool = false,
+        };
+
+        pub const ScrollOptions = struct {
+            key: u64 = 0,
+            /// Starts at the end, and stays there while content is added at the end, as long as
+            /// the user is at the end (a chat).
+            anchor_end: bool = false,
+            /// Content added before what is on screen (older messages) does not move it. Needs
+            /// keyed children.
+            keep_position: bool = false,
+            /// Where it is, as it scrolls (once a display frame), and when it reaches an end.
+            on_scroll: ?*const fn (ScrollEvent) Msg = null,
         };
 
         pub const PathStyle = struct {
@@ -733,9 +815,21 @@ pub fn Ui(comptime Msg: type) type {
 
         /// Opens a box; everything until `end` goes inside it.
         pub fn begin(ui: *Self, style: st.Style, o: BoxOptions) void {
-            const i = ui.tree.open(.{ .kind = .view, .style = style, .key = o.key, .pressable = o.on_press != null, .pointer = o.on_pointer != null }) catch return ui.fail();
-            if (o.on_press) |m| ui.presses.append(ui.arena(), .{ .node = i, .value = m }) catch ui.fail();
-            if (o.on_pointer) |f| ui.pointers.append(ui.arena(), .{ .node = i, .value = f }) catch ui.fail();
+            const hover = o.on_hover != null or style.hover_background != null or style.hover_opacity != null;
+            const i = ui.tree.open(.{
+                .kind = .view,
+                .style = style,
+                .key = o.key,
+                .pressable = o.on_press != null or o.on_long_press != null or o.on_context != null,
+                .pointer = o.on_pointer != null,
+                .gestures = .{ .long_press = o.on_long_press != null, .context = o.on_context != null, .hover = hover },
+            }) catch return ui.fail();
+            const a = ui.arena();
+            if (o.on_press) |m| ui.presses.append(a, .{ .node = i, .value = m }) catch ui.fail();
+            if (o.on_long_press) |m| ui.holds.append(a, .{ .node = i, .value = m }) catch ui.fail();
+            if (o.on_context) |m| ui.contexts.append(a, .{ .node = i, .value = m }) catch ui.fail();
+            if (o.on_hover) |f| ui.hovers.append(a, .{ .node = i, .value = f }) catch ui.fail();
+            if (o.on_pointer) |f| ui.pointers.append(a, .{ .node = i, .value = .{ .f = f, .key = o.key } }) catch ui.fail();
         }
 
         /// Opens a box whose content scrolls along `style.direction`.
@@ -744,17 +838,65 @@ pub fn Ui(comptime Msg: type) type {
             _ = ui.tree.open(.{ .kind = kind, .style = style, .key = k }) catch return ui.fail();
         }
 
+        /// `beginScroll` that starts at the end, keeps its place, or reports where it is. Move
+        /// it with `fx.scrollTo(o.key, ...)`.
+        pub fn beginScrollWith(ui: *Self, style: st.Style, o: ScrollOptions) void {
+            const kind: tree_mod.Kind = if (style.direction == .row) .scroll_x else .scroll;
+            const i = ui.tree.open(.{ .kind = kind, .style = style, .key = o.key, .scroll_mode = .{
+                .anchor_end = o.anchor_end,
+                .keep_position = o.keep_position,
+                .report = o.on_scroll != null,
+            } }) catch return ui.fail();
+            if (o.on_scroll) |f| ui.scrolls.append(ui.arena(), .{ .node = i, .value = f }) catch ui.fail();
+        }
+
         pub fn end(ui: *Self) void {
             ui.tree.close();
         }
 
         /// Shows `s` as it is. Use `t` for text that should be translated.
         pub fn text(ui: *Self, s: []const u8, style: st.Style) void {
-            _ = ui.tree.add(.{ .kind = .text, .style = style, .text = s }) catch ui.fail();
+            ui.textWith(s, style, .{});
         }
 
         pub fn textKeyed(ui: *Self, s: []const u8, style: st.Style, k: u64) void {
-            _ = ui.tree.add(.{ .kind = .text, .style = style, .text = s, .key = k }) catch ui.fail();
+            ui.textWith(s, style, .{ .key = k });
+        }
+
+        /// `text` with a key, or selectable.
+        pub fn textWith(ui: *Self, s: []const u8, style: st.Style, o: TextOptions) void {
+            const shown = if (style.uppercase) text_mod.upper(ui.arena(), s) catch return ui.fail() else s;
+            _ = ui.tree.add(.{ .kind = if (o.selectable) .text_select else .text, .style = style, .text = shown, .key = o.key }) catch ui.fail();
+        }
+
+        /// One text of runs drawn differently: bold, italic, monospaced, coloured, underlined,
+        /// struck through, and links that send their own message. It wraps and is measured as
+        /// one text.
+        pub fn richText(ui: *Self, spans: []const Span, style: st.Style, o: TextOptions) void {
+            const a = ui.arena();
+            var all: std.ArrayList(u8) = .empty;
+            const runs = a.alloc(tree_mod.Span, spans.len) catch return ui.fail();
+            var links: i32 = 0;
+            for (spans, runs) |sp, *run| {
+                const shown = if (style.uppercase) text_mod.upper(a, sp.text) catch return ui.fail() else sp.text;
+                run.* = .{
+                    .start = @intCast(all.items.len),
+                    .len = @intCast(shown.len),
+                    .bold = sp.bold,
+                    .italic = sp.italic,
+                    .mono = sp.mono,
+                    .underline = sp.underline,
+                    .strike = sp.strike,
+                    .color = if (sp.color) |c| c.argb() else 0,
+                    .link = if (sp.link != null) links else -1,
+                };
+                if (sp.link != null) links += 1;
+                all.appendSlice(a, shown) catch return ui.fail();
+            }
+            const i = ui.tree.add(.{ .kind = if (o.selectable) .text_select else .text, .style = style, .text = all.items, .key = o.key, .spans = runs }) catch return ui.fail();
+            for (spans, runs) |sp, run| if (sp.link) |m| {
+                ui.links.append(a, .{ .node = i, .value = .{ .index = @intCast(run.link), .msg = m } }) catch ui.fail();
+            };
         }
 
         pub fn input(ui: *Self, o: InputOptions) void {
@@ -795,6 +937,32 @@ pub fn Ui(comptime Msg: type) type {
             _ = ui.tree.add(.{ .kind = .image, .style = style, .text = url, .key = k, .headers = block.items }) catch ui.fail();
         }
 
+        /// A picture from memory (PNG, JPEG, GIF or WebP bytes: a decrypted photo), known by
+        /// `cache_key`: the bytes reach the platform only when the key changes, and a picture
+        /// already decoded under that key is shown at once. The bytes are only read while this
+        /// frame is drawn.
+        pub fn imageBytes(ui: *Self, bytes: []const u8, cache_key: []const u8, style: st.Style, k: u64) void {
+            _ = ui.tree.add(.{ .kind = .image, .style = style, .text = cache_key, .key = k, .bytes = bytes }) catch ui.fail();
+        }
+
+        /// A spinner `size` points square: three quarters of a ring turning once in 0.8 s, by the
+        /// platform's own animation (nothing is redrawn from Zig).
+        pub fn spinner(ui: *Self, size: f32, color: Color, style: st.Style, k: u64) void {
+            const w = @max(1.5, size / 10);
+            const r = size / 2 - w / 2;
+            const n = 40;
+            const pts = ui.arena().alloc([2]f32, n + 1) catch return ui.fail();
+            for (pts, 0..) |*p, j| {
+                const ang = -std.math.pi / 2.0 + @as(f32, @floatFromInt(j)) / n * 1.5 * std.math.pi;
+                p.* = .{ size / 2 + r * @cos(ang), size / 2 + r * @sin(ang) };
+            }
+            var s = style;
+            s.width = .{ .px = size };
+            s.height = .{ .px = size };
+            s.spin_ms = 800;
+            ui.path(pts, .{ .color = color, .width = w }, s, k);
+        }
+
         /// A line through `points` (in this node's coordinates), sized by `style`. A point with a
         /// NaN x starts a new sub-path.
         pub fn path(ui: *Self, points: []const [2]f32, p: PathStyle, style: st.Style, k: u64) void {
@@ -809,8 +977,10 @@ pub fn Ui(comptime Msg: type) type {
         }
 
         /// An icon `size` points square in `color`; `style` places it (its size is set here).
+        /// Icons marked `rtl_mirror` (arrows, chevrons) are drawn mirrored in right-to-left
+        /// languages.
         pub fn icon(ui: *Self, ic: icon_mod.Icon, size: f32, color: Color, style: st.Style, k: u64) void {
-            const pts = icon_mod.points(ui.arena(), ic, size) catch return ui.fail();
+            const pts = ui.iconPoints(ic, size) orelse return;
             var s = style;
             s.width = .{ .px = size };
             s.height = .{ .px = size };
@@ -819,11 +989,27 @@ pub fn Ui(comptime Msg: type) type {
 
         /// A filled icon with an outline in `outline` (a pin, a vehicle arrow).
         pub fn iconOutlined(ui: *Self, ic: icon_mod.Icon, size: f32, fill: Color, outline: Color, outline_width: f32, style: st.Style, k: u64) void {
-            const pts = icon_mod.points(ui.arena(), ic, size) catch return ui.fail();
+            const pts = ui.iconPoints(ic, size) orelse return;
             var s = style;
             s.width = .{ .px = size };
             s.height = .{ .px = size };
             ui.path(pts, .{ .color = outline, .width = outline_width, .fill = fill }, s, k);
+        }
+
+        fn iconPoints(ui: *Self, ic: icon_mod.Icon, size: f32) ?[]const [2]f32 {
+            const pts = icon_mod.points(ui.arena(), ic, size) catch {
+                ui.fail();
+                return null;
+            };
+            if (!(ic.rtl_mirror and ui.env.rtl)) return pts;
+            const flipped = ui.arena().dupe([2]f32, pts) catch {
+                ui.fail();
+                return null;
+            };
+            for (flipped) |*p| if (!std.math.isNan(p[0])) {
+                p[0] = size - p[0];
+            };
+            return flipped;
         }
 
         /// Asks for `msg` at the next display frame (animations); ask again each frame to continue.
@@ -876,6 +1062,14 @@ fn InputHandlers(comptime Msg: type) type {
     return struct { focus: ?Msg, blur: ?Msg, submit: ?Msg };
 }
 
+fn PointerHandler(comptime Msg: type) type {
+    return struct { f: *const fn (Pointer) Msg, key: u64 };
+}
+
+fn LinkHandler(comptime Msg: type) type {
+    return struct { index: u32, msg: Msg };
+}
+
 /// The loop for `App` drawn by host `H`. One per process; hosts call these from the UI thread.
 pub fn Runtime(comptime App: type, comptime H: type) type {
     return struct {
@@ -894,7 +1088,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         var background: u32 = 0;
         /// Handlers of the frame on screen, by host id.
         var presses: []const Binding(Msg) = &.{};
-        var pointers: []const Binding(*const fn (Pointer) Msg) = &.{};
+        var pointers: []const Binding(PointerHandler(Msg)) = &.{};
         var frame_msg: ?Msg = null;
         /// The state changed since the screen was last drawn (coalesced pointer moves).
         var dirty = false;
@@ -912,6 +1106,210 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         var location_cb: ?*const fn (Location) Msg = null;
         var focus_key: ?u64 = null;
 
+        // ---- Long press, secondary click, hover, links in text ----
+        var holds: []const Binding(Msg) = &.{};
+        var contexts: []const Binding(Msg) = &.{};
+        var hovers: []const Binding(*const fn (bool) Msg) = &.{};
+        var link_spans: []const Binding(LinkHandler(Msg)) = &.{};
+        var hovered: u32 = 0;
+        /// The timer of the press being held, and the view whose long press (or context menu)
+        /// already went: the press that ends it is not a press.
+        var hold_timer: u32 = 0;
+        var held: u32 = 0;
+        const hold_ms = 500;
+
+        fn find(list: anytype, id: u32) ?@TypeOf(list[0].value) {
+            for (list) |b| if (b.node == id) return b.value;
+            return null;
+        }
+
+        /// The long press (or, without one, the context menu) of the view held down.
+        fn holdFired() void {
+            hold_timer = 0;
+            const id = pressed;
+            if (id == 0) return;
+            const msg = find(holds, id) orelse find(contexts, id) orelse return;
+            held = id;
+            if (@hasDecl(H, "haptic")) H.haptic();
+            dispatch(msg);
+        }
+
+        /// A link in a text view was pressed: the `index`th link span.
+        pub fn spanPress(id: u32, index: u32) void {
+            if (!started) return;
+            for (link_spans) |b| if (b.node == id and b.value.index == index) return dispatch(b.value.msg);
+        }
+
+        // ---- Scroll views: where each is (as the host reports it), what the app wants ----
+        const ScrollPlace = struct { offset: f32 = 0, at_start: bool = true, at_end: bool = false };
+        /// By host id, for the scroll views on screen.
+        var scroll_places: std.AutoHashMapUnmanaged(u32, ScrollPlace) = .empty;
+        var scroll_handlers: []const Binding(*const fn (ScrollEvent) Msg) = &.{};
+        var scroll_requests: std.ArrayList(struct { key: u64, target: ScrollTarget, animated: bool }) = .empty;
+
+        fn fxScrollTo(k: u64, target: ScrollTarget, animated: bool) void {
+            scroll_requests.append(gpa, .{ .key = k, .target = target, .animated = animated }) catch {};
+            // Done after the next draw; ask for one if nothing else will.
+            if (!rendering and !dirty) {
+                dirty = true;
+                H.requestFrame();
+            }
+        }
+
+        /// Length of what scrolls and of the view, along the way node `n` scrolls.
+        fn scrollLengths(n: *const tree_mod.Node) [2]f32 {
+            return if (n.kind == .scroll_x) .{ n.content.w, n.frame.w } else .{ n.content.h, n.frame.h };
+        }
+
+        fn maxOffset(n: *const tree_mod.Node) f32 {
+            const l = scrollLengths(n);
+            return @max(0, l[0] - l[1]);
+        }
+
+        /// The host's scroll view `id` is at `offset` along the way it scrolls (the user scrolled,
+        /// or zui moved it).
+        pub fn scrollEvent(id: u32, offset: f32) void {
+            if (!started) return;
+            const tree = &trees[current];
+            const n = for (tree.nodes.items) |*node| {
+                if (node.host == id and (node.kind == .scroll or node.kind == .scroll_x)) break node;
+            } else return;
+            const l = scrollLengths(n);
+            const gop = scroll_places.getOrPut(gpa, id) catch return;
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            const was = gop.value_ptr.*;
+            const now: ScrollPlace = .{ .offset = offset, .at_start = offset <= 1, .at_end = offset >= l[0] - l[1] - 1 };
+            gop.value_ptr.* = now;
+            const on = find(scroll_handlers, id) orelse return;
+            const e: ScrollEvent = .{
+                .offset = offset,
+                .content = l[0],
+                .viewport = l[1],
+                .at_start = now.at_start,
+                .at_end = now.at_end,
+                .reached_start = now.at_start and !was.at_start,
+                .reached_end = now.at_end and !was.at_end,
+            };
+            // Reaching an end is news now; the way there is drawn once a display frame.
+            if (e.reached_start or e.reached_end or rendering) return dispatch(on(e));
+            apply(on(e));
+            if (!dirty) {
+                dirty = true;
+                H.requestFrame();
+            }
+        }
+
+        fn scrollHost(id: u32, offset: f32, animated: bool) void {
+            if (@hasDecl(H, "scrollTo")) H.scrollTo(id, offset, animated);
+        }
+
+        /// After a draw: scroll views that start at the end, stay at the end, keep their place,
+        /// and what `fx.scrollTo` asked for.
+        fn placeScrolls(old: ?*const Tree, tree: *const Tree) void {
+            for (tree.nodes.items) |*n| {
+                if (n.kind != .scroll and n.kind != .scroll_x) continue;
+                const mode = n.scroll_mode;
+                const gop = scroll_places.getOrPut(gpa, n.host) catch continue;
+                const old_node: ?*const tree_mod.Node = if (old) |o| for (o.nodes.items) |*on| {
+                    if (on.host == n.host and on.kind == n.kind and on.key == n.key) break on;
+                } else null else null;
+                if (!gop.found_existing or old_node == null) {
+                    gop.value_ptr.* = .{};
+                    if (mode.anchor_end) {
+                        const end_at = maxOffset(n);
+                        gop.value_ptr.* = .{ .offset = end_at, .at_start = end_at <= 1, .at_end = true };
+                        if (end_at > 0) scrollHost(n.host, end_at, false);
+                    }
+                    continue;
+                }
+                const place = gop.value_ptr;
+                const was = old_node.?;
+                if (std.meta.eql(was.content, n.content) and std.meta.eql(was.frame, n.frame)) continue;
+                if (mode.anchor_end and place.at_end) {
+                    const end_at = maxOffset(n);
+                    if (end_at != place.offset) {
+                        place.offset = end_at;
+                        scrollHost(n.host, end_at, false);
+                    }
+                    continue;
+                }
+                if (mode.keep_position and old != null) {
+                    if (keptOffset(old.?, was, tree, n, place.offset)) |to| if (to != place.offset) {
+                        place.offset = to;
+                        scrollHost(n.host, to, false);
+                    };
+                }
+            }
+            // Drop places of scroll views that are gone.
+            var it = scroll_places.iterator();
+            var gone: std.ArrayList(u32) = .empty;
+            defer gone.deinit(gpa);
+            while (it.next()) |e| {
+                const there = for (tree.nodes.items) |n| {
+                    if (n.host == e.key_ptr.* and (n.kind == .scroll or n.kind == .scroll_x)) break true;
+                } else false;
+                if (!there) gone.append(gpa, e.key_ptr.*) catch {};
+            }
+            for (gone.items) |id| _ = scroll_places.remove(id);
+
+            for (scroll_requests.items) |rq| {
+                const n = for (tree.nodes.items) |*n| {
+                    if (n.key == rq.key and (n.kind == .scroll or n.kind == .scroll_x)) break n;
+                } else continue;
+                const index: u32 = @intCast(n - tree.nodes.items.ptr);
+                const to: f32 = switch (rq.target) {
+                    .start => 0,
+                    .end => maxOffset(n),
+                    .offset => |v| v,
+                    .child => |k| childOffset(tree, index, k) orelse continue,
+                };
+                const clamped = std.math.clamp(to, 0, maxOffset(n));
+                if (scroll_places.getPtr(n.host)) |p| if (!rq.animated) {
+                    p.offset = clamped;
+                };
+                scrollHost(n.host, clamped, rq.animated);
+            }
+            scroll_requests.clearRetainingCapacity();
+        }
+
+        /// Where node `k` (a descendant of scroll node `scroll`) starts in its content.
+        fn childOffset(tree: *const Tree, scroll: u32, k: u64) ?f32 {
+            const horizontal = tree.nodes.items[scroll].kind == .scroll_x;
+            for (tree.nodes.items, 0..) |n, i| {
+                if (n.key != k) continue;
+                var pos: f32 = 0;
+                var at: u32 = @intCast(i);
+                while (at != scroll and at != tree_mod.none) : (at = tree.nodes.items[at].parent) {
+                    const f = tree.nodes.items[at].frame;
+                    pos += if (horizontal) f.x else f.y;
+                }
+                if (at == scroll) return pos;
+            }
+            return null;
+        }
+
+        /// The offset that keeps the first keyed child on screen where it was, after content
+        /// came or went before it.
+        fn keptOffset(old: *const Tree, was: *const tree_mod.Node, tree: *const Tree, n: *const tree_mod.Node, offset: f32) ?f32 {
+            const horizontal = n.kind == .scroll_x;
+            var it = old.children(@intCast(was - old.nodes.items.ptr));
+            while (it.next()) |c| {
+                const oc = old.nodes.items[c];
+                const begin_at = if (horizontal) oc.frame.x else oc.frame.y;
+                const len = if (horizontal) oc.frame.w else oc.frame.h;
+                if (oc.key == 0 or begin_at + len <= offset) continue;
+                var nit = tree.children(@intCast(n - tree.nodes.items.ptr));
+                while (nit.next()) |d| {
+                    const nc = tree.nodes.items[d];
+                    if (nc.key != oc.key) continue;
+                    const moved = (if (horizontal) nc.frame.x else nc.frame.y) - begin_at;
+                    return std.math.clamp(offset + moved, 0, maxOffset(n));
+                }
+                return null;
+            }
+            return null;
+        }
+
         const vtable: Fx(Msg).VTable = .{
             .fetch = fxFetch,
             .after = fxAfter,
@@ -919,6 +1317,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .speak = fxSpeak,
             .set_link = fxSetLink,
             .focus = fxFocus,
+            .scroll_to = fxScrollTo,
             .post = fxPost,
             .open_socket = fxOpenSocket,
             .send_socket = fxSendSocket,
@@ -1487,14 +1886,41 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             switch (kind) {
                 .press_in => {
                     pressed = id;
+                    held = 0;
+                    hold_timer = 0;
+                    if (find(holds, id) != null or find(contexts, id) != null) {
+                        hold_timer = newId();
+                        H.timer(hold_timer, hold_ms);
+                    }
                     render();
                 },
                 .press_out => if (pressed == id) {
                     pressed = 0;
+                    hold_timer = 0;
                     render();
                 },
-                .press => for (presses) |b| {
-                    if (b.node == id) return dispatch(b.value);
+                .press => {
+                    // The long press (or context menu) already answered this touch.
+                    if (held == id) {
+                        held = 0;
+                        return;
+                    }
+                    if (find(presses, id)) |m| dispatch(m);
+                },
+                .context => {
+                    if (held == id) return; // the long press went first
+                    const msg = find(contexts, id) orelse find(holds, id) orelse return;
+                    hold_timer = 0;
+                    held = id;
+                    dispatch(msg);
+                },
+                .hover_in => {
+                    hovered = id;
+                    if (find(hovers, id)) |f| dispatch(f(true)) else render();
+                },
+                .hover_out => if (hovered == id) {
+                    hovered = 0;
+                    if (find(hovers, id)) |f| dispatch(f(false)) else render();
                 },
             }
         }
@@ -1508,10 +1934,12 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             if (!started) return;
             for (pointers) |b| {
                 if (b.node != id) continue;
+                var q = p;
+                q.key = b.value.key;
                 // Moves arrive faster than the screen refreshes (and once per finger): the state
                 // follows every one, the screen once per display frame.
-                if (p.kind != .move or rendering) return dispatch(b.value(p));
-                apply(b.value(p));
+                if (p.kind != .move or rendering) return dispatch(b.value.f(q));
+                apply(b.value.f(q));
                 if (!dirty) {
                     dirty = true;
                     H.requestFrame();
@@ -1559,6 +1987,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         }
 
         pub fn timerDone(id: u32) void {
+            if (id != 0 and id == hold_timer) return if (started) holdFired();
             if (stream_timers.fetchRemove(id)) |kv| {
                 // Connect again, unless the app closed the stream meanwhile.
                 if (streams.get(kv.value)) |st_| connect(st_);
@@ -1663,18 +2092,30 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             // and keeps its controls clear of them with `env.safe`.
             const s: Insets = if (@hasDecl(App, "edge_to_edge") and App.edge_to_edge) .{} else env.safe;
             const root_frame: st.Rect = .{ .x = s.left, .y = s.top, .w = @max(0, env.width - s.left - s.right), .h = @max(0, env.height - s.top - s.bottom) };
-            layout.Engine.run(tree, &H.measure, env.rtl, root_frame) catch return;
-            rec.run(if (has_old) &trees[current] else null, tree, .{ .rtl = env.rtl, .pressed = pressed });
+            layout.Engine.runRich(tree, &H.measure, if (@hasDecl(H, "measureRich")) &H.measureRich else null, env.rtl, root_frame) catch return;
+            const old: ?*const Tree = if (has_old) &trees[current] else null;
+            rec.run(old, tree, .{ .rtl = env.rtl, .pressed = pressed, .hovered = hovered });
 
             // Handlers now point at host ids, which is what events carry.
             for (ui.presses.items) |*b| b.node = tree.nodes.items[b.node].host;
             for (ui.changes.items) |*b| b.node = tree.nodes.items[b.node].host;
             for (ui.pointers.items) |*b| b.node = tree.nodes.items[b.node].host;
             for (ui.inputs.items) |*b| b.node = tree.nodes.items[b.node].host;
+            for (ui.holds.items) |*b| b.node = tree.nodes.items[b.node].host;
+            for (ui.contexts.items) |*b| b.node = tree.nodes.items[b.node].host;
+            for (ui.hovers.items) |*b| b.node = tree.nodes.items[b.node].host;
+            for (ui.links.items) |*b| b.node = tree.nodes.items[b.node].host;
+            for (ui.scrolls.items) |*b| b.node = tree.nodes.items[b.node].host;
             presses = ui.presses.items;
             changes = ui.changes.items;
             pointers = ui.pointers.items;
             inputs = ui.inputs.items;
+            holds = ui.holds.items;
+            contexts = ui.contexts.items;
+            hovers = ui.hovers.items;
+            link_spans = ui.links.items;
+            scroll_handlers = ui.scrolls.items;
+            placeScrolls(old, tree);
             if (focus_key) |k| {
                 focus_key = null;
                 for (tree.nodes.items) |n| if (n.key == k and (n.kind == .input or n.kind == .text_area)) H.focus(n.host);

@@ -185,7 +185,7 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
         // With a call engine (App.rtc) a video view hosts the camera preview or a remote
         // picture; without one it is an empty box.
         .video => if (calls_enabled) Media.createView() else objc.new("ZuiView"),
-        .text => blk: {
+        .text, .text_select => blk: {
             const l = objc.new("UILabel");
             objc.sendVoidInt(l, "setNumberOfLines:", 0);
             break :blk l;

@@ -10,6 +10,12 @@
 //!   content(id, Size)                — scroll nodes: size of what scrolls
 //!   transform(id, Transform)         clip(id, bool)           pointer(id, bool)
 //!   image(id, url, headers)          path(id, tree.Path)
+//! and, where the host has them:
+//!   richText(id, text, []const Span, Font, color, PhysicalAlign)   — text with spans
+//!   gestures(id, tree.Gestures)      — long press, secondary click, hover
+//!   imageBytes(id, cache_key, bytes) — a picture from memory
+//!   imageFit(id, Fit)                transition(id, ?Transition) — before frame, box, transform
+//!   spin(id, period_ms)              — turning round natively (0 stops)
 
 const std = @import("std");
 const st = @import("style.zig");
@@ -39,7 +45,15 @@ pub const State = struct {
     rtl: bool = false,
     /// Host id of the view being pressed, 0 for none.
     pressed: u32 = 0,
+    /// Host id of the view under the mouse, 0 for none.
+    hovered: u32 = 0,
 };
+
+fn spansEql(a: []const tree_mod.Span, b: []const tree_mod.Span) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!std.meta.eql(x, y)) return false;
+    return true;
+}
 
 pub fn Reconciler(comptime H: type) type {
     return struct {
@@ -163,14 +177,30 @@ pub fn Reconciler(comptime H: type) type {
             const s = n.style;
             const was_pressed = o != null and o.?.host == r.prev.pressed and r.prev.pressed != 0;
             const is_pressed = n.pressable and id == r.now.pressed and id != 0;
+            const was_hovered = o != null and o.?.host == r.prev.hovered and r.prev.hovered != 0;
+            const is_hovered = n.gestures.hover and id == r.now.hovered and id != 0;
+
+            // Set first: the changes below animate with it.
+            if (@hasDecl(H, "transition")) {
+                const was: ?st.Transition = if (o) |old| old.style.transition else null;
+                if (!std.meta.eql(was, s.transition)) H.transition(id, s.transition);
+            }
 
             if (o == null or !o.?.frame.eql(n.frame)) H.frame(id, n.frame);
 
-            const box = st.Box.of(s, is_pressed);
-            if (o == null or !std.meta.eql(st.Box.of(o.?.style, was_pressed), box)) H.box(id, box);
+            const box = st.Box.of(s, .{ .pressed = is_pressed, .hovered = is_hovered, .rtl = r.now.rtl });
+            if (o == null or !std.meta.eql(st.Box.of(o.?.style, .{ .pressed = was_pressed, .hovered = was_hovered, .rtl = r.prev.rtl }), box)) H.box(id, box);
 
             if (o == null or o.?.pressable != n.pressable) {
                 if (n.pressable or o != null) H.pressable(id, n.pressable);
+            }
+            if (@hasDecl(H, "gestures")) {
+                const was: tree_mod.Gestures = if (o) |old| old.gestures else .{};
+                if (!std.meta.eql(was, n.gestures)) H.gestures(id, n.gestures);
+            }
+            if (@hasDecl(H, "spin")) {
+                const was: u16 = if (o) |old| old.style.spin_ms else 0;
+                if (was != s.spin_ms) H.spin(id, s.spin_ms);
             }
             if (o == null or o.?.pointer != n.pointer) {
                 if (n.pointer or o != null) H.pointer(id, n.pointer);
@@ -186,9 +216,14 @@ pub fn Reconciler(comptime H: type) type {
             const al = st.physicalAlign(s.text_align, r.now.rtl);
             const text_changed = o == null or !std.mem.eql(u8, o.?.text, n.text) or
                 !std.meta.eql(st.Font.of(o.?.style), font) or o.?.style.color.argb() != color or
-                st.physicalAlign(o.?.style.text_align, r.prev.rtl) != al;
+                st.physicalAlign(o.?.style.text_align, r.prev.rtl) != al or !spansEql(o.?.spans, n.spans);
             switch (n.kind) {
-                .text => if (text_changed) H.text(id, n.text, font, color, al),
+                .text, .text_select => if (text_changed) {
+                    if (@hasDecl(H, "richText") and (n.spans.len > 0 or n.kind == .text_select))
+                        H.richText(id, n.text, n.spans, font, color, al)
+                    else
+                        H.text(id, n.text, font, color, al);
+                },
                 .input, .text_area => {
                     if (o == null or !std.meta.eql(o.?.input_type, n.input_type)) H.inputType(id, n.input_type);
                     if (text_changed or !std.mem.eql(u8, o.?.placeholder, n.placeholder))
@@ -196,7 +231,16 @@ pub fn Reconciler(comptime H: type) type {
                 },
                 .scroll, .scroll_x => if (o == null or !std.meta.eql(o.?.content, n.content)) H.content(id, n.content),
                 .image => {
-                    if (o == null or !std.mem.eql(u8, o.?.text, n.text) or !std.mem.eql(u8, o.?.headers, n.headers)) H.image(id, n.text, n.headers);
+                    if (@hasDecl(H, "imageFit")) {
+                        const was: st.Fit = if (o) |old| old.style.fit else .fill;
+                        if (was != s.fit) H.imageFit(id, s.fit);
+                    }
+                    const from_memory = n.bytes != null and @hasDecl(H, "imageBytes");
+                    const was_memory = if (o) |old| old.bytes != null else false;
+                    if (o == null or !std.mem.eql(u8, o.?.text, n.text) or !std.mem.eql(u8, o.?.headers, n.headers) or was_memory != from_memory) {
+                        // A picture from memory is known by its key: the bytes go only when it changes.
+                        if (from_memory) H.imageBytes(id, n.text, n.bytes.?) else H.image(id, n.text, n.headers);
+                    }
                     const f = n.style.image_filter;
                     const was: st.ImageFilter = if (o) |old| old.style.image_filter else .{};
                     if (!std.meta.eql(f, was) or (o == null and !f.isIdentity())) H.imageFilter(id, f);

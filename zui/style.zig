@@ -103,6 +103,136 @@ pub const Style = struct {
     image_filter: ImageFilter = .{},
     /// Lay the children out left to right even in right-to-left languages (a map, a chart).
     no_mirror: bool = false,
+
+    // Flow over several lines, or a grid
+    /// Children that do not fit on the line go on to the next one (a row of chips): `gap` apart
+    /// along a line, `line_gap` (default `gap`) between lines.
+    wrap: bool = false,
+    /// Lays the children out in equal columns, `gap` apart, rows `line_gap` (default `gap`) apart.
+    grid: ?Grid = null,
+    line_gap: ?f32 = null,
+
+    // More box
+    /// One shadow under the box (CSS box-shadow), drawn the same on every platform.
+    shadow: ?Shadow = null,
+    /// Painted instead of `background`.
+    gradient: ?Gradient = null,
+    /// Per-side borders (logical sides); replaces `border_width` and `border_color`.
+    borders: ?Borders = null,
+    /// Per-corner radii (logical corners); replaces `radius`.
+    corners: ?Corners = null,
+    /// While the mouse is over the view (desktop web), like `pressed_background`.
+    hover_background: ?Color = null,
+    hover_opacity: ?f32 = null,
+
+    // More text
+    /// Extra space after each character, in points.
+    letter_spacing: f32 = 0,
+    /// Shown in capitals (done in Zig, so it is the same everywhere).
+    uppercase: bool = false,
+
+    /// How a picture fills its box.
+    fit: Fit = .fill,
+    /// Changes of opacity, transform and frame animate, natively (CSS transitions,
+    /// Android animators, UIView animations).
+    transition: ?Transition = null,
+    /// Turns round continuously, once in this many milliseconds (a spinner), natively: no frames
+    /// from Zig. 0 for none.
+    spin_ms: u16 = 0,
+};
+
+/// Equal columns: `columns` of them, or as many as fit `min_width` wide.
+pub const Grid = struct {
+    columns: u16 = 0,
+    min_width: f32 = 0,
+
+    /// How many columns fit in `width`.
+    pub fn count(g: Grid, width: f32, gap: f32) usize {
+        if (g.columns > 0) return g.columns;
+        if (g.min_width <= 0 or !std.math.isFinite(width)) return 1;
+        return @max(1, @as(usize, @intFromFloat(@floor((width + gap) / (g.min_width + gap)))));
+    }
+};
+
+pub const Shadow = struct {
+    x: f32 = 0,
+    y: f32 = 2,
+    /// CSS blur radius.
+    blur: f32 = 8,
+    color: Color = Color.rgba8(0, 0, 0, 40),
+};
+
+pub const Stop = struct { color: Color, at: f32 };
+
+/// A linear gradient of up to 6 stops along `angle` (CSS degrees: 0 towards the top, 90 towards
+/// the right, 180 towards the bottom).
+pub const Gradient = struct {
+    angle: f32 = 180,
+    stops: [max_stops]Stop = undefined,
+    count: u8 = 0,
+
+    pub const max_stops = 6;
+
+    pub fn linear(angle: f32, stops: []const Stop) Gradient {
+        var g: Gradient = .{ .angle = angle };
+        for (stops[0..@min(stops.len, max_stops)]) |s| {
+            g.stops[g.count] = s;
+            g.count += 1;
+        }
+        return g;
+    }
+
+    /// From `a` to `b`.
+    pub fn two(angle: f32, a: Color, b: Color) Gradient {
+        return linear(angle, &.{ .{ .color = a, .at = 0 }, .{ .color = b, .at = 1 } });
+    }
+};
+
+pub const Side = struct { width: f32 = 0, color: Color = Color.transparent };
+
+pub const Borders = struct {
+    top: Side = .{},
+    bottom: Side = .{},
+    start: Side = .{},
+    end: Side = .{},
+};
+
+pub const Corners = struct {
+    top_start: f32 = 0,
+    top_end: f32 = 0,
+    bottom_start: f32 = 0,
+    bottom_end: f32 = 0,
+};
+
+pub const Fit = enum(u8) {
+    /// Stretched to the box.
+    fill = 0,
+    /// Fills the box, cropped.
+    cover = 1,
+    /// Whole, inside the box.
+    contain = 2,
+};
+
+/// The curves CSS, Android and iOS all have exactly (cubic Béziers).
+pub const Easing = enum(u8) {
+    linear = 0,
+    ease_in = 1,
+    ease_out = 2,
+    ease_in_out = 3,
+
+    pub fn controlPoints(e: Easing) [4]f32 {
+        return switch (e) {
+            .linear => .{ 0, 0, 1, 1 },
+            .ease_in => .{ 0.42, 0, 1, 1 },
+            .ease_out => .{ 0, 0, 0.58, 1 },
+            .ease_in_out => .{ 0.42, 0, 0.58, 1 },
+        };
+    }
+};
+
+pub const Transition = struct {
+    duration_ms: u16 = 200,
+    easing: Easing = .ease_out,
 };
 
 /// CSS's saturate(), contrast() and brightness(), in that order. The web uses CSS itself;
@@ -148,23 +278,101 @@ pub const Transform = struct {
     }
 };
 
-/// What the box looks like, as sent to a host.
+/// What the box looks like, as sent to a host: physical sides and corners. Hosts draw `radius`,
+/// `border_width` and `border_color` the simple way when `isSimple`, else the decoration
+/// (`decor`) as well.
 pub const Box = struct {
     background: u32 = 0,
+    /// The radius when all corners are alike, else the largest.
     radius: f32 = 0,
+    /// The border when all four sides are alike, else none.
     border_width: f32 = 0,
     border_color: u32 = 0,
     opacity: f32 = 1,
+    decor: Decor = .{},
 
-    pub fn of(s: Style, pressed: bool) Box {
-        const bg = if (pressed) s.pressed_background orelse s.background else s.background;
-        return .{
-            .background = if (bg) |c| c.argb() else 0,
-            .radius = s.radius,
-            .border_width = s.border_width,
-            .border_color = s.border_color.argb(),
-            .opacity = if (pressed) s.pressed_opacity orelse s.opacity else s.opacity,
+    pub const Look = struct { pressed: bool = false, hovered: bool = false, rtl: bool = false };
+
+    pub fn of(s: Style, look: Look) Box {
+        var bg = s.background;
+        var opacity = s.opacity;
+        if (look.hovered) {
+            bg = s.hover_background orelse bg;
+            opacity = s.hover_opacity orelse opacity;
+        }
+        if (look.pressed) {
+            bg = s.pressed_background orelse bg;
+            opacity = s.pressed_opacity orelse opacity;
+        }
+        var b: Box = .{ .background = if (bg) |c| c.argb() else 0, .opacity = opacity };
+        const d = &b.decor;
+        if (s.corners) |c| {
+            d.radii = if (look.rtl) .{ c.top_end, c.top_start, c.bottom_start, c.bottom_end } else .{ c.top_start, c.top_end, c.bottom_end, c.bottom_start };
+            b.radius = @max(@max(d.radii[0], d.radii[1]), @max(d.radii[2], d.radii[3]));
+        } else {
+            d.radii = @splat(s.radius);
+            b.radius = s.radius;
+        }
+        if (s.borders) |br| {
+            const sides = [4]Side{ br.top, if (look.rtl) br.start else br.end, br.bottom, if (look.rtl) br.end else br.start };
+            for (sides, 0..) |sd, k| {
+                d.border_widths[k] = sd.width;
+                d.border_colors[k] = if (sd.width > 0) sd.color.argb() else 0;
+            }
+            if (d.uniformBorder()) {
+                b.border_width = d.border_widths[0];
+                b.border_color = d.border_colors[0];
+            }
+        } else {
+            b.border_width = s.border_width;
+            b.border_color = s.border_color.argb();
+            d.border_widths = @splat(s.border_width);
+            d.border_colors = @splat(b.border_color);
+        }
+        if (s.shadow) |sh| {
+            d.shadow_color = sh.color.argb();
+            d.shadow = .{ sh.x, sh.y, sh.blur };
+        }
+        if (s.gradient) |g| if (g.count > 0) {
+            d.gradient_angle = g.angle;
+            d.gradient_count = g.count;
+            for (g.stops[0..g.count], 0..) |stop, k| {
+                d.gradient_colors[k] = stop.color.argb();
+                d.gradient_at[k] = stop.at;
+            }
         };
+        return b;
+    }
+
+    /// One background, one radius, one border: what every host draws the simple way.
+    pub fn isSimple(b: Box) bool {
+        return b.decor.shadow_color >> 24 == 0 and b.decor.gradient_count == 0 and b.decor.uniformCorners() and b.decor.uniformBorder();
+    }
+};
+
+/// The rest of a box, in physical directions.
+pub const Decor = struct {
+    /// Top-left, top-right, bottom-right, bottom-left.
+    radii: [4]f32 = .{ 0, 0, 0, 0 },
+    /// Top, right, bottom, left.
+    border_widths: [4]f32 = .{ 0, 0, 0, 0 },
+    border_colors: [4]u32 = .{ 0, 0, 0, 0 },
+    /// Shadow colour (0: none), and its x, y and blur.
+    shadow_color: u32 = 0,
+    shadow: [3]f32 = .{ 0, 0, 0 },
+    /// CSS angle and up to 6 stops (count 0: no gradient).
+    gradient_angle: f32 = 0,
+    gradient_count: u8 = 0,
+    gradient_colors: [Gradient.max_stops]u32 = @splat(0),
+    gradient_at: [Gradient.max_stops]f32 = @splat(0),
+
+    pub fn uniformCorners(d: Decor) bool {
+        return d.radii[0] == d.radii[1] and d.radii[1] == d.radii[2] and d.radii[2] == d.radii[3];
+    }
+
+    pub fn uniformBorder(d: Decor) bool {
+        for (1..4) |k| if (d.border_widths[k] != d.border_widths[0] or d.border_colors[k] != d.border_colors[0]) return false;
+        return true;
     }
 };
 
@@ -177,9 +385,11 @@ pub const Font = struct {
     line_height: f32 = 21,
     mono: bool = false,
     max_lines: u16 = 0,
+    /// Extra space after each character, in points.
+    letter_spacing: f32 = 0,
 
     pub fn of(s: Style) Font {
-        return .{ .size = s.font_size, .weight = s.weight, .line_height = @round(s.font_size * s.line_height), .mono = s.mono, .max_lines = s.max_lines };
+        return .{ .size = s.font_size, .weight = s.weight, .line_height = @round(s.font_size * s.line_height), .mono = s.mono, .max_lines = s.max_lines, .letter_spacing = s.letter_spacing };
     }
 };
 

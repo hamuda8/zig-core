@@ -22,7 +22,56 @@ pub const View = struct {
     path_points: usize = 0,
     input_type: zui.InputType = .{},
     headers: std.ArrayList(u8) = .empty,
+    gestures: zui.Gestures = .{},
+    /// Rich text: how many spans; images from memory: how many bytes came.
+    spans: usize = 0,
+    bytes: usize = 0,
+    fit: zui.Fit = .fill,
+    transition: ?zui.Transition = null,
+    spin_ms: u16 = 0,
+    /// Scroll views: where zui last put it, and whether that was animated.
+    scrolled_to: ?f32 = null,
+    scroll_animated: bool = false,
 };
+
+// The additions of zui's styling work: rich text, gestures, pictures from memory, animation,
+// scrolling. Measuring rich text uses the fake font too.
+pub fn richText(id: u32, s: []const u8, spans: []const zui.Span, _: zui.Font, _: u32, _: zui.PhysicalAlign) void {
+    const v = views.getPtr(id) orelse return;
+    v.text.clearRetainingCapacity();
+    v.text.appendSlice(gpa, s) catch {};
+    v.spans = spans.len;
+}
+pub fn measureRich(s: []const u8, _: []const zui.Span, font: zui.Font, max_width: f32) zui.Size {
+    return layout.fakeMeasure(s, font, max_width);
+}
+pub fn gestures(id: u32, g: zui.Gestures) void {
+    if (views.getPtr(id)) |v| v.gestures = g;
+}
+pub fn imageBytes(id: u32, key: []const u8, bytes: []const u8) void {
+    const v = views.getPtr(id) orelse return;
+    v.text.clearRetainingCapacity();
+    v.text.appendSlice(gpa, key) catch {};
+    v.bytes = bytes.len;
+}
+pub fn imageFit(id: u32, f: zui.Fit) void {
+    if (views.getPtr(id)) |v| v.fit = f;
+}
+pub fn transition(id: u32, t: ?zui.Transition) void {
+    if (views.getPtr(id)) |v| v.transition = t;
+}
+pub fn spin(id: u32, ms: u16) void {
+    if (views.getPtr(id)) |v| v.spin_ms = ms;
+}
+pub fn scrollTo(id: u32, offset: f32, animated: bool) void {
+    const v = views.getPtr(id) orelse return;
+    v.scrolled_to = offset;
+    v.scroll_animated = animated;
+}
+pub var haptics: u32 = 0;
+pub fn haptic() void {
+    haptics += 1;
+}
 
 /// Set when the app asked for a frame; `Driver.frame` delivers it.
 pub var frame_requested = false;
@@ -376,6 +425,7 @@ pub fn Driver(comptime App: type) type {
             photo_asked = null;
             file_accept = null;
             stream_conn = 0;
+            haptics = 0;
         }
 
         /// Back (Android's button, the iOS swipe). Returns whether the app took it.
@@ -498,6 +548,61 @@ pub fn Driver(comptime App: type) type {
                 }
             }
             return error.NothingToPress;
+        }
+
+        /// The nearest pressable view around the text `label`, or 0.
+        pub fn pressableOf(label: []const u8) u32 {
+            var id = findText(label);
+            while (id != 0) : (id = views.get(id).?.parent) {
+                if (views.get(id).?.pressable) return id;
+            }
+            return 0;
+        }
+
+        /// Holds the view around `label` down past the long press, then lets go.
+        pub fn longPress(label: []const u8) !void {
+            const id = pressableOf(label);
+            if (id == 0) return error.NothingToPress;
+            R.event(id, .press_in);
+            runTimers();
+            R.event(id, .press_out);
+            R.event(id, .press);
+        }
+
+        /// A secondary click (the context menu) on the view around `label`.
+        pub fn context(label: []const u8) !void {
+            const id = pressableOf(label);
+            if (id == 0) return error.NothingToPress;
+            R.event(id, .context);
+        }
+
+        /// The mouse comes onto (or leaves) the view with id `id`.
+        pub fn hover(id: u32, on: bool) void {
+            R.event(id, if (on) .hover_in else .hover_out);
+        }
+
+        /// Presses link `index` of the text view whose text contains `part`.
+        pub fn pressLink(part: []const u8, index: u32) !void {
+            var it = views.iterator();
+            while (it.next()) |e| {
+                const v = e.value_ptr;
+                if ((v.kind == .text or v.kind == .text_select) and std.mem.indexOf(u8, v.text.items, part) != null) {
+                    return R.spanPress(e.key_ptr.*, index);
+                }
+            }
+            return error.NoSuchText;
+        }
+
+        /// The first scroll view (in creation order of the views kept), or 0.
+        pub fn scrollView() u32 {
+            var it = views.iterator();
+            while (it.next()) |e| if (e.value_ptr.kind == .scroll or e.value_ptr.kind == .scroll_x) return e.key_ptr.*;
+            return 0;
+        }
+
+        /// The user scrolled view `id` to `offset`.
+        pub fn scroll(id: u32, offset: f32) void {
+            R.scrollEvent(id, offset);
         }
 
         /// Types `s` into the input whose placeholder is `placeholder`.
