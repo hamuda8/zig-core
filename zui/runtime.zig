@@ -21,6 +21,7 @@ const reconcile = @import("reconcile.zig");
 const i18n = @import("i18n.zig");
 const Color = @import("color.zig").Color;
 const icon_mod = @import("icon.zig");
+const calls = @import("calls.zig");
 
 const Tree = tree_mod.Tree;
 
@@ -630,8 +631,18 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             if (has_system_calls) H.endCall(id);
         }
 
-        // Calls. A host without them (until reseal-rtc lands on the phones) answers "unsupported".
-        const has_calls = @hasDecl(H, "openMedia");
+        // Calls. The web host has them built in (H.openMedia...). The phones have a media
+        // backend (H.Media) and need a call engine from the app (App.rtc, see zui/calls.zig).
+        // Without either, media answers "unsupported" and peers "failed".
+        const native_calls = !@hasDecl(H, "openMedia") and @hasDecl(H, "Media") and @hasDecl(App, "rtc");
+        const NativeCalls = if (native_calls) calls.Native(H.Media, App.rtc, @This()) else void;
+        const has_calls = @hasDecl(H, "openMedia") or native_calls;
+        const C = if (native_calls) NativeCalls else H;
+
+        /// Hands the call events other threads queued to the app (phones; on the UI thread).
+        pub fn callsPump() void {
+            if (native_calls) NativeCalls.pump();
+        }
         var medias: std.AutoHashMapUnmanaged(u32, *const fn (MediaEvent) Msg) = .empty;
         var peers: std.AutoHashMapUnmanaged(u32, *const fn (PeerEvent) Msg) = .empty;
 
@@ -642,20 +653,20 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
                 return id;
             }
             medias.put(gpa, id, on) catch return 0;
-            H.openMedia(id, m);
+            C.openMedia(id, m);
             return id;
         }
 
         fn fxMediaEnable(id: u32, audio: bool, video: bool) void {
-            if (has_calls) H.mediaEnable(id, audio, video);
+            if (has_calls) C.mediaEnable(id, audio, video);
         }
 
         fn fxSwitchCamera(id: u32) void {
-            if (has_calls) H.switchCamera(id);
+            if (has_calls) C.switchCamera(id);
         }
 
         fn fxCloseMedia(id: u32) void {
-            if (medias.remove(id) and has_calls) H.closeMedia(id);
+            if (medias.remove(id) and has_calls) C.closeMedia(id);
         }
 
         fn fxOpenPeer(p: Peer, on: *const fn (PeerEvent) Msg) u32 {
@@ -665,20 +676,20 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
                 return id;
             }
             peers.put(gpa, id, on) catch return 0;
-            H.openPeer(id, p);
+            C.openPeer(id, p);
             return id;
         }
 
         fn fxPeerSignal(id: u32, json: []const u8) void {
-            if (has_calls and peers.contains(id)) H.peerSignal(id, json);
+            if (has_calls and peers.contains(id)) C.peerSignal(id, json);
         }
 
         fn fxPeerStream(id: u32, stream: u32) void {
-            if (has_calls and peers.contains(id)) H.peerStream(id, stream);
+            if (has_calls and peers.contains(id)) C.peerStream(id, stream);
         }
 
         fn fxClosePeer(id: u32) void {
-            if (peers.remove(id) and has_calls) H.closePeer(id);
+            if (peers.remove(id) and has_calls) C.closePeer(id);
         }
 
         fn fxNotify(n: Notification) void {
