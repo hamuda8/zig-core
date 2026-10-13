@@ -99,6 +99,61 @@ fn callDevice(method: jni.jmethodID, args: []const jni.jvalue) void {
     check();
 }
 
+/// ZuiRecorder.java and ZuiPlayer.java: voice and video messages (MediaRecorder, MediaPlayer).
+var messages: struct {
+    recorder: jni.jclass,
+    player: jni.jclass,
+    start: jni.jmethodID,
+    stop: jni.jmethodID,
+    play: jni.jmethodID,
+    control: jni.jmethodID,
+} = undefined;
+
+fn bindMessages(e: *jni.Env) void {
+    const f = e.functions;
+    const r = f.FindClass(e, "com/wufour/zui/ZuiRecorder");
+    messages.recorder = f.NewGlobalRef(e, r);
+    f.DeleteLocalRef(e, r);
+    const p = f.FindClass(e, "com/wufour/zui/ZuiPlayer");
+    messages.player = f.NewGlobalRef(e, p);
+    f.DeleteLocalRef(e, p);
+    messages.start = f.GetStaticMethodID(e, messages.recorder, "start", "(IZZI)V");
+    messages.stop = f.GetStaticMethodID(e, messages.recorder, "stop", "(IZ)V");
+    messages.play = f.GetStaticMethodID(e, messages.player, "play", "(ILjava/lang/String;[BLjava/lang/String;ZZZ)V");
+    messages.control = f.GetStaticMethodID(e, messages.player, "control", "(III)V");
+}
+
+pub fn startRecording(id: u32, r: zui.Recording) void {
+    env.functions.CallStaticVoidMethodA(env, messages.recorder, messages.start, &[_]jni.jvalue{ int(id), boolean(r.video), boolean(r.back_camera), int(@min(r.max_ms, std.math.maxInt(i32))) });
+    check();
+}
+pub fn stopRecording(id: u32, cancel: bool) void {
+    env.functions.CallStaticVoidMethodA(env, messages.recorder, messages.stop, &[_]jni.jvalue{ int(id), boolean(cancel) });
+    check();
+}
+pub fn play(id: u32, p: zui.Playback) void {
+    const f = env.functions;
+    const ju = newString(p.url);
+    defer f.DeleteLocalRef(env, ju);
+    const jm = newString(p.mime);
+    defer f.DeleteLocalRef(env, jm);
+    const jd = f.NewByteArray(env, @intCast(p.data.len));
+    defer f.DeleteLocalRef(env, jd);
+    if (p.data.len > 0) f.SetByteArrayRegion(env, jd, 0, @intCast(p.data.len), p.data.ptr);
+    f.CallStaticVoidMethodA(env, messages.player, messages.play, &[_]jni.jvalue{ int(id), object(ju), object(jd), object(jm), boolean(p.video), boolean(p.autoplay), boolean(p.loop) });
+    check();
+}
+pub fn controlPlayback(id: u32, c: zui.PlaybackControl) void {
+    const op: u32, const value: u32 = switch (c) {
+        .pause => .{ 1, 0 },
+        .play => .{ 2, 0 },
+        .seek => |ms| .{ 3, @min(ms, std.math.maxInt(i32)) },
+        .stop => .{ 4, 0 },
+    };
+    env.functions.CallStaticVoidMethodA(env, messages.player, messages.control, &[_]jni.jvalue{ int(id), int(op), int(value) });
+    check();
+}
+
 const clock = @import("../platform/clock.zig");
 pub const now = clock.now;
 pub const tzOffset = clock.tzOffset;
@@ -212,6 +267,7 @@ fn bind(e: *jni.Env) void {
         .{ "open_url", "openUrl", "(Ljava/lang/String;)V" },
     }) |m| @field(methods, m[0]) = f.GetStaticMethodID(e, class, m[1], m[2]);
     bindDevice(e);
+    bindMessages(e);
 }
 
 fn call(method: jni.jmethodID, args: []const jni.jvalue) void {
@@ -453,6 +509,23 @@ pub fn exportEntry(comptime App: type) void {
             var mime_buf: [128]u8 = undefined;
             R.fileDone(buf, javaString(name, &name_buf), javaString(mime, &mime_buf), @intCast(@max(0, w)), @intCast(@max(0, h)));
         }
+        fn recordEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint, level: f32, duration_ms: jni.jint, data: jni.jobject, mime: jni.jstring) callconv(.c) void {
+            bind(e);
+            const f = e.functions;
+            const k = std.enums.fromInt(zui.RecordEvent.Kind, @as(u8, @intCast(kind))) orelse return;
+            const n: usize = if (data != null) @intCast(f.GetArrayLength(e, data)) else 0;
+            const buf = zui.allocator.alloc(u8, n) catch return R.recordEvent(@bitCast(id), .failed, 0, 0, "unavailable", "");
+            defer zui.allocator.free(buf);
+            if (n > 0) f.GetByteArrayRegion(e, data, 0, @intCast(n), buf.ptr);
+            var mime_buf: [64]u8 = undefined;
+            R.recordEvent(@bitCast(id), k, level, @intCast(@max(0, duration_ms)), buf, if (mime != null) javaString(mime, &mime_buf) else "");
+        }
+        fn playEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint, position_ms: jni.jint, duration_ms: jni.jint, reason: jni.jstring) callconv(.c) void {
+            bind(e);
+            const k = std.enums.fromInt(zui.PlayEvent.Kind, @as(u8, @intCast(kind))) orelse return;
+            var buf: [128]u8 = undefined;
+            R.playEvent(@bitCast(id), k, @intCast(@max(0, position_ms)), @intCast(@max(0, duration_ms)), if (reason != null) javaString(reason, &buf) else "");
+        }
         fn pickDone(e: *jni.Env, _: jni.jclass, value: jni.jstring) callconv(.c) void {
             bind(e);
             var buf: [64]u8 = undefined;
@@ -494,6 +567,8 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.callEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeCall" });
     @export(&Entry.callsPump, .{ .name = "Java_com_wufour_zui_Zui_nativeCallsPump" });
     @export(&Entry.back, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeBack" });
+    @export(&Entry.recordEvent, .{ .name = "Java_com_wufour_zui_ZuiRecorder_nativeRecordEvent" });
+    @export(&Entry.playEvent, .{ .name = "Java_com_wufour_zui_ZuiPlayer_nativePlayEvent" });
     @export(&Entry.pickDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativePickDone" });
     @export(&Entry.fileDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeFileDone" });
     @export(&Entry.streamStatus, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeStreamStatus" });

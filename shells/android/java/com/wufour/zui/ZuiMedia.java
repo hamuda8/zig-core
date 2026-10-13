@@ -55,6 +55,37 @@ final class ZuiMedia {
         Range<Integer>[] fpsRanges;
         int fps = 30;
         boolean swapPending;
+        /** Set for a camera that feeds a recorder (ZuiRecorder) rather than a call. */
+        Runnable onReady;
+        java.util.function.Consumer<String> onFail;
+    }
+
+    /** Asks for permissions not granted yet, then runs `then` with whether all are granted. */
+    static final ArrayList<Object[]> permissionCallbacks = new ArrayList<>();
+
+    static void withPermissions(String[] permissions, java.util.function.Consumer<Boolean> then) {
+        ArrayList<String> need = new ArrayList<>();
+        for (String p : permissions) if (Zui.activity.checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) need.add(p);
+        if (need.isEmpty()) {
+            then.accept(true);
+            return;
+        }
+        permissionCallbacks.add(new Object[] {then});
+        Zui.activity.requestPermissions(need.toArray(new String[0]), PERMISSION_REQUEST);
+    }
+
+    /** The camera for a recorder: writes into `target` (the MediaRecorder's surface) and into
+     *  the video views showing `id`. */
+    static void openForRecorder(int id, boolean back, Surface target, Runnable onReady, java.util.function.Consumer<String> onFail) {
+        Local l = new Local();
+        l.id = id;
+        l.video = true;
+        l.back = back;
+        l.encoder = target;
+        l.onReady = onReady;
+        l.onFail = onFail;
+        locals.put(id, l);
+        openCamera(l);
     }
 
     static final class VideoView {
@@ -103,6 +134,13 @@ final class ZuiMedia {
     static void permissionResult(String[] permissions, int[] results) {
         boolean granted = results.length > 0;
         for (int r : results) granted &= r == PackageManager.PERMISSION_GRANTED;
+        ArrayList<Object[]> callbacks = new ArrayList<>(permissionCallbacks);
+        permissionCallbacks.clear();
+        for (Object[] cb : callbacks) {
+            @SuppressWarnings("unchecked")
+            java.util.function.Consumer<Boolean> then = (java.util.function.Consumer<Boolean>) cb[0];
+            then.accept(granted);
+        }
         ArrayList<Local> waiting = new ArrayList<>(waitingPermission);
         waitingPermission.clear();
         for (Local l : waiting) {
@@ -124,10 +162,17 @@ final class ZuiMedia {
     static void report(Local l) {
         if (l.reported) return;
         l.reported = true;
-        nativeResult(l.id, READY, "");
+        if (l.onReady != null) l.onReady.run();
+        else nativeResult(l.id, READY, "");
     }
 
     static void fail(Local l, String reason) {
+        if (l.onFail != null) {
+            locals.remove(l.id);
+            closeCamera(l);
+            l.onFail.accept(reason);
+            return;
+        }
         locals.remove(l.id);
         if (l.audio && l.reported) audioMode(false);
         closeCamera(l);
@@ -210,7 +255,7 @@ final class ZuiMedia {
             }
             int display = Zui.activity.getWindowManager().getDefaultDisplay().getRotation() * 90;
             int rotation = l.back ? (sensor - display + 360) % 360 : (sensor + display) % 360;
-            nativeRotation(l.id, rotation);
+            if (l.onReady == null) nativeRotation(l.id, rotation);
             cm.openCamera(chosen, new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(CameraDevice d) {
@@ -245,6 +290,24 @@ final class ZuiMedia {
         } catch (Exception e) {
             fail(l, "unavailable");
         }
+    }
+
+    /** Degrees clockwise to turn the front (or back) camera's picture upright, for a recording. */
+    static int cameraRotation(boolean back) {
+        try {
+            CameraManager cm = (CameraManager) Zui.activity.getSystemService(Context.CAMERA_SERVICE);
+            for (String cid : cm.getCameraIdList()) {
+                CameraCharacteristics c = cm.getCameraCharacteristics(cid);
+                Integer facing = c.get(CameraCharacteristics.LENS_FACING);
+                if (facing == null || (facing == CameraCharacteristics.LENS_FACING_BACK) != back) continue;
+                Integer o = c.get(CameraCharacteristics.SENSOR_ORIENTATION);
+                int sensor = o == null ? 0 : o;
+                int display = Zui.activity.getWindowManager().getDefaultDisplay().getRotation() * 90;
+                return back ? (sensor - display + 360) % 360 : (sensor + display) % 360;
+            }
+        } catch (Exception ignored) {
+        }
+        return 0;
     }
 
     static void closeCamera(Local l) {
@@ -429,6 +492,7 @@ final class ZuiMedia {
 
     static void attach(VideoView v) {
         if (v.surface == null || v.stream == 0) return;
+        if (ZuiPlayer.attach(v)) return;
         if (isRemote(v.stream)) {
             ZuiStreamRenderer r = renderers.get(v.stream);
             if (r == null) {
@@ -458,6 +522,7 @@ final class ZuiMedia {
 
     static void detach(VideoView v) {
         if (v.stream == 0) return;
+        if (ZuiPlayer.detach(v)) return;
         if (isRemote(v.stream)) {
             ZuiStreamRenderer r = renderers.get(v.stream);
             if (r != null && v.view.getSurfaceTexture() != null) r.detach(v.view.getSurfaceTexture());
