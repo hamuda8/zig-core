@@ -2012,3 +2012,143 @@ extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
 pub fn randomBytes(buf: []u8) void {
     arc4random_buf(buf.ptr, buf.len);
 }
+
+// ---- Secure keys: SecKey in the Keychain (zui/keys.zig's hardware hook) ----
+// Imported P-256 keys become Keychain keys used through SecKey (signing, key agreement);
+// generated ones are made in the Secure Enclave where there is one.
+
+extern "Security" fn SecKeyCreateWithData(data: id, attributes: id, err: ?*id) id;
+extern "Security" fn SecKeyCreateRandomKey(parameters: id, err: ?*id) id;
+extern "Security" fn SecKeyCopyPublicKey(key: id) id;
+extern "Security" fn SecKeyCopyExternalRepresentation(key: id, err: ?*id) id;
+extern "Security" fn SecKeyCreateSignature(key: id, algorithm: id, data: id, err: ?*id) id;
+extern "Security" fn SecKeyCopyKeyExchangeResult(key: id, algorithm: id, public_key: id, parameters: id, err: ?*id) id;
+extern "Security" var kSecClassKey: id;
+extern "Security" var kSecValueRef: id;
+extern "Security" var kSecReturnRef: id;
+extern "Security" var kSecAttrApplicationTag: id;
+extern "Security" var kSecAttrKeyType: id;
+extern "Security" var kSecAttrKeyTypeECSECPrimeRandom: id;
+extern "Security" var kSecAttrKeyClass: id;
+extern "Security" var kSecAttrKeyClassPrivate: id;
+extern "Security" var kSecAttrKeyClassPublic: id;
+extern "Security" var kSecAttrKeySizeInBits: id;
+extern "Security" var kSecPrivateKeyAttrs: id;
+extern "Security" var kSecAttrIsPermanent: id;
+extern "Security" var kSecAttrTokenID: id;
+extern "Security" var kSecAttrTokenIDSecureEnclave: id;
+extern "Security" var kSecKeyAlgorithmECDSASignatureMessageX962SHA256: id;
+extern "Security" var kSecKeyAlgorithmECDHKeyExchangeStandard: id;
+
+pub const KeyHw = struct {
+    fn tag(name: []const u8) id {
+        var buf: [300]u8 = undefined;
+        return nsData(std.fmt.bufPrint(&buf, "zui:{s}", .{name}) catch name);
+    }
+
+    fn bits256() id {
+        return objc.msgSend(*const fn (id, objc.SEL, isize) callconv(.c) id)(objc.class("NSNumber"), objc.sel("numberWithInteger:"), 256);
+    }
+
+    /// The private key `name`, or null (+1 retained).
+    fn find(name: []const u8) id {
+        const q = nsDict(&.{ kSecClass, kSecAttrApplicationTag, kSecAttrKeyType, kSecReturnRef }, &.{ kSecClassKey, tag(name), kSecAttrKeyTypeECSECPrimeRandom, kCFBooleanTrue });
+        var key: id = null;
+        if (SecItemCopyMatching(q, &key) != 0) return null;
+        return key;
+    }
+
+    fn publicRaw(key: id) ?[65]u8 {
+        const p = SecKeyCopyPublicKey(key);
+        if (p == null) return null;
+        defer objc.release(p);
+        const d = SecKeyCopyExternalRepresentation(p, null);
+        if (d == null) return null;
+        defer objc.release(d);
+        const b = dataBytes(d);
+        if (b.len != 65) return null;
+        return b[0..65].*;
+    }
+
+    pub fn import(_: std.mem.Allocator, name: []const u8, _: zui.keys.Kind, secret: [32]u8, public: [65]u8) bool {
+        // ANSI X9.63: the public point, then the private scalar.
+        var x963: [97]u8 = undefined;
+        @memcpy(x963[0..65], &public);
+        @memcpy(x963[65..97], &secret);
+        defer std.crypto.secureZero(u8, &x963);
+        const attrs = nsDict(&.{ kSecAttrKeyType, kSecAttrKeyClass, kSecAttrKeySizeInBits }, &.{ kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeyClassPrivate, bits256() });
+        const key = SecKeyCreateWithData(nsData(&x963), attrs, null);
+        if (key == null) return false;
+        defer objc.release(key);
+        delete(name);
+        const add = nsDict(&.{ kSecClass, kSecValueRef, kSecAttrApplicationTag, kSecAttrAccessible }, &.{ kSecClassKey, key, tag(name), kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly });
+        return SecItemAdd(add, null) == 0;
+    }
+
+    pub fn generate(_: std.mem.Allocator, name: []const u8, _: zui.keys.Kind) ?[65]u8 {
+        delete(name);
+        const private = nsDict(&.{ kSecAttrIsPermanent, kSecAttrApplicationTag, kSecAttrAccessible }, &.{ kCFBooleanTrue, tag(name), kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly });
+        // The Secure Enclave first; the Keychain where there is none (the simulator).
+        var key = SecKeyCreateRandomKey(nsDict(&.{ kSecAttrKeyType, kSecAttrKeySizeInBits, kSecAttrTokenID, kSecPrivateKeyAttrs }, &.{ kSecAttrKeyTypeECSECPrimeRandom, bits256(), kSecAttrTokenIDSecureEnclave, private }), null);
+        if (key == null) key = SecKeyCreateRandomKey(nsDict(&.{ kSecAttrKeyType, kSecAttrKeySizeInBits, kSecPrivateKeyAttrs }, &.{ kSecAttrKeyTypeECSECPrimeRandom, bits256(), private }), null);
+        if (key == null) return null;
+        defer objc.release(key);
+        return publicRaw(key);
+    }
+
+    pub fn sign(_: std.mem.Allocator, name: []const u8, data: []const u8) ?[64]u8 {
+        const key = find(name);
+        if (key == null) return null;
+        defer objc.release(key);
+        const sig = SecKeyCreateSignature(key, kSecKeyAlgorithmECDSASignatureMessageX962SHA256, nsData(data), null);
+        if (sig == null) return null;
+        defer objc.release(sig);
+        return derToRaw(dataBytes(sig));
+    }
+
+    pub fn ecdh(_: std.mem.Allocator, name: []const u8, peer: []const u8) ?[32]u8 {
+        const key = find(name);
+        if (key == null) return null;
+        defer objc.release(key);
+        const attrs = nsDict(&.{ kSecAttrKeyType, kSecAttrKeyClass, kSecAttrKeySizeInBits }, &.{ kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeyClassPublic, bits256() });
+        const other = SecKeyCreateWithData(nsData(peer), attrs, null);
+        if (other == null) return null;
+        defer objc.release(other);
+        const secret = SecKeyCopyKeyExchangeResult(key, kSecKeyAlgorithmECDHKeyExchangeStandard, other, objc.send(objc.class("NSDictionary"), "dictionary"), null);
+        if (secret == null) return null;
+        defer objc.release(secret);
+        const b = dataBytes(secret);
+        if (b.len != 32) return null;
+        return b[0..32].*;
+    }
+
+    pub fn delete(name: []const u8) void {
+        _ = SecItemDelete(nsDict(&.{ kSecClass, kSecAttrApplicationTag }, &.{ kSecClassKey, tag(name) }));
+    }
+};
+
+/// A DER ECDSA signature (SEQUENCE { INTEGER r, INTEGER s }) as r||s.
+fn derToRaw(der: []const u8) ?[64]u8 {
+    var out: [64]u8 = @splat(0);
+    if (der.len < 8 or der[0] != 0x30) return null;
+    var i: usize = 2;
+    for (0..2) |k| {
+        if (i + 2 > der.len or der[i] != 0x02) return null;
+        const len = der[i + 1];
+        if (i + 2 + len > der.len) return null;
+        var v = der[i + 2 .. i + 2 + len];
+        while (v.len > 32 and v[0] == 0) v = v[1..];
+        if (v.len > 32) return null;
+        @memcpy(out[k * 32 + 32 - v.len .. k * 32 + 32], v);
+        i += 2 + len;
+    }
+    return out;
+}
+
+test derToRaw {
+    const der = [_]u8{ 0x30, 0x08, 0x02, 0x02, 0x00, 0x81, 0x02, 0x02, 0x01, 0x02 };
+    const raw = derToRaw(&der).?;
+    try std.testing.expectEqual(@as(u8, 0x81), raw[31]);
+    try std.testing.expectEqual(@as(u8, 0x02), raw[63]);
+    try std.testing.expectEqual(@as(u8, 0x01), raw[62]);
+}
