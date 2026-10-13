@@ -525,4 +525,165 @@ final class ZuiDevice {
             }
         }).start();
     }
+
+    // ---- Secure keys in the AndroidKeyStore (zui/keys.zig's hardware hook) ----
+    // EC P-256 keys for signing (and, from Android 12, key agreement) live in the Keystore,
+    // in the phone's secure hardware where it has one. An imported key needs a certificate: a
+    // self-signed one is made here (the Keystore only stores it).
+
+    static final int KIND_ECDH = 1, KIND_ECDSA = 2;
+
+    static boolean keysSupported(int kind) {
+        return kind == KIND_ECDSA || (kind == KIND_ECDH && Build.VERSION.SDK_INT >= 31);
+    }
+
+    static int purposes(int kind) {
+        return kind == KIND_ECDSA ? android.security.keystore.KeyProperties.PURPOSE_SIGN : 64 /* PURPOSE_AGREE_KEY, API 31 */;
+    }
+
+    static java.security.KeyStore keystore() throws Exception {
+        java.security.KeyStore ks = java.security.KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        return ks;
+    }
+
+    /** The uncompressed point of a P-256 public key. */
+    static byte[] rawPublic(java.security.PublicKey key) {
+        java.security.spec.ECPoint w = ((java.security.interfaces.ECPublicKey) key).getW();
+        byte[] out = new byte[65];
+        out[0] = 4;
+        fixed(w.getAffineX(), out, 1);
+        fixed(w.getAffineY(), out, 33);
+        return out;
+    }
+
+    static void fixed(java.math.BigInteger v, byte[] out, int at) {
+        byte[] b = v.toByteArray();
+        int n = Math.min(b.length, 32);
+        System.arraycopy(b, b.length - n, out, at + 32 - n, n);
+    }
+
+    static final byte[] SPKI_HEAD = {0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00};
+
+    static java.security.PublicKey publicFromRaw(byte[] raw) throws Exception {
+        byte[] spki = new byte[SPKI_HEAD.length + raw.length];
+        System.arraycopy(SPKI_HEAD, 0, spki, 0, SPKI_HEAD.length);
+        System.arraycopy(raw, 0, spki, SPKI_HEAD.length, raw.length);
+        return java.security.KeyFactory.getInstance("EC").generatePublic(new java.security.spec.X509EncodedKeySpec(spki));
+    }
+
+    /** DER: a tag and its contents. */
+    static byte[] der(int tag, byte[]... parts) {
+        java.io.ByteArrayOutputStream body = new java.io.ByteArrayOutputStream();
+        for (byte[] p : parts) body.write(p, 0, p.length);
+        int n = body.size();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        out.write(tag);
+        if (n < 128) out.write(n);
+        else if (n < 256) { out.write(0x81); out.write(n); }
+        else { out.write(0x82); out.write(n >> 8); out.write(n & 0xff); }
+        byte[] b = body.toByteArray();
+        out.write(b, 0, b.length);
+        return out.toByteArray();
+    }
+
+    static byte[] bytes(int... v) {
+        byte[] out = new byte[v.length];
+        for (int i = 0; i < v.length; i++) out[i] = (byte) v[i];
+        return out;
+    }
+
+    /** A self-signed certificate for an imported key (CN=zui, 2025 to 2049). */
+    static java.security.cert.Certificate selfSigned(java.security.PrivateKey priv, byte[] rawPublic) throws Exception {
+        byte[] alg = der(0x30, bytes(0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02));
+        byte[] name = der(0x30, der(0x31, der(0x30, bytes(0x06, 0x03, 0x55, 0x04, 0x03), der(0x0c, "zui".getBytes("UTF-8")))));
+        byte[] validity = der(0x30, der(0x17, "250101000000Z".getBytes("US-ASCII")), der(0x17, "491231235959Z".getBytes("US-ASCII")));
+        byte[] spki = new byte[SPKI_HEAD.length + 65];
+        System.arraycopy(SPKI_HEAD, 0, spki, 0, SPKI_HEAD.length);
+        System.arraycopy(rawPublic, 0, spki, SPKI_HEAD.length, 65);
+        byte[] tbs = der(0x30, der(0xa0, bytes(0x02, 0x01, 0x02)), bytes(0x02, 0x01, 0x01), alg, name, validity, name, spki);
+        java.security.Signature s = java.security.Signature.getInstance("SHA256withECDSA");
+        s.initSign(priv);
+        s.update(tbs);
+        byte[] sig = s.sign();
+        byte[] bits = new byte[sig.length + 1];
+        System.arraycopy(sig, 0, bits, 1, sig.length);
+        byte[] cert = der(0x30, tbs, alg, der(0x03, bits));
+        return java.security.cert.CertificateFactory.getInstance("X.509").generateCertificate(new java.io.ByteArrayInputStream(cert));
+    }
+
+    /** Imports a PKCS#8 P-256 key as `alias`, usable only inside the Keystore; its public key, or null. */
+    static byte[] keyImport(String alias, int kind, byte[] pkcs8, byte[] rawPublic) {
+        if (!keysSupported(kind)) return null;
+        try {
+            java.security.PrivateKey priv = java.security.KeyFactory.getInstance("EC").generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(pkcs8));
+            java.security.cert.Certificate cert = selfSigned(priv, rawPublic);
+            android.security.keystore.KeyProtection.Builder p = new android.security.keystore.KeyProtection.Builder(purposes(kind));
+            if (kind == KIND_ECDSA) p.setDigests(android.security.keystore.KeyProperties.DIGEST_SHA256);
+            keystore().setEntry(alias, new java.security.KeyStore.PrivateKeyEntry(priv, new java.security.cert.Certificate[] {cert}), p.build());
+            return rawPublic;
+        } catch (Exception e) {
+            android.util.Log.e("zui", "keystore import: " + e);
+            return null;
+        }
+    }
+
+    /** A new key made inside the Keystore; its public key, or null. */
+    static byte[] keyGenerate(String alias, int kind) {
+        if (!keysSupported(kind)) return null;
+        try {
+            java.security.KeyPairGenerator g = java.security.KeyPairGenerator.getInstance("EC", "AndroidKeyStore");
+            android.security.keystore.KeyGenParameterSpec.Builder b = new android.security.keystore.KeyGenParameterSpec.Builder(alias, purposes(kind))
+                    .setAlgorithmParameterSpec(new java.security.spec.ECGenParameterSpec("secp256r1"));
+            if (kind == KIND_ECDSA) b.setDigests(android.security.keystore.KeyProperties.DIGEST_SHA256);
+            g.initialize(b.build());
+            return rawPublic(g.generateKeyPair().getPublic());
+        } catch (Exception e) {
+            android.util.Log.e("zui", "keystore generate: " + e);
+            return null;
+        }
+    }
+
+    /** ECDSA P-256 SHA-256, as r||s (64 bytes), or null. */
+    static byte[] keySign(String alias, byte[] data) {
+        try {
+            java.security.Signature s = java.security.Signature.getInstance("SHA256withECDSA");
+            s.initSign((java.security.PrivateKey) keystore().getKey(alias, null));
+            s.update(data);
+            byte[] d = s.sign();
+            // DER SEQUENCE { INTEGER r, INTEGER s } -> r||s
+            int i = 2 + (d[1] == (byte) 0x81 ? 1 : 0);
+            byte[] out = new byte[64];
+            for (int k = 0; k < 2; k++) {
+                int len = d[i + 1];
+                byte[] v = java.util.Arrays.copyOfRange(d, i + 2, i + 2 + len);
+                fixed(new java.math.BigInteger(1, v), out, k * 32);
+                i += 2 + len;
+            }
+            return out;
+        } catch (Exception e) {
+            android.util.Log.e("zui", "keystore sign: " + e);
+            return null;
+        }
+    }
+
+    /** The ECDH shared secret (32 bytes) with a raw public key, or null. */
+    static byte[] keyEcdh(String alias, byte[] peer) {
+        try {
+            javax.crypto.KeyAgreement ka = javax.crypto.KeyAgreement.getInstance("ECDH", "AndroidKeyStore");
+            ka.init((java.security.PrivateKey) keystore().getKey(alias, null));
+            ka.doPhase(publicFromRaw(peer), true);
+            return ka.generateSecret();
+        } catch (Exception e) {
+            android.util.Log.e("zui", "keystore ecdh: " + e);
+            return null;
+        }
+    }
+
+    static void keyDelete(String alias) {
+        try {
+            keystore().deleteEntry(alias);
+        } catch (Exception ignored) {
+        }
+    }
 }

@@ -65,6 +65,11 @@ var device: struct {
     keep_awake: jni.jmethodID,
     vibrate: jni.jmethodID,
     beep: jni.jmethodID,
+    key_import: jni.jmethodID,
+    key_generate: jni.jmethodID,
+    key_sign: jni.jmethodID,
+    key_ecdh: jni.jmethodID,
+    key_delete: jni.jmethodID,
     input_type: jni.jmethodID,
     pick: jni.jmethodID,
     pick_photo: jni.jmethodID,
@@ -84,6 +89,11 @@ fn bindDevice(e: *jni.Env) void {
         .{ "keep_awake", "keepAwake", "(Z)V" },
         .{ "vibrate", "vibrate", "(I)V" },
         .{ "beep", "beep", "()V" },
+        .{ "key_import", "keyImport", "(Ljava/lang/String;I[B[B)[B" },
+        .{ "key_generate", "keyGenerate", "(Ljava/lang/String;I)[B" },
+        .{ "key_sign", "keySign", "(Ljava/lang/String;[B)[B" },
+        .{ "key_ecdh", "keyEcdh", "(Ljava/lang/String;[B)[B" },
+        .{ "key_delete", "keyDelete", "(Ljava/lang/String;)V" },
         .{ "input_type", "inputType", "(IIIZ)V" },
         .{ "pick_photo", "pickPhoto", "(ZII)V" },
         .{ "pick_file", "pickFile", "(Ljava/lang/String;)V" },
@@ -983,3 +993,83 @@ fn exportStyle(comptime R: type) void {
     @export(&Entry.spanPress, .{ .name = "Java_com_wufour_zui_ZuiStyle_nativeSpan" });
     @export(&Entry.scroll, .{ .name = "Java_com_wufour_zui_ZuiStyle_nativeScroll" });
 }
+// ---- Secure keys: the AndroidKeyStore (zui/keys.zig's hardware hook) ----
+// EC keys go into the Keystore: signing everywhere, key agreement from Android 12. Where it says
+// no, zui's engine keeps the key (encrypted at rest with a Keystore AES key).
+
+fn byteArray(bytes: []const u8) jni.jobject {
+    const f = env.functions;
+    const arr = f.NewByteArray(env, @intCast(bytes.len));
+    if (bytes.len > 0) f.SetByteArrayRegion(env, arr, 0, @intCast(bytes.len), bytes.ptr);
+    return arr;
+}
+
+/// A byte[] answer of exactly N bytes, or null.
+fn callBytes(comptime N: usize, method: jni.jmethodID, args: []const jni.jvalue) ?[N]u8 {
+    const f = env.functions;
+    const r = f.CallStaticObjectMethodA(env, device_class, method, args.ptr);
+    check();
+    if (r == null) return null;
+    defer f.DeleteLocalRef(env, r);
+    if (f.GetArrayLength(env, r) != N) return null;
+    var out: [N]u8 = undefined;
+    f.GetByteArrayRegion(env, r, 0, N, &out);
+    return out;
+}
+
+fn alias(name: []const u8) jni.jstring {
+    var buf: [300]u8 = undefined;
+    return newString(std.fmt.bufPrint(&buf, "zui:{s}", .{name}) catch name);
+}
+
+pub const KeyHw = struct {
+    const pkcs8_head = [_]u8{ 0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20 };
+    const pkcs8_mid = [_]u8{ 0xa1, 0x44, 0x03, 0x42, 0x00 };
+
+    pub fn import(_: std.mem.Allocator, name: []const u8, kind: zui.keys.Kind, secret: [32]u8, public: [65]u8) bool {
+        var der: [138]u8 = undefined;
+        @memcpy(der[0..36], &pkcs8_head);
+        @memcpy(der[36..68], &secret);
+        @memcpy(der[68..73], &pkcs8_mid);
+        @memcpy(der[73..138], &public);
+        defer std.crypto.secureZero(u8, &der);
+        const f = env.functions;
+        const ja = alias(name);
+        defer f.DeleteLocalRef(env, ja);
+        const jd = byteArray(&der);
+        defer f.DeleteLocalRef(env, jd);
+        const jp = byteArray(&public);
+        defer f.DeleteLocalRef(env, jp);
+        return callBytes(65, device.key_import, &.{ object(ja), int(@intFromEnum(kind)), object(jd), object(jp) }) != null;
+    }
+
+    pub fn generate(_: std.mem.Allocator, name: []const u8, kind: zui.keys.Kind) ?[65]u8 {
+        const ja = alias(name);
+        defer env.functions.DeleteLocalRef(env, ja);
+        return callBytes(65, device.key_generate, &.{ object(ja), int(@intFromEnum(kind)) });
+    }
+
+    pub fn sign(_: std.mem.Allocator, name: []const u8, data: []const u8) ?[64]u8 {
+        const f = env.functions;
+        const ja = alias(name);
+        defer f.DeleteLocalRef(env, ja);
+        const jd = byteArray(data);
+        defer f.DeleteLocalRef(env, jd);
+        return callBytes(64, device.key_sign, &.{ object(ja), object(jd) });
+    }
+
+    pub fn ecdh(_: std.mem.Allocator, name: []const u8, peer: []const u8) ?[32]u8 {
+        const f = env.functions;
+        const ja = alias(name);
+        defer f.DeleteLocalRef(env, ja);
+        const jp = byteArray(peer);
+        defer f.DeleteLocalRef(env, jp);
+        return callBytes(32, device.key_ecdh, &.{ object(ja), object(jp) });
+    }
+
+    pub fn delete(name: []const u8) void {
+        const ja = alias(name);
+        defer env.functions.DeleteLocalRef(env, ja);
+        callDevice(device.key_delete, &.{object(ja)});
+    }
+};
