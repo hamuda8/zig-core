@@ -2474,6 +2474,8 @@ fn alphaOf(v: id) CGFloat {
 }
 
 fn styleBox(i: u32, b: zui.Box, old_alpha: CGFloat) void {
+    // A rounded picture is cut round, as CSS cuts it.
+    if (b.radius > 0 and objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) bool)(view(i), objc.sel("isKindOfClass:"), objc.class("UIImageView"))) objc.sendVoidBool(view(i), "setClipsToBounds:", true);
     if (b.isSimple()) {
         if (decors.fetchRemove(i)) |e| if (e.value.layer != null) {
             objc.sendVoid(e.value.layer, "removeFromSuperlayer");
@@ -2553,6 +2555,8 @@ fn applyDecor(i: u32, r: zui.Rect) void {
     const e = decors.getPtr(i) orelse return;
     const d = e.decor;
     const v = view(i);
+    // Text draws in its own layer: sublayers would cover it, so its box is its background.
+    if (isText(v)) return decorText(v, e.*, r);
     const set_rect = objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void);
     const set_ptr = objc.msgSend(*const fn (id, objc.SEL, ?*anyopaque) callconv(.c) void);
     if (e.layer == null) {
@@ -2586,13 +2590,15 @@ fn applyDecor(i: u32, r: zui.Rect) void {
         const g = objc.new("CAGradientLayer");
         defer objc.release(g);
         set_rect(g, objc.sel("setFrame:"), .{ .w = w, .h = h });
-        var cols: [zui.Gradient.max_stops]id = undefined;
-        var locs: [zui.Gradient.max_stops]id = undefined;
-        const n: usize = d.gradient_count;
+        var cols: [64]id = undefined;
+        var locs: [64]id = undefined;
+        var stop_colors: [64]u32 = undefined;
+        var stop_at: [64]f32 = undefined;
+        const n = d.blendedStops(&stop_colors, &stop_at);
         const num = objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) id);
         for (0..n) |k| {
-            cols[k] = objc.send(color(d.gradient_colors[k]), "CGColor");
-            locs[k] = num(objc.class("NSNumber"), objc.sel("numberWithDouble:"), d.gradient_at[k]);
+            cols[k] = objc.send(color(stop_colors[k]), "CGColor");
+            locs[k] = num(objc.class("NSNumber"), objc.sel("numberWithDouble:"), stop_at[k]);
         }
         const array = objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id);
         objc.sendVoid1(g, "setColors:", array(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &cols, n));
@@ -2653,5 +2659,129 @@ fn applyDecor(i: u32, r: zui.Rect) void {
             objc.sendVoid1(side, "setMask:", mask);
             objc.sendVoid1(root_layer, "addSublayer:", side);
         }
+    }
+}
+
+// ---- A text view's box: drawn with Core Graphics into an image that is its background (under
+// its text), with the shadow on its own layer ----
+
+const CGContext = ?*anyopaque;
+extern "UIKit" fn UIGraphicsGetCurrentContext() CGContext;
+extern "CoreGraphics" fn CGContextSaveGState(c: CGContext) void;
+extern "CoreGraphics" fn CGContextRestoreGState(c: CGContext) void;
+extern "CoreGraphics" fn CGContextAddPath(c: CGContext, p: CGPath) void;
+extern "CoreGraphics" fn CGContextFillPath(c: CGContext) void;
+extern "CoreGraphics" fn CGContextClip(c: CGContext) void;
+extern "CoreGraphics" fn CGContextEOClip(c: CGContext) void;
+extern "CoreGraphics" fn CGContextSetFillColorWithColor(c: CGContext, color: ?*anyopaque) void;
+extern "CoreGraphics" fn CGContextFillRect(c: CGContext, r: objc.CGRect) void;
+extern "CoreGraphics" fn CGContextDrawLinearGradient(c: CGContext, g: ?*anyopaque, start: objc.CGPoint, end: objc.CGPoint, options: u32) void;
+extern "CoreGraphics" fn CGColorSpaceCreateDeviceRGB() ?*anyopaque;
+extern "CoreGraphics" fn CGColorSpaceRelease(s: ?*anyopaque) void;
+extern "CoreGraphics" fn CGGradientCreateWithColors(space: ?*anyopaque, colors: id, locations: [*]const CGFloat) ?*anyopaque;
+extern "CoreGraphics" fn CGGradientRelease(g: ?*anyopaque) void;
+
+fn isText(v: id) bool {
+    const kind = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) bool);
+    return kind(v, objc.sel("isKindOfClass:"), objc.class("UILabel")) or kind(v, objc.sel("isKindOfClass:"), objc.class("UITextView"));
+}
+
+fn cgColor(argb: u32) ?*anyopaque {
+    return @ptrCast(objc.send(color(argb), "CGColor"));
+}
+
+fn decorText(v: id, e: DecorEntry, r: zui.Rect) void {
+    const d = e.decor;
+    const w: CGFloat = r.w;
+    const h: CGFloat = r.h;
+    const layer = objc.send(v, "layer");
+    objc.sendVoidFloat(layer, "setCornerRadius:", 0);
+    if (w <= 0 or h <= 0) return;
+    const radii = [4]CGFloat{ d.radii[0], d.radii[1], d.radii[2], d.radii[3] };
+    const outer = roundedPath(0, 0, w, h, radii);
+    defer CGPathRelease(outer);
+
+    UIGraphicsBeginImageContextWithOptions(.{ .w = w, .h = h }, false, 0);
+    const c = UIGraphicsGetCurrentContext();
+    if (e.background >> 24 != 0) {
+        CGContextSetFillColorWithColor(c, cgColor(e.background));
+        CGContextAddPath(c, outer);
+        CGContextFillPath(c);
+    }
+    if (d.gradient_count > 0) {
+        var stop_colors: [64]u32 = undefined;
+        var stop_at: [64]f32 = undefined;
+        const n = d.blendedStops(&stop_colors, &stop_at);
+        var cols: [64]id = undefined;
+        var locs: [64]CGFloat = undefined;
+        for (0..n) |k| {
+            cols[k] = objc.send(color(stop_colors[k]), "CGColor");
+            locs[k] = stop_at[k];
+        }
+        const array = objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id)(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &cols, n);
+        const space = CGColorSpaceCreateDeviceRGB();
+        defer CGColorSpaceRelease(space);
+        const g = CGGradientCreateWithColors(space, array, &locs);
+        defer CGGradientRelease(g);
+        // The CSS gradient line through the centre.
+        const ang = std.math.degreesToRadians(@as(f64, d.gradient_angle));
+        const dx = @sin(ang);
+        const dy = -@cos(ang);
+        const len = @abs(w * dx) + @abs(h * dy);
+        CGContextSaveGState(c);
+        CGContextAddPath(c, outer);
+        CGContextClip(c);
+        CGContextDrawLinearGradient(c, g, .{ .x = w / 2 - dx * len / 2, .y = h / 2 - dy * len / 2 }, .{ .x = w / 2 + dx * len / 2, .y = h / 2 + dy * len / 2 }, 3);
+        CGContextRestoreGState(c);
+    }
+    const bw = d.border_widths;
+    const t: CGFloat = bw[0];
+    const rw: CGFloat = bw[1];
+    const bt: CGFloat = bw[2];
+    const l: CGFloat = bw[3];
+    if (t > 0 or rw > 0 or bt > 0 or l > 0) {
+        const inner_r = [4]CGFloat{ @max(0, radii[0] - @max(l, t)), @max(0, radii[1] - @max(rw, t)), @max(0, radii[2] - @max(rw, bt)), @max(0, radii[3] - @max(l, bt)) };
+        const outer_c = [4][2]CGFloat{ .{ 0, 0 }, .{ w, 0 }, .{ w, h }, .{ 0, h } };
+        const inner_c = [4][2]CGFloat{ .{ l, t }, .{ w - rw, t }, .{ w - rw, h - bt }, .{ l, h - bt } };
+        const inner = if (w - l - rw > 0 and h - t - bt > 0) roundedPath(l, t, w - l - rw, h - t - bt, inner_r) else null;
+        defer if (inner != null) CGPathRelease(inner);
+        for (0..4) |s| {
+            if (bw[s] <= 0 or d.border_colors[s] >> 24 == 0) continue;
+            const a = s;
+            const b2 = (s + 1) % 4;
+            CGContextSaveGState(c);
+            // The side's part, cut along the diagonals between its outer and inner corners.
+            const q = CGPathCreateMutable();
+            defer CGPathRelease(q);
+            CGPathMoveToPoint(q, null, outer_c[a][0] + (outer_c[a][0] - inner_c[a][0]) * 100, outer_c[a][1] + (outer_c[a][1] - inner_c[a][1]) * 100);
+            CGPathAddLineToPoint(q, null, outer_c[b2][0] + (outer_c[b2][0] - inner_c[b2][0]) * 100, outer_c[b2][1] + (outer_c[b2][1] - inner_c[b2][1]) * 100);
+            CGPathAddLineToPoint(q, null, inner_c[b2][0], inner_c[b2][1]);
+            CGPathAddLineToPoint(q, null, inner_c[a][0], inner_c[a][1]);
+            CGPathCloseSubpath(q);
+            CGContextAddPath(c, q);
+            CGContextClip(c);
+            // The ring between the box and its inside.
+            CGContextAddPath(c, outer);
+            if (inner != null) CGContextAddPath(c, inner);
+            CGContextEOClip(c);
+            CGContextSetFillColorWithColor(c, cgColor(d.border_colors[s]));
+            CGContextFillRect(c, .{ .w = w, .h = h });
+            CGContextRestoreGState(c);
+        }
+    }
+    const img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    if (img != null) objc.sendVoid1(v, "setBackgroundColor:", objc.send1(objc.class("UIColor"), "colorWithPatternImage:", img));
+
+    const set_ptr = objc.msgSend(*const fn (id, objc.SEL, ?*anyopaque) callconv(.c) void);
+    if (d.shadow_color >> 24 != 0) {
+        // With a shadow path the text casts no shadow; only the box does.
+        set_ptr(layer, objc.sel("setShadowPath:"), outer);
+        set_ptr(layer, objc.sel("setShadowColor:"), cgColor(d.shadow_color | 0xff000000));
+        objc.msgSend(*const fn (id, objc.SEL, f32) callconv(.c) void)(layer, objc.sel("setShadowOpacity:"), @as(f32, @floatFromInt(d.shadow_color >> 24)) / 255);
+        objc.msgSend(*const fn (id, objc.SEL, objc.CGSize) callconv(.c) void)(layer, objc.sel("setShadowOffset:"), .{ .w = d.shadow[0], .h = d.shadow[1] });
+        objc.sendVoidFloat(layer, "setShadowRadius:", d.shadow[2] / 2);
+    } else {
+        objc.msgSend(*const fn (id, objc.SEL, f32) callconv(.c) void)(layer, objc.sel("setShadowOpacity:"), 0);
     }
 }
