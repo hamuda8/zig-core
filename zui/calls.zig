@@ -80,7 +80,9 @@ pub fn Native(comptime M: type, comptime E: type, comptime R: type) type {
     comptime checkEngine(E);
     comptime checkMedia(M);
     return struct {
-        const gpa = std.heap.smp_allocator;
+        // libc malloc on the phones: thread-safe, and (unlike smp_allocator) free of std.debug
+        // paths that do not compile for iOS.
+        const gpa = @import("zui.zig").allocator;
 
         const PeerCtx = struct {
             id: u32,
@@ -362,7 +364,7 @@ const FakeEngine = struct {
     }
     pub fn requestKeyframe(_: *Peer) void {}
     pub fn close(p: *Peer) void {
-        std.heap.smp_allocator.destroy(p);
+        @import("zui.zig").allocator.destroy(p);
         last = null;
     }
 };

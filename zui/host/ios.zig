@@ -21,6 +21,16 @@ const editing_began: usize = 1 << 16;
 const editing_ended: usize = 1 << 18;
 const editing_return: usize = 1 << 19;
 
+/// Calls: camera, VideoToolbox, AVSampleBufferDisplayLayer, VoiceProcessingIO, Opus through
+/// AudioConverter. Used when the app supplies a call engine (`pub const rtc`, zui/calls.zig).
+pub const Media = @import("../media/ios.zig");
+var calls_enabled = false;
+
+/// A video view shows a stream: the camera preview, or a remote picture.
+pub fn video(i: u32, v: zui.Video) void {
+    if (calls_enabled) Media.bindView(i, view(i), v);
+}
+
 /// The runtime's entry points, for callbacks that arrive from C (GCD, NSURLSession, ...).
 var rt: struct {
     fetch_done: *const fn (u32, u16, []const u8) void,
@@ -155,8 +165,10 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
             objc.sendVoid1(objc.send(pv, "layer"), "setFillColor:", null);
             break :blk pv;
         },
-        // Calls on iOS arrive with reseal-rtc; until then a video is an empty box.
-        .view, .video => objc.new("ZuiView"),
+        .view => objc.new("ZuiView"),
+        // With a call engine (App.rtc) a video view hosts the camera preview or a remote
+        // picture; without one it is an empty box.
+        .video => if (calls_enabled) Media.createView() else objc.new("ZuiView"),
         .text => blk: {
             const l = objc.new("UILabel");
             objc.sendVoidInt(l, "setNumberOfLines:", 0);
@@ -186,6 +198,7 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
 }
 
 pub fn destroy(i: u32) void {
+    if (calls_enabled) Media.unbindView(i);
     const v = view(i);
     objc.sendVoid(v, "removeFromSuperview");
     objc.release(v);
@@ -302,6 +315,11 @@ pub fn exportEntry(comptime App: type) void {
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
             rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent };
+            if (@hasDecl(App, "rtc")) {
+                Media.defineClasses();
+                Media.setPump(&R.callsPump);
+                calls_enabled = true;
+            }
             objc.defineClass("ZuiNotifications", "NSObject", &.{"UNUserNotificationCenterDelegate"}, &.{
                 .{ "userNotificationCenter:willPresentNotification:withCompletionHandler:", @ptrCast(&willPresent), "v@:@@@?" },
             });

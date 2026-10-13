@@ -141,7 +141,7 @@ const Mutex = struct {
     }
 };
 
-const gpa = std.heap.smp_allocator;
+const gpa = zui.allocator;
 const frame_samples = 960; // 20 ms at 48 kHz
 const width = 640;
 const height = 480;
