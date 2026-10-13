@@ -509,7 +509,7 @@ pub fn exportEntry(comptime App: type) void {
             var mime_buf: [128]u8 = undefined;
             R.fileDone(buf, javaString(name, &name_buf), javaString(mime, &mime_buf), @intCast(@max(0, w)), @intCast(@max(0, h)));
         }
-        fn recordEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint, level: f32, duration_ms: jni.jint, data: jni.jobject, mime: jni.jstring) callconv(.c) void {
+        fn recordEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint, level_permille: jni.jint, duration_ms: jni.jint, data: jni.jobject, mime: jni.jstring) callconv(.c) void {
             bind(e);
             const f = e.functions;
             const k = std.enums.fromInt(zui.RecordEvent.Kind, @as(u8, @intCast(kind))) orelse return;
@@ -518,7 +518,7 @@ pub fn exportEntry(comptime App: type) void {
             defer zui.allocator.free(buf);
             if (n > 0) f.GetByteArrayRegion(e, data, 0, @intCast(n), buf.ptr);
             var mime_buf: [64]u8 = undefined;
-            R.recordEvent(@bitCast(id), k, level, @intCast(@max(0, duration_ms)), buf, if (mime != null) javaString(mime, &mime_buf) else "");
+            R.recordEvent(@bitCast(id), k, @as(f32, @floatFromInt(@max(0, level_permille))) / 1000, @intCast(@max(0, duration_ms)), buf, if (mime != null) javaString(mime, &mime_buf) else "");
         }
         fn playEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint, position_ms: jni.jint, duration_ms: jni.jint, reason: jni.jstring) callconv(.c) void {
             bind(e);

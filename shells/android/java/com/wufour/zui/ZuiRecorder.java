@@ -18,7 +18,7 @@ final class ZuiRecorder {
     static final int WIDTH = 640, HEIGHT = 480;
 
     /** data: the file for DONE, the reason (UTF-8) for FAILED. */
-    static native void nativeRecordEvent(int id, int kind, float level, int durationMs, byte[] data, String mime);
+    static native void nativeRecordEvent(int id, int kind, int levelPermille, int durationMs, byte[] data, String mime);
 
     static final class Rec {
         int id;
@@ -104,7 +104,7 @@ final class ZuiRecorder {
                     level = (float) Math.sqrt(Math.min(1.0, r.recorder.getMaxAmplitude() / 32767.0));
                 } catch (Exception ignored) {
                 }
-                nativeRecordEvent(r.id, LEVEL, level, elapsed(r), null, "");
+                nativeRecordEvent(r.id, LEVEL, Math.round(level * 1000), elapsed(r), null, "");
                 Zui.main.postDelayed(this, 100);
             }
         };
