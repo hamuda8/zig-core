@@ -152,7 +152,7 @@ pub fn buildMessage(io: Io, a: Allocator, from: []const u8, m: Mail, now_ms: i64
         }
     }.f;
     return std.fmt.allocPrint(a, "From: {s}\r\nTo: {s}\r\nSubject: {s}\r\nDate: {s}\r\nMessage-ID: <{s}@{s}>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"{s}\"\r\n\r\n{s}\r\n{s}\r\n--{s}--\r\n", .{
-        try formatFrom(a, from),                     m.to, try encodeHeader(a, m.subject), try httpDate(a, now_ms), try randomHex(io, a, 16), domain, boundary,
+        try formatFrom(a, from),                     m.to,                                                     try encodeHeader(a, m.subject), try httpDate(a, now_ms), try randomHex(io, a, 16), domain, boundary,
         try part(a, boundary, "text/plain", m.text), try part(a, boundary, "text/html", m.html orelse m.text), boundary,
     });
 }

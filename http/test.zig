@@ -389,6 +389,8 @@ test "ranges, HEAD and short bodies" {
     try expectContains(res, "0123456789");
     a.free(res);
     try testing.expectEqual(http.Range.full, http.parseRange("bytes=1-2,4-5", 10));
+    try testing.expectEqual(http.Range.unsatisfiable, http.parseRange("bytes=-0", 10));
+    try testing.expectEqual(http.Range.unsatisfiable, http.parseRange("bytes=0-", 0));
 }
 
 fn echoSocketLarge(ctx: *http.Context) !void {

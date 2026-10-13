@@ -70,7 +70,8 @@ pub const Val = union(enum) {
             .obj => |o| o.get(key) orelse .undef,
             .arr => |l| if (std.fmt.parseUnsigned(usize, key, 10)) |i|
                 (if (i < l.items.items.len) l.items.items[i] else .undef)
-            else |_| (if (std.mem.eql(u8, key, "length")) numVal(l.items.items.len) else .undef),
+            else |_|
+                (if (std.mem.eql(u8, key, "length")) numVal(l.items.items.len) else .undef),
             else => .undef,
         };
     }
@@ -472,7 +473,9 @@ pub fn from(a: Allocator, x: anytype) error{OutOfMemory}!Val {
         .float, .comptime_float => return .{ .num = @floatCast(x) },
         .null => return .null,
         .optional => return if (x) |y| from(a, y) else .undef,
-        .@"enum", .enum_literal => return .{ .str = @tagName(x) },
+        // `.null` and `.undef` mean the values (`v.set("k", .null)`), other literals their names.
+        .enum_literal => return if (comptime std.mem.eql(u8, @tagName(x), "null")) .null else if (comptime std.mem.eql(u8, @tagName(x), "undef")) .undef else .{ .str = @tagName(x) },
+        .@"enum" => return .{ .str = @tagName(x) },
         .pointer => |p| {
             if (p.size == .one) switch (@typeInfo(p.child)) {
                 .array => |info| {
@@ -1365,6 +1368,9 @@ test "JSON round trip keeps key order, numbers and leaves undefined out" {
     const v = try parseJson(a, "{\"b\":1,\"a\":[1.5,\"x\\n\",null,true],\"c\":{\"d\":1e21}}");
     try v.set("e", @as(?u8, null));
     try v.set("u", Val.undef);
+    try v.set("n", .null);
+    try testing.expect(v.get("n") == .null);
+    v.del("n");
     try v.set("b", 2);
     try v.set("f", Date{ .ms = 0 });
     try testing.expectEqualStrings("{\"b\":2,\"a\":[1.5,\"x\\n\",null,true],\"c\":{\"d\":1e+21},\"f\":\"1970-01-01T00:00:00.000Z\"}", try toJson(a, v));

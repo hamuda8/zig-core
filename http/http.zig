@@ -337,6 +337,7 @@ pub fn parseRange(h: []const u8, total: u64) Range {
     if (total == 0) return .unsatisfiable;
     if (a.len == 0) {
         const n = std.fmt.parseInt(u64, b, 10) catch return .full;
+        if (n == 0) return .unsatisfiable;
         return .{ .partial = .{ .start = total - @min(n, total), .last = total - 1 } };
     }
     const start = std.fmt.parseInt(u64, a, 10) catch return .unsatisfiable;
