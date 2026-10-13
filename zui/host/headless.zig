@@ -234,6 +234,33 @@ pub fn closePeer(_: u32) void {
     peer_open = 0;
 }
 pub fn video(_: u32, _: zui.Video) void {}
+/// Recording and playback: what the app asked for, for tests (a test answers with
+/// R.recordEvent / R.playEvent).
+pub var recording: u32 = 0;
+pub var recording_video = false;
+pub var recording_stopped = false;
+pub var playing: u32 = 0;
+pub var playing_url: std.ArrayList(u8) = .empty;
+pub var playing_bytes: usize = 0;
+pub var playback_controls: std.ArrayList(zui.PlaybackControl) = .empty;
+pub fn startRecording(id: u32, r: zui.Recording) void {
+    recording = id;
+    recording_video = r.video;
+    recording_stopped = false;
+}
+pub fn stopRecording(_: u32, cancel: bool) void {
+    recording_stopped = true;
+    if (cancel) recording = 0;
+}
+pub fn play(id: u32, p: zui.Playback) void {
+    playing = id;
+    playing_url.clearRetainingCapacity();
+    playing_url.appendSlice(gpa, p.url) catch {};
+    playing_bytes = p.data.len;
+}
+pub fn controlPlayback(_: u32, c: zui.PlaybackControl) void {
+    playback_controls.append(gpa, c) catch {};
+}
 pub var ringing: std.ArrayList(u8) = .empty;
 pub fn ringCall(c: zui.Call) void {
     ringing.clearRetainingCapacity();
@@ -948,4 +975,81 @@ test "an app closing its stream while an event is handled" {
     try std.testing.expect(std.mem.indexOf(u8, s.log[0..s.len], "after") == null);
     D.R.streamData(conn, "data: late\n\n"); // an old connection's late bytes are dropped
     try std.testing.expect(std.mem.indexOf(u8, s.log[0..s.len], "late") == null);
+}
+
+const Voice = struct {
+    pub const Msg = union(enum) { record, stop, rec: zui.RecordEvent, play, seek, ev: zui.PlayEvent };
+    pub const State = struct {
+        recorder: u32 = 0,
+        player: u32 = 0,
+        level: f32 = 0,
+        bytes: usize = 0,
+        position: u32 = 0,
+        duration: u32 = 0,
+        ended: bool = false,
+    };
+    pub fn init() State {
+        return .{};
+    }
+    fn onRec(e: zui.RecordEvent) Msg {
+        return .{ .rec = e };
+    }
+    fn onPlay(e: zui.PlayEvent) Msg {
+        return .{ .ev = e };
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .record => s.recorder = fx.startRecording(.{}, onRec),
+            .stop => fx.stopRecording(s.recorder),
+            .rec => |e| switch (e.kind) {
+                .level => s.level = e.level,
+                .done => s.bytes = e.data.len,
+                else => {},
+            },
+            .play => s.player = fx.play(.{ .url = "https://example.com/voice.m4a" }, onPlay),
+            .seek => fx.seekPlayback(s.player, 1500),
+            .ev => |e| switch (e.kind) {
+                .ready => s.duration = e.duration_ms,
+                .progress => s.position = e.position_ms,
+                .ended => s.ended = true,
+                .failed => {},
+            },
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{});
+        ui.begin(.{}, .{ .on_press = .record });
+        ui.text("Record", .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .stop });
+        ui.text("Stop", .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .play });
+        ui.text("Play", .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .seek });
+        ui.text("Seek", .{});
+        ui.end();
+        ui.text(ui.tf("{b} bytes, {p} of {d} ms", .{ .b = s.bytes, .p = s.position, .d = s.duration }), .{});
+        ui.end();
+    }
+};
+
+test "recording a voice message and playing it" {
+    const D = Driver(Voice);
+    D.start(200, 400);
+    defer D.reset();
+    try D.press("Record");
+    try std.testing.expect(recording != 0 and !recording_video);
+    D.R.recordEvent(recording, .level, 0.4, 500, "", "");
+    try D.press("Stop");
+    try std.testing.expect(recording_stopped);
+    D.R.recordEvent(recording, .done, 0, 2000, "m4a bytes", "audio/mp4");
+    try D.press("Play");
+    try std.testing.expectEqualStrings("https://example.com/voice.m4a", playing_url.items);
+    D.R.playEvent(playing, .ready, 0, 2000, "");
+    D.R.playEvent(playing, .progress, 750, 2000, "");
+    try std.testing.expect(D.findText("9 bytes, 750 of 2000 ms") != 0);
+    try D.press("Seek");
+    try std.testing.expectEqual(@as(u32, 1500), playback_controls.items[playback_controls.items.len - 1].seek);
 }

@@ -172,6 +172,61 @@ pub const PeerEvent = struct {
     pub const Kind = enum(u8) { signal = 1, state = 2, track = 3 };
 };
 
+/// A voice message or a short video message, recorded with `fx.startRecording`. Audio is AAC
+/// in MP4 ("audio/mp4", .m4a) and video H.264 + AAC in MP4 ("video/mp4"): what every host can
+/// record and play back without libraries. A browser without MP4 recording falls back to WebM
+/// (`RecordEvent.mime` says which). Show a video recording's camera with `ui.video(recorder)`.
+pub const Recording = struct {
+    /// Video with the camera (front unless `back_camera`); otherwise the microphone only.
+    video: bool = false,
+    back_camera: bool = false,
+    /// Stops by itself (with `.done`) after this long.
+    max_ms: u32 = 120_000,
+};
+
+pub const RecordEvent = struct {
+    kind: Kind,
+    recorder: u32,
+    /// `.level`: the microphone's loudness, 0 to 1, about ten times a second.
+    level: f32 = 0,
+    /// `.level` and `.done`: how long it has recorded.
+    duration_ms: u32 = 0,
+    /// `.done`: the file; `.failed`: "denied", "unavailable" or "unsupported". Only valid
+    /// during `update`.
+    data: []const u8 = "",
+    /// `.done`: "audio/mp4", "video/mp4" (or "audio/webm", "video/webm" on some browsers).
+    mime: []const u8 = "",
+
+    pub const Kind = enum(u8) { started = 1, level = 2, done = 3, failed = 4 };
+};
+
+/// Audio or video to play with `fx.play`: from a URL, or from bytes (copied). Show a video
+/// with `ui.video(player)`.
+pub const Playback = struct {
+    url: []const u8 = "",
+    data: []const u8 = "",
+    /// For `data`: "audio/mp4", "video/mp4", "audio/webm"...
+    mime: []const u8 = "",
+    video: bool = false,
+    autoplay: bool = true,
+    loop: bool = false,
+};
+
+pub const PlayEvent = struct {
+    kind: Kind,
+    player: u32,
+    /// `.ready` and `.progress` (about four times a second while playing).
+    position_ms: u32 = 0,
+    duration_ms: u32 = 0,
+    /// `.failed`: why.
+    data: []const u8 = "",
+
+    pub const Kind = enum(u8) { ready = 1, progress = 2, ended = 3, failed = 4 };
+};
+
+/// What `fx.pausePlayback`, `resumePlayback`, `seekPlayback` and `stopPlayback` ask a host.
+pub const PlaybackControl = union(enum) { pause, play, seek: u32, stop };
+
 /// A call the phone itself shows: the ringing screen over the lock screen, and the call in
 /// Bluetooth, the car and the system's "in call" state. Android: a self-managed ConnectionService
 /// and a full-screen call notification (the app declares com.wufour.zui.ZuiCallService and
@@ -316,6 +371,10 @@ pub fn Fx(comptime Msg: type) type {
             peer_signal: *const fn (u32, []const u8) void,
             peer_stream: *const fn (u32, u32) void,
             close_peer: *const fn (u32) void,
+            start_recording: *const fn (Recording, *const fn (RecordEvent) Msg) u32,
+            stop_recording: *const fn (u32, bool) void,
+            play: *const fn (Playback, *const fn (PlayEvent) Msg) u32,
+            control_playback: *const fn (u32, PlaybackControl) void,
             ring_call: *const fn (Call) void,
             start_call: *const fn (Call) void,
             call_connected: *const fn ([]const u8) void,
@@ -510,6 +569,45 @@ pub fn Fx(comptime Msg: type) type {
 
         pub fn closePeer(fx: Self, peer: u32) void {
             fx.vt.close_peer(peer);
+        }
+
+        /// Starts recording a voice or video message; events (level, done with the file) go to
+        /// `on`. Returns the recorder (for `stopRecording`, and `ui.video` for video).
+        pub fn startRecording(fx: Self, r: Recording, on: *const fn (RecordEvent) Msg) u32 {
+            return fx.vt.start_recording(r, on);
+        }
+
+        /// Finishes: `.done` follows with the file.
+        pub fn stopRecording(fx: Self, recorder: u32) void {
+            fx.vt.stop_recording(recorder, false);
+        }
+
+        /// Stops and throws the recording away (no `.done`).
+        pub fn cancelRecording(fx: Self, recorder: u32) void {
+            fx.vt.stop_recording(recorder, true);
+        }
+
+        /// Plays audio or video; `.ready` (with the duration), `.progress` and `.ended` go to
+        /// `on`. Returns the player (for the controls, and `ui.video` for video).
+        pub fn play(fx: Self, p: Playback, on: *const fn (PlayEvent) Msg) u32 {
+            return fx.vt.play(p, on);
+        }
+
+        pub fn pausePlayback(fx: Self, player: u32) void {
+            fx.vt.control_playback(player, .pause);
+        }
+
+        pub fn resumePlayback(fx: Self, player: u32) void {
+            fx.vt.control_playback(player, .play);
+        }
+
+        pub fn seekPlayback(fx: Self, player: u32, position_ms: u32) void {
+            fx.vt.control_playback(player, .{ .seek = position_ms });
+        }
+
+        /// Stops and releases the player (no more events).
+        pub fn stopPlayback(fx: Self, player: u32) void {
+            fx.vt.control_playback(player, .stop);
         }
 
         /// An incoming call: the phone rings and shows its call screen, even when locked.
@@ -838,6 +936,10 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .peer_signal = fxPeerSignal,
             .peer_stream = fxPeerStream,
             .close_peer = fxClosePeer,
+            .start_recording = fxStartRecording,
+            .stop_recording = fxStopRecording,
+            .play = fxPlay,
+            .control_playback = fxControlPlayback,
             .ring_call = fxRingCall,
             .start_call = fxStartCall,
             .call_connected = fxCallConnected,
@@ -1218,6 +1320,47 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             if (peers.remove(id) and has_calls) C.closePeer(id);
         }
 
+        // Recording and playback (voice and video messages). A host without them answers
+        // "unsupported".
+        const has_recording = @hasDecl(H, "startRecording");
+        const has_playback = @hasDecl(H, "play");
+        var recorders: std.AutoHashMapUnmanaged(u32, *const fn (RecordEvent) Msg) = .empty;
+        var players: std.AutoHashMapUnmanaged(u32, *const fn (PlayEvent) Msg) = .empty;
+
+        fn fxStartRecording(r: Recording, on: *const fn (RecordEvent) Msg) u32 {
+            const id = newId();
+            if (!has_recording) {
+                fxAfter(0, on(.{ .kind = .failed, .recorder = id, .data = "unsupported" }));
+                return id;
+            }
+            recorders.put(gpa, id, on) catch return 0;
+            H.startRecording(id, r);
+            return id;
+        }
+
+        fn fxStopRecording(id: u32, cancel: bool) void {
+            if (!has_recording or !recorders.contains(id)) return;
+            if (cancel) _ = recorders.remove(id);
+            H.stopRecording(id, cancel);
+        }
+
+        fn fxPlay(p: Playback, on: *const fn (PlayEvent) Msg) u32 {
+            const id = newId();
+            if (!has_playback) {
+                fxAfter(0, on(.{ .kind = .failed, .player = id, .data = "unsupported" }));
+                return id;
+            }
+            players.put(gpa, id, on) catch return 0;
+            H.play(id, p);
+            return id;
+        }
+
+        fn fxControlPlayback(id: u32, c: PlaybackControl) void {
+            if (!has_playback or !players.contains(id)) return;
+            if (c == .stop) _ = players.remove(id);
+            H.controlPlayback(id, c);
+        }
+
         fn fxNotify(n: Notification) void {
             H.notify(n);
         }
@@ -1440,6 +1583,18 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         pub fn peerEvent(id: u32, kind: PeerEvent.Kind, data: []const u8, stream: u32) void {
             const on = peers.get(id) orelse return;
             if (started) dispatch(on(.{ .kind = kind, .peer = id, .data = data, .stream = stream }));
+        }
+
+        pub fn recordEvent(id: u32, kind: RecordEvent.Kind, level: f32, duration_ms: u32, data: []const u8, mime: []const u8) void {
+            const on = recorders.get(id) orelse return;
+            if (kind == .done or kind == .failed) _ = recorders.remove(id);
+            if (started) dispatch(on(.{ .kind = kind, .recorder = id, .level = level, .duration_ms = duration_ms, .data = data, .mime = mime }));
+        }
+
+        pub fn playEvent(id: u32, kind: PlayEvent.Kind, position_ms: u32, duration_ms: u32, data: []const u8) void {
+            const on = players.get(id) orelse return;
+            if (kind == .failed) _ = players.remove(id);
+            if (started) dispatch(on(.{ .kind = kind, .player = id, .position_ms = position_ms, .duration_ms = duration_ms, .data = data }));
         }
 
         pub fn callEvent(kind: CallEvent.Kind, id: []const u8) void {
