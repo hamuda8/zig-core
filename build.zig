@@ -108,6 +108,10 @@ pub const AppOptions = struct {
     android_min_sdk: u32 = 26,
     /// Build-time settings for the client, imported as "app_config" (server address, ...).
     client_config: ?*std.Build.Module = null,
+    /// More modules for the client, e.g. a call engine for the phones:
+    /// `.{ .name = "reseal_rtc", .module = b.dependency("reseal_rtc", .{}).module("reseal_rtc") }`.
+    /// They should not fix a target: they build for each platform the client does.
+    client_imports: []const std.Build.Module.Import = &.{},
     /// More wasm modules for the web build (zig-out/web/<name>.wasm), with the client's imports:
     /// e.g. a library that other sites load.
     web_extra: []const WebExtra = &.{},
@@ -122,7 +126,7 @@ pub const AppOptions = struct {
 };
 
 /// The fixed Android shim (shells/android/java/com/wufour/zui). Listed so the APK rebuilds when one changes.
-const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java" };
+const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java" };
 /// zui's Android resources (the widget), listed for the same reason.
 const android_res = [_][]const u8{ "layout/zui_widget.xml", "xml/zui_widget_info.xml", "drawable/zui_widget_bg.xml" };
 
@@ -159,6 +163,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 .imports = &.{ .{ .name = "zui", .module = z }, .{ .name = "map", .module = server_core.module("map") } },
             });
             if (o.client_config) |cfg| m.addImport("app_config", cfg);
+            for (o.client_imports) |imp| m.addImport(imp.name, imp.module);
             return m;
         }
     }.module;
@@ -253,9 +258,9 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 lib.link_z_max_page_size = 16 * 1024;
                 lib.setLibCFile(libc_file);
                 lib.root_module.link_libc = true;
-                // NDK system libraries (liblog now; libandroid, libaaudio, libmediandk later),
-                // passed by path: zig 0.17 on Windows hands lld a broken -l: for them otherwise.
-                for ([_][]const u8{"liblog.so"}) |name| lib.root_module.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ crt_dir, name }) });
+                // NDK system libraries (logging; calls: codecs, audio, surfaces, dlsym), passed by
+                // path: zig 0.17 on Windows hands lld a broken -l: for them otherwise.
+                for ([_][]const u8{ "liblog.so", "libmediandk.so", "libaaudio.so", "libandroid.so", "libdl.so" }) |name| lib.root_module.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ crt_dir, name }) });
                 run.addArg("--lib");
                 run.addPrefixedFileArg(b.fmt("{s}=", .{a.abi}), lib.getEmittedBin());
             }

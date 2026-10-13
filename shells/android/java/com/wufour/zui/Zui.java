@@ -61,7 +61,7 @@ import android.widget.TextView;
  * are logical points (dp); they become pixels here.
  */
 public final class Zui {
-    static final int VIEW = 0, TEXT = 1, INPUT = 2, SCROLL = 3, SCROLL_X = 4, IMAGE = 5, PATH = 6;
+    static final int VIEW = 0, TEXT = 1, INPUT = 2, SCROLL = 3, SCROLL_X = 4, IMAGE = 5, PATH = 6, VIDEO = 7;
     static final int POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4;
 
     /** Images: decoded bitmaps in memory (1/8 of the heap), downloads on four threads. The HTTP
@@ -116,6 +116,8 @@ public final class Zui {
     static native void nativeSocket(int id, int kind, String data);
     /** kind: 1 answer, 2 decline, 3 end. */
     static native void nativeCall(int kind, String id);
+    /** Delivers call events queued by other threads (zui/calls.zig). */
+    static native void nativeCallsPump();
     /** Call events from before the app's Zig side started (answering opened the app). */
     static final java.util.ArrayList<Object[]> pendingCalls = new java.util.ArrayList<>();
 
@@ -221,6 +223,9 @@ public final class Zui {
             case PATH:
                 v = new ZuiPath(activity);
                 break;
+            case VIDEO:
+                v = ZuiMedia.createView(id);
+                break;
             default:
                 v = new ZuiLayout(activity);
         }
@@ -234,6 +239,7 @@ public final class Zui {
         if (v.getParent() instanceof ViewGroup) ((ViewGroup) v.getParent()).removeView(v);
         views.remove(id);
         if (v instanceof ImageView && v.getTag() instanceof String) unwant((String) v.getTag());
+        if (v instanceof android.view.TextureView) ZuiMedia.destroyView(id);
     }
 
     /** The view children of `id` go into: scroll views hold a content box. */
@@ -724,6 +730,11 @@ public final class Zui {
 
     static void cancelNotify(int id) {
         activity.getSystemService(android.app.NotificationManager.class).cancel(id);
+    }
+
+    /** A video view shows stream `stream` (a local camera, or a remote one). */
+    static void video(int id, int stream, boolean mirror, boolean cover) {
+        ZuiMedia.video(id, stream, mirror, cover);
     }
 
     static void ringCall(String id, String name, boolean video) {

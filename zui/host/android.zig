@@ -6,6 +6,10 @@ const std = @import("std");
 const zui = @import("../zui.zig");
 const jni = @import("../platform/jni.zig");
 
+/// Calls: camera, codecs, sound and video views (NDK MediaCodec, AAudio; Camera2 in Java).
+/// Used when the app supplies a call engine (`pub const rtc`, see zui/calls.zig).
+pub const Media = @import("../media/android.zig");
+
 /// The UI thread's JNI environment, refreshed on every call from Java.
 var env: *jni.Env = undefined;
 var class: jni.jclass = null;
@@ -51,7 +55,13 @@ var methods: struct {
     cancel_notify: jni.jmethodID,
     send_socket: jni.jmethodID,
     close_socket: jni.jmethodID,
+    video: jni.jmethodID,
 } = undefined;
+
+/// The UI thread's JNI environment (for the media backend's calls into Java).
+pub fn uiEnv() *jni.Env {
+    return env;
+}
 
 fn bind(e: *jni.Env) void {
     env = e;
@@ -94,6 +104,7 @@ fn bind(e: *jni.Env) void {
         .{ "cancel_notify", "cancelNotify", "(I)V" },
         .{ "send_socket", "sendSocket", "(ILjava/lang/String;)V" },
         .{ "close_socket", "closeSocket", "(I)V" },
+        .{ "video", "video", "(IIZZ)V" },
         .{ "timer", "timer", "(II)V" },
         .{ "location", "location", "(Z)V" },
         .{ "speak", "speak", "(Ljava/lang/String;Ljava/lang/String;)V" },
@@ -312,6 +323,10 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.inputEvent(@bitCast(id), std.enums.fromInt(zui.InputEvent, @as(u8, @intCast(kind))) orelse return);
         }
+        fn callsPump(e: *jni.Env, _: jni.jclass) callconv(.c) void {
+            bind(e);
+            R.callsPump();
+        }
         fn textEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, s: jni.jstring) callconv(.c) void {
             bind(e);
             var buf: [4096]u8 = undefined;
@@ -333,6 +348,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.inputEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeInput" });
     @export(&Entry.socketEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeSocket" });
     @export(&Entry.callEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeCall" });
+    @export(&Entry.callsPump, .{ .name = "Java_com_wufour_zui_Zui_nativeCallsPump" });
 }
 
 extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
@@ -515,6 +531,11 @@ pub fn sendSocket(id: u32, message: []const u8) void {
     defer env.functions.DeleteLocalRef(env, js);
     call(methods.send_socket, &.{ int(id), object(js) });
 }
+/// A video view shows a stream: the camera's preview, or a remote decoder's output.
+pub fn video(id: u32, v: zui.Video) void {
+    call(methods.video, &.{ int(id), int(v.stream), boolean(v.mirror), boolean(v.cover) });
+}
+
 pub fn closeSocket(id: u32) void {
     call(methods.close_socket, &.{int(id)});
 }

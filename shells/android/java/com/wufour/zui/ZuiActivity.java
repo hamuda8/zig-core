@@ -77,6 +77,10 @@ public final class ZuiActivity extends Activity {
 
     @Override
     public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        if (code == ZuiMedia.PERMISSION_REQUEST) {
+            ZuiMedia.permissionResult(permissions, results);
+            return;
+        }
         if (code != Zui.LOCATION_REQUEST) return;
         boolean granted = false;
         for (int r : results) granted |= r == android.content.pm.PackageManager.PERMISSION_GRANTED;
