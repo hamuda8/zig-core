@@ -141,6 +141,37 @@ export async function start(wasm, mount = document.body, options = {}) {
     return { data: new Uint8Array(await blob.arrayBuffer()), w, h };
   };
 
+  // Request headers travel as "name: value\n" lines (fetch, images, event streams).
+  const headerLines = (text) => {
+    const out = {};
+    for (const line of text.split('\n')) {
+      const at = line.indexOf(': ');
+      if (at > 0) out[line.slice(0, at)] = line.slice(at + 2);
+    }
+    return out;
+  };
+  // Pictures that need headers (a Bearer token) are fetched and shown from a blob URL, kept for
+  // the next view that wants the same one (the newest 200).
+  const authImages = new Map();
+  const authImage = (url, headers) => {
+    const key = url + '\n' + headers;
+    let p = authImages.get(key);
+    if (p) { authImages.delete(key); authImages.set(key, p); return p; }
+    p = fetch(url, { headers: headerLines(headers) })
+      .then((r) => (r.ok ? r.blob() : Promise.reject(r.status)))
+      .then((b) => URL.createObjectURL(b));
+    p.catch(() => authImages.delete(key));
+    authImages.set(key, p);
+    if (authImages.size > 200) {
+      const [oldest, op] = authImages.entries().next().value;
+      authImages.delete(oldest);
+      op.then((u) => setTimeout(() => URL.revokeObjectURL(u), 10000), () => {});
+    }
+    return p;
+  };
+  // Event streams: fetch() reads the answer as it arrives (EventSource cannot send headers).
+  const streams = new Map();
+
   // Copies bytes into wasm memory for one call.
   const withBytes = (bytes, fn) => {
     const ptr = ex.zui_alloc(Math.max(1, bytes.length));
@@ -433,10 +464,43 @@ export async function start(wasm, mount = document.body, options = {}) {
           send(POINTER_WHEEL, e, e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY);
         };
       },
-      zui_image(id, ptr, len) {
+      zui_image(id, ptr, len, hptr, hlen) {
         const el = views.get(id);
-        const url = str(ptr, len);
-        if (el.getAttribute('src') !== url) el.src = url;
+        const url = str(ptr, len), headers = str(hptr, hlen);
+        el._want = url + '\n' + headers;
+        if (!headers) {
+          if (el.getAttribute('src') !== url) el.src = url;
+          return;
+        }
+        const want = el._want;
+        el.removeAttribute('src');
+        authImage(url, headers).then((blob) => { if (el._want === want) el.src = blob; }, () => {});
+      },
+      zui_stream_open(id, uptr, ulen, hptr, hlen) {
+        const control = new AbortController();
+        const s = { control, live: true };
+        streams.set(id, s);
+        const end = () => { if (s.live) { s.live = false; streams.delete(id); ex.zui_stream_end(id); } };
+        fetch(str(uptr, ulen), { headers: headerLines(str(hptr, hlen)), cache: 'no-store', signal: control.signal })
+          .then(async (res) => {
+            if (!s.live) return;
+            ex.zui_stream_status(id, res.status);
+            const reader = res.body.getReader();
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done || !s.live) break;
+              withBytes(value, (p, n) => ex.zui_stream_data(id, p, n));
+            }
+            end();
+          })
+          .catch(end);
+      },
+      zui_stream_close(id) {
+        const s = streams.get(id);
+        if (!s) return;
+        s.live = false;
+        streams.delete(id);
+        s.control.abort();
       },
       zui_path(id, ptr, count, color, width, dashOn, dashOff, round, fill) {
         const line = views.get(id)._line;
@@ -466,11 +530,7 @@ export async function start(wasm, mount = document.body, options = {}) {
       },
       zui_fetch(id, mptr, mlen, uptr, ulen, bptr, blen, cptr, clen, hptr, hlen) {
         const method = str(mptr, mlen), url = str(uptr, ulen);
-        const init = { method, headers: {} };
-        for (const line of str(hptr, hlen).split('\n')) {
-          const at = line.indexOf(': ');
-          if (at > 0) init.headers[line.slice(0, at)] = line.slice(at + 2);
-        }
+        const init = { method, headers: headerLines(str(hptr, hlen)) };
         if (blen > 0) {
           init.body = new Uint8Array(memory.buffer, bptr >>> 0, blen).slice();
           init.headers['content-type'] = str(cptr, clen);
@@ -724,6 +784,7 @@ export async function start(wasm, mount = document.body, options = {}) {
       dark.removeEventListener('change', onDark);
       if (watchId !== null) navigator.geolocation?.clearWatch(watchId);
       for (const s of sockets.values()) s.close();
+      for (const s of streams.values()) { s.live = false; s.control.abort(); }
       calls.destroy();
       mount.replaceChildren();
     },

@@ -70,6 +70,8 @@ var device: struct {
     pick_photo: jni.jmethodID,
     pick_file: jni.jmethodID,
     save_file: jni.jmethodID,
+    stream_open: jni.jmethodID,
+    stream_close: jni.jmethodID,
 } = undefined;
 
 fn bindDevice(e: *jni.Env) void {
@@ -86,6 +88,8 @@ fn bindDevice(e: *jni.Env) void {
         .{ "pick_photo", "pickPhoto", "(ZII)V" },
         .{ "pick_file", "pickFile", "(Ljava/lang/String;)V" },
         .{ "save_file", "saveFile", "(Ljava/lang/String;Ljava/lang/String;[BZ)V" },
+        .{ "stream_open", "streamOpen", "(ILjava/lang/String;Ljava/lang/String;)V" },
+        .{ "stream_close", "streamClose", "(I)V" },
         .{ "pick", "pick", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V" },
     }) |m| @field(device, m[0]) = f.GetStaticMethodID(e, device_class, m[1], m[2]);
 }
@@ -130,6 +134,16 @@ pub fn saveFile(name: []const u8, mime: []const u8, data: []const u8, share: boo
     if (data.len > 0) f.SetByteArrayRegion(env, jd, 0, @intCast(data.len), data.ptr);
     callDevice(device.save_file, &.{ object(jn), object(jm), object(jd), boolean(share) });
 }
+pub fn streamOpen(id: u32, url: []const u8, headers: []const u8) void {
+    const ju = newString(url);
+    defer env.functions.DeleteLocalRef(env, ju);
+    const jh = newString(headers);
+    defer env.functions.DeleteLocalRef(env, jh);
+    callDevice(device.stream_open, &.{ int(id), object(ju), object(jh) });
+}
+pub fn streamClose(id: u32) void {
+    callDevice(device.stream_close, &.{int(id)});
+}
 pub fn inputType(id: u32, t: zui.InputType) void {
     callDevice(device.input_type, &.{ int(id), int(@intFromEnum(t.keyboard)), int(@intFromEnum(t.return_key)), boolean(t.secure) });
 }
@@ -169,7 +183,7 @@ fn bind(e: *jni.Env) void {
         .{ "transform", "transform", "(IFFFZFF)V" },
         .{ "clip", "clip", "(IZ)V" },
         .{ "pointer", "pointer", "(IZ)V" },
-        .{ "image", "image", "(ILjava/lang/String;)V" },
+        .{ "image", "image", "(ILjava/lang/String;Ljava/lang/String;)V" },
         .{ "path", "path", "(I[FIFFFZI)V" },
         .{ "request_frame", "requestFrame", "()V" },
         .{ "fetch", "fetch", "(ILjava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;)V" },
@@ -411,6 +425,23 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.callsPump();
         }
+        fn streamStatus(e: *jni.Env, _: jni.jclass, id: jni.jint, status: jni.jint) callconv(.c) void {
+            bind(e);
+            R.streamStatus(@bitCast(id), @intCast(@max(0, @min(status, 999))));
+        }
+        fn streamData(e: *jni.Env, _: jni.jclass, id: jni.jint, data: jni.jobject) callconv(.c) void {
+            bind(e);
+            const f = e.functions;
+            const n: usize = @intCast(f.GetArrayLength(e, data));
+            const buf = zui.allocator.alloc(u8, n) catch return;
+            defer zui.allocator.free(buf);
+            if (n > 0) f.GetByteArrayRegion(e, data, 0, @intCast(n), buf.ptr);
+            R.streamData(@bitCast(id), buf);
+        }
+        fn streamEnd(e: *jni.Env, _: jni.jclass, id: jni.jint) callconv(.c) void {
+            bind(e);
+            R.streamEnd(@bitCast(id));
+        }
         fn fileDone(e: *jni.Env, _: jni.jclass, data: jni.jobject, name: jni.jstring, mime: jni.jstring, w: jni.jint, h: jni.jint) callconv(.c) void {
             bind(e);
             const f = e.functions;
@@ -465,6 +496,9 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.back, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeBack" });
     @export(&Entry.pickDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativePickDone" });
     @export(&Entry.fileDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeFileDone" });
+    @export(&Entry.streamStatus, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeStreamStatus" });
+    @export(&Entry.streamData, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeStreamData" });
+    @export(&Entry.streamEnd, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeStreamEnd" });
     @export(&Entry.linkEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeLink" });
     @export(&Entry.deviceEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeDevice" });
 }
@@ -490,10 +524,12 @@ pub fn clip(id: u32, on: bool) void {
 pub fn pointer(id: u32, on: bool) void {
     call(methods.pointer, &.{ int(id), boolean(on) });
 }
-pub fn image(id: u32, url: []const u8) void {
+pub fn image(id: u32, url: []const u8, headers: []const u8) void {
     const js = newString(url);
     defer env.functions.DeleteLocalRef(env, js);
-    call(methods.image, &.{ int(id), object(js) });
+    const jh = newString(headers);
+    defer env.functions.DeleteLocalRef(env, jh);
+    call(methods.image, &.{ int(id), object(js), object(jh) });
 }
 pub fn path(id: u32, p: zui.Path) void {
     const f = env.functions;

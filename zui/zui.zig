@@ -64,6 +64,9 @@ pub const PhotoPick = runtime.PhotoPick;
 pub const FilePick = runtime.FilePick;
 pub const File = runtime.File;
 pub const SaveFile = runtime.SaveFile;
+pub const EventStream = runtime.EventStream;
+pub const ServerEvent = runtime.ServerEvent;
+pub const sse = @import("sse.zig");
 pub const Transform = style.Transform;
 pub const ImageFilter = style.ImageFilter;
 pub const Path = tree.Path;
@@ -112,6 +115,7 @@ test {
     _ = host;
     _ = icon;
     _ = calls;
+    _ = sse;
 }
 
 /// Wall-clock time: milliseconds since 1970-01-01 UTC.

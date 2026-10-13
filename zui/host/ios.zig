@@ -43,6 +43,9 @@ var rt: struct {
     device: *const fn (zui.DeviceEvent) void,
     pick: *const fn ([]const u8) void,
     file: *const fn ([]const u8, []const u8, []const u8, u32, u32) void,
+    stream_status: *const fn (u32, u16) void,
+    stream_data: *const fn (u32, []const u8) void,
+    stream_end: *const fn (u32) void,
 } = undefined;
 /// NSStringDrawingUsesLineFragmentOrigin
 const uses_line_fragment_origin: isize = 1;
@@ -392,7 +395,7 @@ pub fn exportEntry(comptime App: type) void {
         var started = false;
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
-            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent, .pick = pickDone, .file = fileDone };
+            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent, .pick = pickDone, .file = fileDone, .stream_status = streamStatus, .stream_data = streamData, .stream_end = streamEnd };
             if (@hasDecl(App, "rtc")) {
                 Media.defineClasses();
                 Media.setPump(&R.callsPump);
@@ -411,6 +414,11 @@ pub fn exportEntry(comptime App: type) void {
                 .{ "URLSession:webSocketTask:didOpenWithProtocol:", @ptrCast(&socketOpened), "v@:@@@" },
                 .{ "URLSession:webSocketTask:didCloseWithCode:reason:", @ptrCast(&socketClosed), "v@:@@q@" },
                 .{ "URLSession:task:didCompleteWithError:", @ptrCast(&taskCompleted), "v@:@@@" },
+            });
+            objc.defineClass("ZuiStreamDelegate", "NSObject", &.{"NSURLSessionDataDelegate"}, &.{
+                .{ "URLSession:dataTask:didReceiveResponse:completionHandler:", @ptrCast(&streamResponse), "v@:@@@@?" },
+                .{ "URLSession:dataTask:didReceiveData:", @ptrCast(&streamReceived), "v@:@@@" },
+                .{ "URLSession:task:didCompleteWithError:", @ptrCast(&streamCompleted), "v@:@@@" },
             });
             objc.defineClass("ZuiLocation", "NSObject", &.{"CLLocationManagerDelegate"}, &.{
                 .{ "locationManager:didUpdateLocations:", @ptrCast(&locationUpdated), "v@:@@" },
@@ -639,6 +647,15 @@ pub fn exportEntry(comptime App: type) void {
             if (i < placeholders.items.len and placeholders.items[i] != null) objc.sendVoidBool(placeholders.items[i], "setHidden:", value.len > 0);
             R.textEvent(i, value);
         }
+        fn streamStatus(conn: u32, status: u16) void {
+            R.streamStatus(conn, status);
+        }
+        fn streamData(conn: u32, bytes: []const u8) void {
+            R.streamData(conn, bytes);
+        }
+        fn streamEnd(conn: u32) void {
+            R.streamEnd(conn);
+        }
         fn fileDone(data: []const u8, name: []const u8, mime: []const u8, w: u32, h: u32) void {
             R.fileDone(data, name, mime, w, h);
         }
@@ -713,7 +730,7 @@ extern "c" fn dispatch_async_f(queue: Queue, context: ?*anyopaque, work: *const 
 /// What `dispatch_get_main_queue()` returns (a macro in the C headers).
 extern "c" var _dispatch_main_q: u8;
 
-const ImageJob = struct { id: u32, url: []u8, image: id = null, filter: zui.ImageFilter = .{} };
+const ImageJob = struct { id: u32, url: []u8, headers: []u8 = &.{}, image: id = null, filter: zui.ImageFilter = .{} };
 
 pub fn imageFilter(i: u32, f: zui.ImageFilter) void {
     if (i < filters.items.len) filters.items[i] = f;
@@ -761,7 +778,7 @@ extern "CoreGraphics" fn CGImageRelease(image: ?*anyopaque) void;
 /// Shows the picture at `url`: from memory if seen before, else downloaded on a background
 /// queue and applied on the main queue if the view still wants that URL. Downloads go through
 /// the shared URL cache, so tiles also persist on disk.
-pub fn image(i: u32, url: []const u8) void {
+pub fn image(i: u32, url: []const u8, headers: []const u8) void {
     if (image_urls.items[i]) |old| {
         if (std.mem.eql(u8, old, url)) return;
         zui.allocator.free(old);
@@ -778,7 +795,7 @@ pub fn image(i: u32, url: []const u8) void {
 
     const job = zui.allocator.create(ImageJob) catch return;
     const owned_url = zui.allocator.dupe(u8, url) catch return zui.allocator.destroy(job);
-    job.* = .{ .id = i, .url = owned_url, .filter = f };
+    job.* = .{ .id = i, .url = owned_url, .headers = zui.allocator.dupe(u8, headers) catch &.{}, .filter = f };
     dispatch_async_f(dispatch_get_global_queue(0, 0), job, download);
 }
 
@@ -790,7 +807,10 @@ fn download(ctx: ?*anyopaque) callconv(.c) void {
     const url = objc.send1(objc.class("NSURL"), "URLWithString:", s);
     objc.release(s);
     if (url != null) {
-        const data = objc.send1(objc.class("NSData"), "dataWithContentsOfURL:", url);
+        // Headers (a Bearer token) need a request of their own.
+        const owned = if (job.headers.len > 0) getWithHeaders(job.url, job.headers) else null;
+        defer if (owned != null) objc.release(owned);
+        const data = if (job.headers.len > 0) owned else objc.send1(objc.class("NSData"), "dataWithContentsOfURL:", url);
         if (data != null) {
             const img = objc.send1(objc.class("UIImage"), "imageWithData:", data);
             if (img != null) job.image = if (job.filter.isIdentity()) objc.send(img, "retain") else filtered(img, job.filter);
@@ -805,6 +825,7 @@ fn applyImage(ctx: ?*anyopaque) callconv(.c) void {
     defer {
         if (job.image != null) objc.release(job.image);
         zui.allocator.free(job.url);
+        zui.allocator.free(job.headers);
         zui.allocator.destroy(job);
     }
     const img = job.image orelse return;
@@ -1871,4 +1892,105 @@ pub fn saveFile(name: []const u8, _: []const u8, data: []const u8, _: bool) void
     defer objc.release(sheet);
     anchorPopover(sheet);
     present(sheet);
+}
+
+// ---- Requests with headers, for images; event streams (NSURLSession's data delegate) ----
+
+extern "c" fn dispatch_semaphore_create(value: isize) ?*anyopaque;
+extern "c" fn dispatch_semaphore_wait(sem: ?*anyopaque, timeout: u64) isize;
+extern "c" fn dispatch_semaphore_signal(sem: ?*anyopaque) isize;
+extern "c" fn dispatch_release(object: ?*anyopaque) void;
+
+/// An NSMutableURLRequest for `url` with "name: value\n" header lines, or null.
+fn requestWith(url: []const u8, headers: []const u8) id {
+    const s = objc.nsString(url);
+    defer objc.release(s);
+    const nsurl = objc.send1(objc.class("NSURL"), "URLWithString:", s);
+    if (nsurl == null) return null;
+    const req = objc.send1(objc.class("NSMutableURLRequest"), "requestWithURL:", nsurl);
+    var lines = std.mem.tokenizeScalar(u8, headers, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.indexOf(u8, line, ": ") orelse continue;
+        const name = objc.nsString(line[0..at]);
+        defer objc.release(name);
+        const value = objc.nsString(line[at + 2 ..]);
+        defer objc.release(value);
+        objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(req, objc.sel("setValue:forHTTPHeaderField:"), value, name);
+    }
+    return req;
+}
+
+const WaitBlock = extern struct { header: objc.BlockHeader, sem: ?*anyopaque, data: *id };
+const wait_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(WaitBlock) };
+
+fn waitDone(block: *WaitBlock, data: id, response: id, err: id) callconv(.c) void {
+    const ok = err == null and response != null and objc.sendInt(response, "statusCode") < 400;
+    if (ok and data != null) block.data.* = objc.send(data, "retain");
+    _ = dispatch_semaphore_signal(block.sem);
+}
+
+/// On a background queue: the body of a GET with headers (+1 retained), or null.
+fn getWithHeaders(url: []const u8, headers: []const u8) id {
+    const req = requestWith(url, headers);
+    if (req == null) return null;
+    var data: id = null;
+    const sem = dispatch_semaphore_create(0);
+    defer dispatch_release(sem);
+    var block: WaitBlock = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&waitDone), .descriptor = &wait_descriptor }, .sem = sem, .data = &data };
+    const session = objc.send(objc.class("NSURLSession"), "sharedSession");
+    const task = objc.msgSend(*const fn (id, objc.SEL, id, *WaitBlock) callconv(.c) id)(session, objc.sel("dataTaskWithRequest:completionHandler:"), req, &block);
+    objc.sendVoid(task, "resume");
+    _ = dispatch_semaphore_wait(sem, std.math.maxInt(u64)); // DISPATCH_TIME_FOREVER
+    return data;
+}
+
+var stream_session: id = null;
+/// zui connection id -> data task (retained).
+var stream_tasks: std.AutoHashMapUnmanaged(u32, id) = .empty;
+
+fn streamIdOf(task: id) ?u32 {
+    var it = stream_tasks.iterator();
+    while (it.next()) |e| if (e.value_ptr.* == task) return e.key_ptr.*;
+    return null;
+}
+
+pub fn streamOpen(conn: u32, url: []const u8, headers: []const u8) void {
+    if (stream_session == null) {
+        const config = objc.send(objc.class("NSURLSessionConfiguration"), "defaultSessionConfiguration");
+        // Events may be minutes apart: no idle timeout to speak of.
+        objc.sendVoidFloat(config, "setTimeoutIntervalForRequest:", 86400);
+        objc.sendVoidFloat(config, "setTimeoutIntervalForResource:", 7 * 86400);
+        const make = objc.msgSend(*const fn (id, objc.SEL, id, id, id) callconv(.c) id);
+        stream_session = objc.send(make(objc.class("NSURLSession"), objc.sel("sessionWithConfiguration:delegate:delegateQueue:"), config, objc.new("ZuiStreamDelegate"), objc.send(objc.class("NSOperationQueue"), "mainQueue")), "retain");
+    }
+    const req = requestWith(url, headers);
+    if (req == null) return rt.stream_end(conn);
+    const task = objc.send(objc.send1(stream_session, "dataTaskWithRequest:", req), "retain");
+    stream_tasks.put(zui.allocator, conn, task) catch return;
+    objc.sendVoid(task, "resume");
+}
+
+pub fn streamClose(conn: u32) void {
+    const kv = stream_tasks.fetchRemove(conn) orelse return;
+    objc.sendVoid(kv.value, "cancel");
+    objc.release(kv.value);
+}
+
+fn streamResponse(_: id, _: objc.SEL, _: id, task: id, response: id, handler: *objc.BlockHeader) callconv(.c) void {
+    const invoke: *const fn (*objc.BlockHeader, isize) callconv(.c) void = @ptrCast(@alignCast(handler.invoke));
+    invoke(handler, 1); // NSURLSessionResponseAllow
+    const conn = streamIdOf(task) orelse return;
+    rt.stream_status(conn, @intCast(@max(0, @min(objc.sendInt(response, "statusCode"), 999))));
+}
+
+fn streamReceived(_: id, _: objc.SEL, _: id, task: id, data: id) callconv(.c) void {
+    const conn = streamIdOf(task) orelse return;
+    rt.stream_data(conn, dataBytes(data));
+}
+
+fn streamCompleted(_: id, _: objc.SEL, _: id, task: id, _: id) callconv(.c) void {
+    const conn = streamIdOf(task) orelse return;
+    _ = stream_tasks.remove(conn);
+    objc.release(task);
+    rt.stream_end(conn);
 }

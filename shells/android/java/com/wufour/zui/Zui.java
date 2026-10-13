@@ -452,7 +452,7 @@ public final class Zui {
         wanted.computeIfPresent(url, (k, n) -> n > 1 ? n - 1 : null);
     }
 
-    static void image(int id, String url) {
+    static void image(int id, String url, String headers) {
         ImageView v = (ImageView) views.get(id);
         if (url.equals(v.getTag())) return;
         if (v.getTag() instanceof String) unwant((String) v.getTag());
@@ -483,6 +483,11 @@ public final class Zui {
                 c.setConnectTimeout(10000);
                 c.setReadTimeout(15000);
                 c.setUseCaches(true);
+                // Request headers (a Bearer token), one "name: value" line each.
+                for (String line : headers.split("\n")) {
+                    int at = line.indexOf(": ");
+                    if (at > 0) c.setRequestProperty(line.substring(0, at), line.substring(at + 2));
+                }
                 try (InputStream in = c.getInputStream()) {
                     b = BitmapFactory.decodeStream(in);
                 } finally {

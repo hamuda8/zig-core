@@ -9,7 +9,7 @@
 //!   inputType(id, tree.InputType)    — before `input`, when it changes
 //!   content(id, Size)                — scroll nodes: size of what scrolls
 //!   transform(id, Transform)         clip(id, bool)           pointer(id, bool)
-//!   image(id, url)                   path(id, tree.Path)
+//!   image(id, url, headers)          path(id, tree.Path)
 
 const std = @import("std");
 const st = @import("style.zig");
@@ -196,7 +196,7 @@ pub fn Reconciler(comptime H: type) type {
                 },
                 .scroll, .scroll_x => if (o == null or !std.meta.eql(o.?.content, n.content)) H.content(id, n.content),
                 .image => {
-                    if (o == null or !std.mem.eql(u8, o.?.text, n.text)) H.image(id, n.text);
+                    if (o == null or !std.mem.eql(u8, o.?.text, n.text) or !std.mem.eql(u8, o.?.headers, n.headers)) H.image(id, n.text, n.headers);
                     const f = n.style.image_filter;
                     const was: st.ImageFilter = if (o) |old| old.style.image_filter else .{};
                     if (!std.meta.eql(f, was) or (o == null and !f.isIdentity())) H.imageFilter(id, f);
@@ -274,7 +274,7 @@ pub const RecordingHost = struct {
     pub fn pointer(id: u32, on: bool) void {
         write("pointer {d} {}", .{ id, on });
     }
-    pub fn image(id: u32, url: []const u8) void {
+    pub fn image(id: u32, url: []const u8, _: []const u8) void {
         write("image {d} {s}", .{ id, url });
     }
     pub fn imageFilter(_: u32, _: st.ImageFilter) void {}

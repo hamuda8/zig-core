@@ -66,6 +66,8 @@ pub const Node = struct {
     video: ?Video = null,
     /// Inputs and text areas.
     input_type: InputType = .{},
+    /// Images: request headers, one "name: value\n" line each (a Bearer token).
+    headers: []const u8 = "",
 
     parent: u32 = none,
     first_child: u32 = none,
@@ -117,6 +119,7 @@ pub const Tree = struct {
         var n = node;
         n.text = try a.dupe(u8, node.text);
         n.placeholder = try a.dupe(u8, node.placeholder);
+        n.headers = try a.dupe(u8, node.headers);
         if (node.path) |p| {
             // Every field as given; only the points are copied into the tree's memory.
             var copy = p;

@@ -465,4 +465,64 @@ final class ZuiDevice {
             });
         });
     }
+
+    // ---- Event streams: a GET whose answer is read as it arrives, a thread each ----
+
+    static native void nativeStreamStatus(int id, int status);
+    static native void nativeStreamData(int id, byte[] data);
+    static native void nativeStreamEnd(int id);
+    static final java.util.HashMap<Integer, java.net.HttpURLConnection[]> streams = new java.util.HashMap<>();
+
+    static void streamOpen(int id, String url, String headers) {
+        final java.net.HttpURLConnection[] holder = new java.net.HttpURLConnection[1];
+        streams.put(id, holder);
+        new Thread(() -> {
+            try {
+                java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                synchronized (holder) {
+                    holder[0] = c;
+                }
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(0); // events may be minutes apart
+                c.setUseCaches(false);
+                for (String line : headers.split("\n")) {
+                    int at = line.indexOf(": ");
+                    if (at > 0) c.setRequestProperty(line.substring(0, at), line.substring(at + 2));
+                }
+                int status = c.getResponseCode();
+                Zui.main.post(() -> {
+                    if (streams.get(id) == holder) nativeStreamStatus(id, status);
+                });
+                java.io.InputStream in = status >= 400 ? c.getErrorStream() : c.getInputStream();
+                if (in != null) {
+                    try (java.io.InputStream s = in) {
+                        byte[] chunk = new byte[8192];
+                        for (int n; (n = s.read(chunk)) > 0; ) {
+                            final byte[] part = java.util.Arrays.copyOf(chunk, n);
+                            Zui.main.post(() -> {
+                                if (streams.get(id) == holder) nativeStreamData(id, part);
+                            });
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // lost or closed: zui connects again
+            }
+            Zui.main.post(() -> {
+                if (streams.get(id) != holder) return;
+                streams.remove(id);
+                nativeStreamEnd(id);
+            });
+        }, "zui-events").start();
+    }
+
+    static void streamClose(int id) {
+        java.net.HttpURLConnection[] holder = streams.remove(id);
+        if (holder == null) return;
+        new Thread(() -> {
+            synchronized (holder) {
+                if (holder[0] != null) holder[0].disconnect();
+            }
+        }).start();
+    }
 }

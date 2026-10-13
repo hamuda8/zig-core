@@ -18,7 +18,9 @@ const js = struct {
     extern "zui" fn zui_transform(id: u32, rotate: f32, tilt: f32, perspective: f32, has_origin: u32, ox: f32, oy: f32) void;
     extern "zui" fn zui_clip(id: u32, on: u32) void;
     extern "zui" fn zui_pointer_listen(id: u32, on: u32) void;
-    extern "zui" fn zui_image(id: u32, ptr: [*]const u8, len: usize) void;
+    extern "zui" fn zui_image(id: u32, ptr: [*]const u8, len: usize, headers: [*]const u8, headers_len: usize) void;
+    extern "zui" fn zui_stream_open(id: u32, url: [*]const u8, url_len: usize, headers: [*]const u8, headers_len: usize) void;
+    extern "zui" fn zui_stream_close(id: u32) void;
     extern "zui" fn zui_path(id: u32, points: [*]const [2]f32, count: usize, color: u32, width: f32, dash_on: f32, dash_off: f32, round: u32, fill: u32) void;
     extern "zui" fn zui_fetch(id: u32, method: [*]const u8, method_len: usize, url: [*]const u8, url_len: usize, body: [*]const u8, body_len: usize, ctype: [*]const u8, ctype_len: usize, headers: [*]const u8, headers_len: usize) void;
     extern "zui" fn zui_storage_get(key: [*]const u8, key_len: usize, out_len: *usize) ?[*]u8;
@@ -115,8 +117,14 @@ pub fn clip(id: u32, on: bool) void {
 pub fn pointer(id: u32, on: bool) void {
     js.zui_pointer_listen(id, @intFromBool(on));
 }
-pub fn image(id: u32, url: []const u8) void {
-    js.zui_image(id, url.ptr, url.len);
+pub fn image(id: u32, url: []const u8, headers: []const u8) void {
+    js.zui_image(id, url.ptr, url.len, headers.ptr, headers.len);
+}
+pub fn streamOpen(id: u32, url: []const u8, headers: []const u8) void {
+    js.zui_stream_open(id, url.ptr, url.len, headers.ptr, headers.len);
+}
+pub fn streamClose(id: u32) void {
+    js.zui_stream_close(id);
 }
 pub fn path(id: u32, p: zui.Path) void {
     js.zui_path(id, p.points.ptr, p.points.len, p.color, p.width, p.dash[0], p.dash[1], @intFromBool(p.round), p.fill);
@@ -306,6 +314,15 @@ pub fn exportEntry(comptime App: type) void {
         fn inputEvent(id: u32, kind: u32) callconv(.c) void {
             R.inputEvent(id, std.enums.fromInt(zui.InputEvent, kind) orelse return);
         }
+        fn streamStatus(id: u32, status: u32) callconv(.c) void {
+            R.streamStatus(id, @intCast(@min(status, 999)));
+        }
+        fn streamData(id: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.streamData(id, ptr[0..len]);
+        }
+        fn streamEnd(id: u32) callconv(.c) void {
+            R.streamEnd(id);
+        }
         fn fileDone(data: [*]const u8, data_len: usize, name: [*]const u8, name_len: usize, mime: [*]const u8, mime_len: usize, w: u32, h: u32) callconv(.c) void {
             R.fileDone(data[0..data_len], name[0..name_len], mime[0..mime_len], w, h);
         }
@@ -349,6 +366,9 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.back, .{ .name = "zui_back" });
     @export(&Entry.pickDone, .{ .name = "zui_pick_done" });
     @export(&Entry.fileDone, .{ .name = "zui_file_done" });
+    @export(&Entry.streamStatus, .{ .name = "zui_stream_status" });
+    @export(&Entry.streamData, .{ .name = "zui_stream_data" });
+    @export(&Entry.streamEnd, .{ .name = "zui_stream_end" });
     @export(&Entry.linkEvent, .{ .name = "zui_link_event" });
     @export(&Entry.deviceEvent, .{ .name = "zui_device_event" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });

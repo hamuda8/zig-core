@@ -21,6 +21,7 @@ pub const View = struct {
     clip: bool = false,
     path_points: usize = 0,
     input_type: zui.InputType = .{},
+    headers: std.ArrayList(u8) = .empty,
 };
 
 /// Set when the app asked for a frame; `Driver.frame` delivers it.
@@ -128,10 +129,26 @@ pub fn clip(id: u32, on: bool) void {
 pub fn pointer(id: u32, on: bool) void {
     if (views.getPtr(id)) |v| v.pointer = on;
 }
-pub fn image(id: u32, url: []const u8) void {
+pub fn image(id: u32, url: []const u8, headers: []const u8) void {
     const v = views.getPtr(id) orelse return;
     v.text.clearRetainingCapacity();
     v.text.appendSlice(gpa, url) catch {};
+    v.headers.clearRetainingCapacity();
+    v.headers.appendSlice(gpa, headers) catch {};
+}
+/// The event stream connection open now (0: none), its URL and headers.
+pub var stream_conn: u32 = 0;
+pub var stream_url: std.ArrayList(u8) = .empty;
+pub var stream_headers: std.ArrayList(u8) = .empty;
+pub fn streamOpen(conn: u32, url: []const u8, headers: []const u8) void {
+    stream_conn = conn;
+    stream_url.clearRetainingCapacity();
+    stream_url.appendSlice(gpa, url) catch {};
+    stream_headers.clearRetainingCapacity();
+    stream_headers.appendSlice(gpa, headers) catch {};
+}
+pub fn streamClose(conn: u32) void {
+    if (stream_conn == conn) stream_conn = 0;
 }
 pub fn imageFilter(_: u32, _: zui.ImageFilter) void {}
 pub fn path(id: u32, p: zui.Path) void {
@@ -331,6 +348,7 @@ pub fn Driver(comptime App: type) type {
             picker = null;
             photo_asked = null;
             file_accept = null;
+            stream_conn = 0;
         }
 
         /// Back (Android's button, the iOS swipe). Returns whether the app took it.
@@ -379,6 +397,23 @@ pub fn Driver(comptime App: type) type {
         /// A position fix from the "device".
         pub fn locate(lat: f64, lng: f64) void {
             R.locationEvent(.{ .fix = .{ .lat = lat, .lng = lng, .accuracy = 5 } });
+        }
+
+        /// The server of the open event stream answers with `status`.
+        pub fn serverStatus(status: u16) void {
+            R.streamStatus(stream_conn, status);
+        }
+
+        /// The server sends bytes on the open event stream.
+        pub fn serverSend(bytes: []const u8) void {
+            R.streamData(stream_conn, bytes);
+        }
+
+        /// The open event stream's connection ends.
+        pub fn serverEnd() void {
+            const c = stream_conn;
+            stream_conn = 0;
+            R.streamEnd(c);
         }
 
         /// The user chose a photo or a file.
@@ -834,4 +869,83 @@ test "photos, files, saving" {
     try std.testing.expectEqualStrings("report.csv", saved_name.items);
     try std.testing.expectEqualStrings("a,b\n1,2\n", saved_data.items);
     try std.testing.expect(saved_share);
+}
+
+const Live = struct {
+    pub const Msg = union(enum) { start, stop, ev: zui.ServerEvent };
+    pub const State = struct { stream: u32 = 0, log: [256]u8 = undefined, len: usize = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    fn onEvent(e: zui.ServerEvent) Msg {
+        return .{ .ev = e };
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .start => s.stream = fx.openEvents(.{ .url = "/events", .headers = &.{.{ "authorization", "Bearer t" }} }, onEvent),
+            .stop => fx.closeEvents(s.stream),
+            .ev => |e| {
+                const w = std.fmt.bufPrint(s.log[s.len..], "{t}:{s}:{s}:{s}:{d};", .{ e.kind, e.event, e.data, e.id, e.status }) catch return;
+                s.len += w.len;
+                if (std.mem.eql(u8, e.data, "stop")) fx.closeEvents(e.stream);
+            },
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{});
+        ui.begin(.{}, .{ .on_press = .start });
+        ui.text("Start", .{});
+        ui.end();
+        ui.imageWith("/photo.jpg", .{ .headers = &.{.{ "authorization", "Bearer t" }} }, .{ .width = .{ .px = 10 }, .height = .{ .px = 10 } }, 0);
+        ui.text(s.log[0..s.len], .{});
+        ui.end();
+    }
+};
+
+test "server-sent events: parsed, reconnected with Last-Event-ID, closed for good on 401" {
+    const D = Driver(Live);
+    D.start(200, 400);
+    defer D.reset();
+    var it = views.iterator();
+    while (it.next()) |e| if (e.value_ptr.kind == .image) try std.testing.expectEqualStrings("authorization: Bearer t\n", e.value_ptr.headers.items);
+
+    try D.press("Start");
+    try std.testing.expectEqualStrings("/events", stream_url.items);
+    try std.testing.expect(std.mem.indexOf(u8, stream_headers.items, "authorization: Bearer t\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stream_headers.items, "Accept: text/event-stream") != null);
+    D.serverStatus(200);
+    D.serverSend("retry: 500\nid: 7\nevent: tick\nda");
+    D.serverSend("ta: a\n\n");
+    const s = D.R.appState();
+    try std.testing.expectEqualStrings("open::::0;message:tick:a:7:0;", s.log[0..s.len]);
+
+    // Lost: .failed, a timer of the server's retry time, then a new connection.
+    D.serverEnd();
+    try std.testing.expectEqual(@as(u32, 500), timers.items[timers.items.len - 1].ms);
+    D.runTimers();
+    try std.testing.expect(stream_conn != 0);
+    try std.testing.expect(std.mem.indexOf(u8, stream_headers.items, "Last-Event-ID: 7\n") != null);
+
+    // Refused: closed for good, no new connection.
+    D.serverStatus(401);
+    D.serverSend("data: not events\n\n");
+    D.serverEnd();
+    D.runTimers();
+    try std.testing.expectEqual(@as(u32, 0), stream_conn);
+    try std.testing.expectEqualStrings("open::::0;message:tick:a:7:0;failed::::200;closed::::401;", s.log[0..s.len]);
+}
+
+test "an app closing its stream while an event is handled" {
+    const D = Driver(Live);
+    D.start(200, 400);
+    defer D.reset();
+    try D.press("Start");
+    const conn = stream_conn;
+    D.serverStatus(200);
+    D.serverSend("data: stop\n\ndata: after\n\n");
+    try std.testing.expectEqual(@as(u32, 0), stream_conn);
+    const s = D.R.appState();
+    try std.testing.expect(std.mem.indexOf(u8, s.log[0..s.len], "after") == null);
+    D.R.streamData(conn, "data: late\n\n"); // an old connection's late bytes are dropped
+    try std.testing.expect(std.mem.indexOf(u8, s.log[0..s.len], "late") == null);
 }

@@ -22,6 +22,7 @@ const i18n = @import("i18n.zig");
 const Color = @import("color.zig").Color;
 const icon_mod = @import("icon.zig");
 const calls = @import("calls.zig");
+const sse = @import("sse.zig");
 
 const Tree = tree_mod.Tree;
 
@@ -256,6 +257,34 @@ pub const SaveFile = struct {
     share: bool = false,
 };
 
+/// A stream of Server-Sent Events (`fx.openEvents`): a GET request whose answer never ends.
+pub const EventStream = struct {
+    url: []const u8,
+    /// Extra headers, e.g. .{ "authorization", "Bearer ..." } (EventSource cannot send these).
+    headers: []const [2][]const u8 = &.{},
+};
+
+/// Something that happened on an event stream. Slices are only valid during `update`.
+pub const ServerEvent = struct {
+    kind: Kind,
+    /// The stream (as `openEvents` returned it).
+    stream: u32,
+    /// `.message`: the event's name ("message" unless the server named it), its data (the
+    /// `data:` lines joined by newlines) and the last event id the server gave.
+    event: []const u8 = "",
+    data: []const u8 = "",
+    id: []const u8 = "",
+    /// `.failed` and `.closed`: the HTTP status of the connection that ended (200 when an open
+    /// stream dropped), 0 when the server could not be reached.
+    status: u16 = 0,
+
+    /// `.open`: connected (again). `.failed`: the connection was lost or refused; zui
+    /// connects again after the server's `retry` time (3 s by default), sending
+    /// Last-Event-ID. `.closed`: the server said no for good (a 4xx status other than 408
+    /// and 429, or 204): no more events.
+    pub const Kind = enum(u8) { open = 1, message = 2, failed = 3, closed = 4 };
+};
+
 /// What `update` may ask of the platform. Each result arrives later as a message.
 pub fn Fx(comptime Msg: type) type {
     return struct {
@@ -301,6 +330,8 @@ pub fn Fx(comptime Msg: type) type {
             pick_photo: *const fn (PhotoPick, *const fn (File) Msg) void,
             pick_file: *const fn (FilePick, *const fn (File) Msg) void,
             save_file: *const fn (SaveFile) void,
+            open_events: *const fn (EventStream, *const fn (ServerEvent) Msg) u32,
+            close_events: *const fn (u32) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -382,6 +413,16 @@ pub fn Fx(comptime Msg: type) type {
         /// Saves or shares a file the app made (a report, a label): see `SaveFile.share`.
         pub fn saveFile(fx: Self, f: SaveFile) void {
             fx.vt.save_file(f);
+        }
+
+        /// Follows a stream of Server-Sent Events (text/event-stream) with any headers; each
+        /// event arrives through `on`, and lost connections are made again. Returns its id.
+        pub fn openEvents(fx: Self, src: EventStream, on: *const fn (ServerEvent) Msg) u32 {
+            return fx.vt.open_events(src, on);
+        }
+
+        pub fn closeEvents(fx: Self, stream: u32) void {
+            fx.vt.close_events(stream);
         }
 
         /// Keeps the screen on while `on` (a courier's navigation, a scanner).
@@ -643,6 +684,19 @@ pub fn Ui(comptime Msg: type) type {
             _ = ui.tree.add(.{ .kind = .image, .style = style, .text = url, .key = k }) catch ui.fail();
         }
 
+        pub const ImageOptions = struct {
+            /// Request headers, e.g. .{ "authorization", "Bearer ..." } for a picture only its
+            /// owner may see.
+            headers: []const [2][]const u8 = &.{},
+        };
+
+        /// `image` with request headers.
+        pub fn imageWith(ui: *Self, url: []const u8, o: ImageOptions, style: st.Style, k: u64) void {
+            var block: std.ArrayList(u8) = .empty;
+            for (o.headers) |h| block.print(ui.arena(), "{s}: {s}\n", .{ h[0], h[1] }) catch return ui.fail();
+            _ = ui.tree.add(.{ .kind = .image, .style = style, .text = url, .key = k, .headers = block.items }) catch ui.fail();
+        }
+
         /// A line through `points` (in this node's coordinates), sized by `style`. A point with a
         /// NaN x starts a new sub-path.
         pub fn path(ui: *Self, points: []const [2]f32, p: PathStyle, style: st.Style, k: u64) void {
@@ -798,7 +852,122 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .pick_photo = fxPickPhoto,
             .pick_file = fxPickFile,
             .save_file = fxSaveFile,
+            .open_events = fxOpenEvents,
+            .close_events = fxCloseEvents,
         };
+
+        // ---- Server-Sent Events: the host streams the bytes of a GET, zui parses them (sse.zig)
+        // and connects again. Each connection has its own id, so a late chunk of an old one is
+        // dropped.
+        const Stream = struct {
+            id: u32,
+            on: *const fn (ServerEvent) Msg,
+            url: []u8,
+            headers: []u8,
+            parser: sse.Parser,
+            /// The current connection (0 while waiting to connect again).
+            conn: u32 = 0,
+            status: u16 = 0,
+            /// Inside `streamData`: freed after it.
+            busy: bool = false,
+            closing: bool = false,
+        };
+        var streams: std.AutoHashMapUnmanaged(u32, *Stream) = .empty;
+        /// Connection id -> stream id.
+        var connections: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+        /// Timer id -> stream id, for connecting again.
+        var stream_timers: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+
+        fn fxOpenEvents(src: EventStream, on: *const fn (ServerEvent) Msg) u32 {
+            const id = newId();
+            const st_ = gpa.create(Stream) catch return 0;
+            var block: std.ArrayList(u8) = .empty;
+            for (src.headers) |h| block.print(gpa, "{s}: {s}\n", .{ h[0], h[1] }) catch {};
+            st_.* = .{ .id = id, .on = on, .url = gpa.dupe(u8, src.url) catch "", .headers = block.toOwnedSlice(gpa) catch "", .parser = .{ .gpa = gpa } };
+            streams.put(gpa, id, st_) catch return 0;
+            connect(st_);
+            return id;
+        }
+
+        fn connect(st_: *Stream) void {
+            const conn = newId();
+            st_.conn = conn;
+            st_.status = 0;
+            st_.parser.reset();
+            connections.put(gpa, conn, st_.id) catch return;
+            var block: std.ArrayList(u8) = .empty;
+            defer block.deinit(gpa);
+            block.appendSlice(gpa, st_.headers) catch {};
+            block.appendSlice(gpa, "Accept: text/event-stream\nCache-Control: no-cache\n") catch {};
+            if (st_.parser.last_id.items.len > 0) block.print(gpa, "Last-Event-ID: {s}\n", .{st_.parser.last_id.items}) catch {};
+            H.streamOpen(conn, st_.url, block.items);
+        }
+
+        fn freeStream(st_: *Stream) void {
+            st_.parser.deinit();
+            gpa.free(st_.url);
+            gpa.free(st_.headers);
+            gpa.destroy(st_);
+        }
+
+        fn fxCloseEvents(id: u32) void {
+            const st_ = (streams.fetchRemove(id) orelse return).value;
+            if (st_.conn != 0) {
+                _ = connections.remove(st_.conn);
+                H.streamClose(st_.conn);
+            }
+            if (st_.busy) st_.closing = true else freeStream(st_);
+        }
+
+        fn streamOf(conn: u32) ?*Stream {
+            const id = connections.get(conn) orelse return null;
+            return streams.get(id);
+        }
+
+        /// The answer's status arrived.
+        pub fn streamStatus(conn: u32, status: u16) void {
+            const st_ = streamOf(conn) orelse return;
+            st_.status = status;
+            if (status == 200 and started) dispatch(st_.on(.{ .kind = .open, .stream = st_.id }));
+        }
+
+        /// Bytes of the answer (only read during this call).
+        pub fn streamData(conn: u32, bytes: []const u8) void {
+            const st_ = streamOf(conn) orelse return;
+            if (st_.status != 200) return; // an error page, not events
+            st_.busy = true;
+            defer {
+                st_.busy = false;
+                if (st_.closing) freeStream(st_);
+            }
+            const Ctx = struct {
+                s: *Stream,
+                fn on(c: @This(), e: sse.Event) bool {
+                    if (started) dispatch(c.s.on(.{ .kind = .message, .stream = c.s.id, .event = e.event, .data = e.data, .id = e.id }));
+                    return !c.s.closing;
+                }
+            };
+            st_.parser.feed(bytes, Ctx{ .s = st_ }, Ctx.on) catch {};
+        }
+
+        /// The connection ended (or never opened).
+        pub fn streamEnd(conn: u32) void {
+            const st_ = streamOf(conn) orelse return;
+            _ = connections.remove(conn);
+            st_.conn = 0;
+            const status = st_.status;
+            const final = status == 204 or (status >= 400 and status < 500 and status != 408 and status != 429);
+            if (final) {
+                _ = streams.remove(st_.id);
+                defer freeStream(st_);
+                if (started) dispatch(st_.on(.{ .kind = .closed, .stream = st_.id, .status = status }));
+                return;
+            }
+            const t = newId();
+            stream_timers.put(gpa, t, st_.id) catch return;
+            H.timer(t, st_.parser.retry_ms orelse 3000);
+            if (started) dispatch(st_.on(.{ .kind = .failed, .stream = st_.id, .status = status }));
+        }
 
         // ---- Files: one pick at a time ----
         var file_cb: ?*const fn (File) Msg = null;
@@ -1247,6 +1416,11 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         }
 
         pub fn timerDone(id: u32) void {
+            if (stream_timers.fetchRemove(id)) |kv| {
+                // Connect again, unless the app closed the stream meanwhile.
+                if (streams.get(kv.value)) |st_| connect(st_);
+                return;
+            }
             const msg = (timers.fetchRemove(id) orelse return).value;
             if (started) dispatch(msg);
         }
