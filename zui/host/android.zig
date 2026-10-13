@@ -810,6 +810,7 @@ var style_m: struct {
     spin: jni.jmethodID,
     haptic: jni.jmethodID,
     watch_scroll: jni.jmethodID,
+    radius: jni.jmethodID,
     scroll_to: jni.jmethodID,
 } = undefined;
 
@@ -833,6 +834,7 @@ fn styleBind() void {
         .{ "haptic", "haptic", "()V" },
         .{ "watch_scroll", "watchScroll", "(I)V" },
         .{ "scroll_to", "scrollTo", "(IFZ)V" },
+        .{ "radius", "radius", "(IF)V" },
     }) |m| @field(style_m, m[0]) = f.GetStaticMethodID(env, style_class, m[1], m[2]);
 }
 
@@ -873,17 +875,19 @@ fn animatedFrame(id: u32, r: zui.Rect) bool {
 fn styleBox(id: u32, b: zui.Box) void {
     if (!b.isSimple()) {
         const d = b.decor;
-        const n: usize = d.gradient_count;
-        var fl: [12 + 6]f32 = undefined;
+        var stop_colors: [64]u32 = undefined;
+        var stop_at: [64]f32 = undefined;
+        const n = d.blendedStops(&stop_colors, &stop_at);
+        var fl: [12 + 64]f32 = undefined;
         @memcpy(fl[0..4], &d.radii);
         @memcpy(fl[4..8], &d.border_widths);
         @memcpy(fl[8..11], &d.shadow);
         fl[11] = d.gradient_angle;
-        @memcpy(fl[12..][0..n], d.gradient_at[0..n]);
-        var cs: [5 + 6]u32 = undefined;
+        @memcpy(fl[12..][0..n], stop_at[0..n]);
+        var cs: [5 + 64]u32 = undefined;
         @memcpy(cs[0..4], &d.border_colors);
         cs[4] = d.shadow_color;
-        @memcpy(cs[5..][0..n], d.gradient_colors[0..n]);
+        @memcpy(cs[5..][0..n], stop_colors[0..n]);
         const f = env.functions;
         const jf = f.NewFloatArray(env, @intCast(12 + n));
         defer f.DeleteLocalRef(env, jf);
@@ -893,6 +897,7 @@ fn styleBox(id: u32, b: zui.Box) void {
         f.SetIntArrayRegion(env, jc, 0, @intCast(5 + n), @ptrCast(&cs));
         callStyle(style_m.decor, &.{ int(id), int(b.background), object(jf), object(jc) });
     }
+    callStyle(style_m.radius, &.{ int(id), float(b.radius) });
     if (flagsOf(id).* & 2 != 0) callStyle(style_m.alpha_to, &.{ int(id), float(b.opacity) });
 }
 

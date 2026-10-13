@@ -209,7 +209,35 @@ final class ZuiStyle {
         ImageView iv = (ImageView) v;
         iv.setScaleType(fit == 1 ? ImageView.ScaleType.CENTER_CROP : fit == 2 ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.FIT_XY);
         iv.setCropToPadding(true);
-        iv.setClipToOutline(fit == 1);
+        iv.setOutlineProvider(ROUND);
+        iv.setClipToOutline(true);
+    }
+
+    // ---- Rounded outlines: pictures and `clip` are cut round, as CSS cuts them ----
+
+    static final int R_RADIUS = 0x7f5a0003;
+
+    /** The view's box radius (Zui.box draws it; this is for cutting). */
+    static final android.view.ViewOutlineProvider ROUND = new android.view.ViewOutlineProvider() {
+        @Override
+        public void getOutline(View v, Outline o) {
+            Object r = v.getTag(R_RADIUS);
+            o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), r instanceof Float ? (Float) r : 0f);
+        }
+    };
+
+    static void radius(int id, float r) {
+        View v = Zui.views.get(id);
+        if (v == null) return;
+        Object was = v.getTag(R_RADIUS);
+        float px = r * Zui.density;
+        if (was instanceof Float && (Float) was == px) return;
+        v.setTag(R_RADIUS, px);
+        if (v instanceof ImageView && px > 0) {
+            v.setOutlineProvider(ROUND);
+            v.setClipToOutline(true);
+        }
+        v.invalidateOutline();
     }
 
     // ---- Decorations ----

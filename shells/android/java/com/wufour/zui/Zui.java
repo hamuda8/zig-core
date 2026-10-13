@@ -412,7 +412,7 @@ public final class Zui {
 
     static void clip(int id, boolean on) {
         View v = views.get(id);
-        v.setOutlineProvider(ViewOutlineProvider.BOUNDS);
+        v.setOutlineProvider(ZuiStyle.ROUND);
         v.setClipToOutline(on);
     }
 

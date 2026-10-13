@@ -374,7 +374,64 @@ pub const Decor = struct {
         for (1..4) |k| if (d.border_widths[k] != d.border_widths[0] or d.border_colors[k] != d.border_colors[0]) return false;
         return true;
     }
+
+    /// The gradient's stops as a platform that blends colours straight (Android, iOS) must be
+    /// given them to look like CSS, which blends them premultiplied: between stops of different
+    /// opacity, 8 steps blended premultiplied (transparent to blue fades blue, not grey).
+    /// Returns how many of `colors` / `at` were filled (at most 64).
+    pub fn blendedStops(d: Decor, colors: *[64]u32, at: *[64]f32) usize {
+        var n: usize = 0;
+        const count: usize = d.gradient_count;
+        for (0..count) |k| {
+            const c = d.gradient_colors[k];
+            if (k > 0 and (d.gradient_colors[k - 1] >> 24) != (c >> 24)) {
+                const a = d.gradient_colors[k - 1];
+                const steps = 8;
+                for (1..steps) |j| {
+                    const t: f32 = @as(f32, @floatFromInt(j)) / steps;
+                    colors[n] = premulMix(a, c, t);
+                    at[n] = d.gradient_at[k - 1] + (d.gradient_at[k] - d.gradient_at[k - 1]) * t;
+                    n += 1;
+                }
+            }
+            colors[n] = c;
+            at[n] = d.gradient_at[k];
+            n += 1;
+        }
+        return n;
+    }
 };
+
+fn premulMix(a: u32, b: u32, t: f32) u32 {
+    const ch = struct {
+        fn get(c: u32, shift: u5) f32 {
+            return @as(f32, @floatFromInt((c >> shift) & 0xff)) / 255;
+        }
+    }.get;
+    const aa = ch(a, 24);
+    const ba = ch(b, 24);
+    const alpha = aa + (ba - aa) * t;
+    var out: u32 = @as(u32, @intFromFloat(@round(alpha * 255))) << 24;
+    for ([_]u5{ 16, 8, 0 }) |s| {
+        const v = if (alpha > 0) (ch(a, s) * aa + (ch(b, s) * ba - ch(a, s) * aa) * t) / alpha else 0;
+        out |= @as(u32, @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255))) << s;
+    }
+    return out;
+}
+
+test "stops between different opacities blend premultiplied" {
+    var d: Decor = .{ .gradient_count = 2 };
+    d.gradient_colors[0] = 0x00000000; // transparent black, as CSS's `transparent`
+    d.gradient_colors[1] = 0xff0000ff;
+    d.gradient_at[1] = 1;
+    var colors: [64]u32 = undefined;
+    var at: [64]f32 = undefined;
+    const n = d.blendedStops(&colors, &at);
+    try std.testing.expectEqual(@as(usize, 9), n);
+    // Half way: half opaque, and fully blue (no grey from the transparent black).
+    try std.testing.expectEqual(@as(u32, 0x800000ff), colors[4]);
+    try std.testing.expectEqual(@as(f32, 0.5), at[4]);
+}
 
 /// How text is drawn and measured, as sent to a host. `text_align` is already resolved to a
 /// physical side.
