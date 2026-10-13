@@ -194,6 +194,30 @@ pub const CallEvent = struct {
     pub const Kind = enum(u8) { answer = 1, decline = 2, end = 3 };
 };
 
+/// The platform's own pickers (`fx.pickDate`, `fx.pickTime`, `fx.pickOption`).
+pub const PickKind = enum(u8) { date = 1, time = 2, option = 3 };
+
+pub const DatePick = struct {
+    /// "YYYY-MM-DD" to start on; "" for today.
+    value: []const u8 = "",
+    /// The first and last days that can be chosen ("YYYY-MM-DD"), or "".
+    min: []const u8 = "",
+    max: []const u8 = "",
+};
+
+pub const TimePick = struct {
+    /// "HH:MM" (24 hours) to start on; "" for now.
+    value: []const u8 = "",
+};
+
+pub const OptionPick = struct {
+    /// Shown above the list where the platform has a place for it (Android, iOS).
+    title: []const u8 = "",
+    options: []const []const u8,
+    /// The option marked as chosen.
+    selected: ?u32 = null,
+};
+
 /// What `update` may ask of the platform. Each result arrives later as a message.
 pub fn Fx(comptime Msg: type) type {
     return struct {
@@ -233,6 +257,9 @@ pub fn Fx(comptime Msg: type) type {
             vibrate: *const fn (u32) void,
             beep: *const fn () void,
             keep_awake: *const fn (bool) void,
+            pick_date: *const fn (DatePick, *const fn ([]const u8) Msg) void,
+            pick_time: *const fn (TimePick, *const fn ([]const u8) Msg) void,
+            pick_option: *const fn (OptionPick, *const fn (u32) Msg) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -278,6 +305,24 @@ pub fn Fx(comptime Msg: type) type {
         /// A short beep (a scan was read, a new job arrived).
         pub fn beep(fx: Self) void {
             fx.vt.beep();
+        }
+
+        /// The platform's date picker (web <input type=date>, Android DatePickerDialog, iOS
+        /// UIDatePicker); `done` gets the day as "YYYY-MM-DD". The app draws the field itself and
+        /// calls this when it is pressed. Nothing comes back when the picker is dismissed.
+        pub fn pickDate(fx: Self, o: DatePick, done: *const fn ([]const u8) Msg) void {
+            fx.vt.pick_date(o, done);
+        }
+
+        /// The platform's time picker; `done` gets "HH:MM" (24 hours).
+        pub fn pickTime(fx: Self, o: TimePick, done: *const fn ([]const u8) Msg) void {
+            fx.vt.pick_time(o, done);
+        }
+
+        /// The platform's list of options (web <select>, an Android dialog, an iOS action
+        /// sheet); `done` gets the index of the one chosen.
+        pub fn pickOption(fx: Self, o: OptionPick, done: *const fn (u32) Msg) void {
+            fx.vt.pick_option(o, done);
         }
 
         /// Keeps the screen on while `on` (a courier's navigation, a scanner).
@@ -469,9 +514,18 @@ pub fn Ui(comptime Msg: type) type {
             on_change: ?*const fn ([]const u8) Msg = null,
             on_focus: ?Msg = null,
             on_blur: ?Msg = null,
-            /// The keyboard's enter / search key.
+            /// The keyboard's enter / search key (not in a multi-line input, where enter is a
+            /// new line).
             on_submit: ?Msg = null,
             style: st.Style = .{},
+            /// A password: the text is hidden.
+            secure: bool = false,
+            keyboard: tree_mod.Keyboard = .text,
+            /// The label of the enter key.
+            return_key: tree_mod.ReturnKey = .default,
+            /// Several lines that wrap; the input grows with its text (up to `style.max_height`,
+            /// then it scrolls).
+            multiline: bool = false,
         };
 
         /// Memory that lives until this frame's tree is dropped.
@@ -506,7 +560,14 @@ pub fn Ui(comptime Msg: type) type {
         }
 
         pub fn input(ui: *Self, o: InputOptions) void {
-            const i = ui.tree.add(.{ .kind = .input, .style = o.style, .key = o.key, .text = o.value, .placeholder = o.placeholder }) catch return ui.fail();
+            const i = ui.tree.add(.{
+                .kind = if (o.multiline) .text_area else .input,
+                .style = o.style,
+                .key = o.key,
+                .text = o.value,
+                .placeholder = o.placeholder,
+                .input_type = .{ .keyboard = o.keyboard, .return_key = o.return_key, .secure = o.secure and !o.multiline },
+            }) catch return ui.fail();
             if (o.on_change) |f| ui.changes.append(ui.arena(), .{ .node = i, .value = f }) catch ui.fail();
             if (o.on_focus != null or o.on_blur != null or o.on_submit != null)
                 ui.inputs.append(ui.arena(), .{ .node = i, .value = .{ .focus = o.on_focus, .blur = o.on_blur, .submit = o.on_submit } }) catch ui.fail();
@@ -672,7 +733,47 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .vibrate = fxVibrate,
             .beep = fxBeep,
             .keep_awake = fxKeepAwake,
+            .pick_date = fxPickDate,
+            .pick_time = fxPickTime,
+            .pick_option = fxPickOption,
         };
+
+        // ---- Pickers: one at a time; a new one replaces the callback of the last ----
+        var picking: union(enum) { none, text: *const fn ([]const u8) Msg, index: *const fn (u32) Msg } = .none;
+
+        fn fxPickDate(o: DatePick, done: *const fn ([]const u8) Msg) void {
+            picking = .{ .text = done };
+            H.pick(.date, o.value, o.min, o.max, "", "", 0);
+        }
+
+        fn fxPickTime(o: TimePick, done: *const fn ([]const u8) Msg) void {
+            picking = .{ .text = done };
+            H.pick(.time, o.value, "", "", "", "", 0);
+        }
+
+        fn fxPickOption(o: OptionPick, done: *const fn (u32) Msg) void {
+            picking = .{ .index = done };
+            // The options travel as one block, a line each (the same on every host).
+            var block: std.ArrayList(u8) = .empty;
+            defer block.deinit(gpa);
+            for (o.options, 0..) |opt, i| {
+                if (i > 0) block.append(gpa, '\n') catch {};
+                for (opt) |c| block.append(gpa, if (c == '\n') ' ' else c) catch {};
+            }
+            H.pick(.option, "", "", "", o.title, block.items, if (o.selected) |i| @as(i32, @intCast(i)) else -1);
+        }
+
+        /// The user chose: a date, a time, or the index of an option (as decimal text).
+        pub fn pickDone(value: []const u8) void {
+            const p = picking;
+            picking = .none;
+            if (!started) return;
+            switch (p) {
+                .none => {},
+                .text => |f| dispatch(f(value)),
+                .index => |f| dispatch(f(std.fmt.parseInt(u32, value, 10) catch return)),
+            }
+        }
 
         fn fxVibrate(ms: u32) void {
             H.vibrate(ms);
@@ -1153,7 +1254,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             inputs = ui.inputs.items;
             if (focus_key) |k| {
                 focus_key = null;
-                for (tree.nodes.items) |n| if (n.key == k and n.kind == .input) H.focus(n.host);
+                for (tree.nodes.items) |n| if (n.key == k and (n.kind == .input or n.kind == .text_area)) H.focus(n.host);
             }
             frame_msg = ui.frame_msg;
             if (frame_msg != null) H.requestFrame();

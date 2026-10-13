@@ -66,6 +66,20 @@ pub const Engine = struct {
                 const font = st.Font.of(s);
                 content = .{ .w = e.measure_text(sample, font, inf).w, .h = font.line_height };
             },
+            // As many lines as the text wraps to, at least one; a newline at the end starts one
+            // more (measured with a zero-width space after it, so every platform counts it).
+            .text_area => {
+                const font = st.Font.of(s);
+                const sample = if (n.text.len > 0) n.text else n.placeholder;
+                if (sample.len == 0) {
+                    content = .{ .h = font.line_height };
+                } else {
+                    const ends_open = sample[sample.len - 1] == '\n';
+                    const text = if (ends_open) std.mem.concat(e.tree.allocator(), u8, &.{ sample, "\u{200B}" }) catch sample else sample;
+                    content = e.measure_text(text, font, inner_max_w);
+                    content.h = @max(content.h, font.line_height);
+                }
+            },
             // Pictures and lines take the size their style gives them.
             .image, .path, .video => {},
             .view, .scroll, .scroll_x => {
@@ -111,7 +125,7 @@ pub const Engine = struct {
         const parent_rtl = e.rtl;
         defer e.rtl = parent_rtl;
         if (s.no_mirror) e.rtl = false;
-        if (n.kind == .text or n.kind == .input or n.kind == .image) return;
+        if (n.kind == .text or n.kind == .input or n.kind == .text_area or n.kind == .image) return;
 
         const pad_left = if (e.rtl) s.padding.end else s.padding.start;
         const inner_w = @max(0, frame.w - s.padding.start - s.padding.end);
@@ -408,4 +422,18 @@ test "absolute child pinned to the end and bottom" {
     try testing.expectEqual(Rect{ .x = 70, .y = 70, .w = 20, .h = 20 }, t.nodes.items[1].frame);
     try Engine.run(&t, fakeMeasure, true, .{ .w = 100, .h = 100 });
     try testing.expectEqual(Rect{ .x = 10, .y = 70, .w = 20, .h = 20 }, t.nodes.items[1].frame);
+}
+
+test "a text area grows with its lines" {
+    var t = testTree();
+    defer t.deinit();
+    _ = try t.open(.{ .kind = .view, .style = .{} });
+    _ = try t.add(.{ .kind = .text_area, .style = .{ .line_height = 1 }, .text = "" });
+    _ = try t.add(.{ .kind = .text_area, .style = .{ .line_height = 1 }, .text = "a long line that wraps" });
+    _ = try t.add(.{ .kind = .text_area, .style = .{ .line_height = 1 }, .text = "ab\n" });
+    t.close();
+    try Engine.run(&t, fakeMeasure, false, .{ .w = 80, .h = 400 });
+    try testing.expectEqual(@as(f32, 15), t.nodes.items[1].frame.h);
+    try testing.expectEqual(@as(f32, 45), t.nodes.items[2].frame.h); // 22 characters, 10 a line
+    try testing.expectEqual(@as(f32, 15), t.nodes.items[3].frame.h); // fake measure counts characters
 }

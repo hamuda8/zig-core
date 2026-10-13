@@ -10,7 +10,11 @@
 // maps on a page compile once). options.onPost receives the app's fx.post messages (else they
 // go to the parent page); the returned send(json) reaches the app's hostMessage.
 
-const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4, KIND_IMAGE = 5, KIND_PATH = 6, KIND_VIDEO = 7;
+const KIND_VIEW = 0, KIND_TEXT = 1, KIND_INPUT = 2, KIND_SCROLL = 3, KIND_SCROLL_X = 4, KIND_IMAGE = 5, KIND_PATH = 6, KIND_VIDEO = 7, KIND_TEXT_AREA = 8;
+// Input types: keyboards (tree.Keyboard) and enter-key labels (tree.ReturnKey).
+const INPUT_MODE = ['text', 'email', 'numeric', 'tel', 'url', 'decimal'];
+const ENTER_HINT = ['', 'done', 'go', 'next', 'search', 'send'];
+const PICK_DATE = 1, PICK_TIME = 2, PICK_OPTION = 3;
 const POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4, POINTER_WHEEL = 5;
 const SVG = 'http://www.w3.org/2000/svg';
 const EVENT_PRESS_IN = 1, EVENT_PRESS_OUT = 2, EVENT_PRESS = 3;
@@ -59,7 +63,7 @@ export async function start(wasm, mount = document.body, options = {}) {
   if (embedded && getComputedStyle(mount).position === 'static') mount.style.position = 'relative';
   mount.replaceChildren(root);
   const sheet = document.createElement('style');
-  sheet.textContent = 'input::placeholder{color:var(--zui-placeholder);opacity:1}';
+  sheet.textContent = 'input::placeholder,textarea::placeholder{color:var(--zui-placeholder);opacity:1}';
   document.head.appendChild(sheet);
   const views = new Map([[0, root]]);
   let frameRequested = false;
@@ -69,6 +73,36 @@ export async function start(wasm, mount = document.body, options = {}) {
   measurer.style.cssText = 'position:absolute;left:0;top:0;visibility:hidden;white-space:pre-wrap;overflow-wrap:break-word;';
   measurer.dir = 'auto';
   mount.appendChild(measurer);
+
+  // Pickers (fx.pickDate/Time/Option) open where the pointer last went down.
+  let lastPointer = [innerWidth / 2, innerHeight / 2], picker = null;
+  const onPointer = (e) => { lastPointer = [e.clientX, e.clientY]; };
+  document.addEventListener('pointerdown', onPointer, true);
+  // Browsers without <select>.showPicker() get a plain list in the page, in the system font.
+  const menu = (select, options, selected, title) => {
+    const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    const cover = document.createElement('div');
+    cover.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.3);font-family:system-ui,sans-serif;';
+    const list = document.createElement('div');
+    list.style.cssText = `min-width:240px;max-width:90vw;max-height:70vh;overflow:auto;border-radius:12px;padding:6px 0;background:${dark ? '#1f1f1f' : '#fff'};color:${dark ? '#eee' : '#111'};`;
+    if (title) {
+      const h = document.createElement('div');
+      h.textContent = title;
+      h.style.cssText = 'padding:10px 16px;font-weight:600;font-size:15px;';
+      list.appendChild(h);
+    }
+    options.forEach((o, i) => {
+      const b = document.createElement('div');
+      b.textContent = o;
+      b.dir = 'auto';
+      b.style.cssText = `padding:12px 16px;font-size:16px;cursor:pointer;${i === selected ? 'font-weight:600;' : ''}`;
+      b.onclick = (e) => { e.stopPropagation(); cover.remove(); select.selectedIndex = i; select.dispatchEvent(new Event('change')); };
+      list.appendChild(b);
+    });
+    cover.onclick = () => { cover.remove(); select.remove(); };
+    cover.appendChild(list);
+    document.body.appendChild(cover);
+  };
 
   // Copies bytes into wasm memory for one call.
   const withBytes = (bytes, fn) => {
@@ -120,7 +154,7 @@ export async function start(wasm, mount = document.body, options = {}) {
     zui: {
       zui_create(id, kind) {
         const el = kind === KIND_PATH ? document.createElementNS(SVG, 'svg')
-          : document.createElement(kind === KIND_INPUT ? 'input' : kind === KIND_IMAGE ? 'img' : kind === KIND_VIDEO ? 'video' : 'div');
+          : document.createElement(kind === KIND_INPUT ? 'input' : kind === KIND_TEXT_AREA ? 'textarea' : kind === KIND_IMAGE ? 'img' : kind === KIND_VIDEO ? 'video' : 'div');
         el.style.position = 'absolute';
         el.style.boxSizing = 'border-box';
         el.style.margin = '0';
@@ -128,7 +162,7 @@ export async function start(wasm, mount = document.body, options = {}) {
           el.style.whiteSpace = 'pre-wrap';
           el.style.overflowWrap = 'break-word';
           el.dir = 'auto';
-        } else if (kind === KIND_INPUT) {
+        } else if (kind === KIND_INPUT || kind === KIND_TEXT_AREA) {
           el.style.border = '0';
           el.style.padding = '0';
           el.style.background = 'transparent';
@@ -137,7 +171,17 @@ export async function start(wasm, mount = document.body, options = {}) {
           el.addEventListener('input', () => sendText(id, el.value));
           el.addEventListener('focus', () => ex.zui_input_event(id, INPUT_FOCUS));
           el.addEventListener('blur', () => { if (!el._removed) ex.zui_input_event(id, INPUT_BLUR); });
-          el.addEventListener('keydown', (e) => { if (e.key === 'Enter') ex.zui_input_event(id, INPUT_SUBMIT); });
+          if (kind === KIND_INPUT) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') ex.zui_input_event(id, INPUT_SUBMIT); });
+          else {
+            // Wraps like a text view (zui measured it that way) and scrolls only past its frame.
+            el.style.resize = 'none';
+            el.style.display = 'block';
+            el.style.whiteSpace = 'pre-wrap';
+            el.style.overflowWrap = 'break-word';
+            el.style.overflowY = 'auto';
+            el.style.overflowX = 'hidden';
+            el.style.scrollbarWidth = 'thin';
+          }
         } else if (kind === KIND_IMAGE) {
           el.draggable = false;
           el.alt = '';
@@ -239,6 +283,47 @@ export async function start(wasm, mount = document.body, options = {}) {
         el.style.color = css(color);
         el.style.setProperty('--zui-placeholder', faded(color));
         el.style.textAlign = ALIGN[align];
+      },
+      zui_input_type(id, keyboard, returnKey, secure) {
+        const el = views.get(id);
+        if (el.tagName === 'INPUT') el.type = secure ? 'password' : 'text';
+        el.inputMode = INPUT_MODE[keyboard] || 'text';
+        if (ENTER_HINT[returnKey]) el.enterKeyHint = ENTER_HINT[returnKey]; else el.removeAttribute('enterkeyhint');
+        // Addresses and passwords are typed as they are.
+        const plain = secure || keyboard === 1 || keyboard === 4;
+        el.autocapitalize = plain ? 'none' : '';
+        el.spellcheck = !plain && keyboard === 0;
+        if (secure) el.autocomplete = 'current-password'; else el.removeAttribute('autocomplete');
+      },
+      zui_pick(kind, vptr, vlen, minPtr, minLen, maxPtr, maxLen, tptr, tlen, optr, olen, selected) {
+        picker?.remove();
+        const options = kind === PICK_OPTION ? str(optr, olen).split('\n') : [];
+        const el = document.createElement(kind === PICK_OPTION ? 'select' : 'input');
+        // Invisible, where the finger or mouse last went down: the browser opens its picker there.
+        el.style.cssText = `position:fixed;left:${lastPointer[0]}px;top:${lastPointer[1]}px;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;`;
+        if (kind === PICK_OPTION) {
+          for (const o of options) el.appendChild(new Option(o));
+          el.selectedIndex = selected;
+        } else {
+          el.type = kind === PICK_DATE ? 'date' : 'time';
+          el.value = str(vptr, vlen);
+          if (minLen) el.min = str(minPtr, minLen);
+          if (maxLen) el.max = str(maxPtr, maxLen);
+        }
+        document.body.appendChild(el);
+        picker = el;
+        el.addEventListener('change', () => {
+          const v = kind === PICK_OPTION ? String(el.selectedIndex) : el.value;
+          el.remove();
+          if (picker === el) picker = null;
+          if (v !== '' && v !== '-1') withBytes(encoder.encode(v), (p, n) => ex.zui_pick_done(p, n));
+        });
+        if (typeof el.showPicker === 'function') {
+          try { el.showPicker(); return; } catch {}
+        }
+        if (kind === PICK_OPTION) return void menu(el, options, selected, str(tptr, tlen));
+        el.focus();
+        el.click();
       },
       zui_content(id, w, h) {
         const el = views.get(id);
@@ -563,6 +648,8 @@ export async function start(wasm, mount = document.body, options = {}) {
       removeEventListener('resize', onResize);
       removeEventListener('message', onMessage);
       removeEventListener('popstate', onPop);
+      document.removeEventListener('pointerdown', onPointer, true);
+      picker?.remove();
       removeEventListener('online', onOnline);
       removeEventListener('offline', onOffline);
       document.removeEventListener('visibilitychange', onVisibility);

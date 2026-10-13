@@ -41,6 +41,7 @@ var rt: struct {
     socket: *const fn (u32, zui.SocketEvent.Kind, []const u8) void,
     call: *const fn (zui.CallEvent.Kind, []const u8) void,
     device: *const fn (zui.DeviceEvent) void,
+    pick: *const fn ([]const u8) void,
 } = undefined;
 /// NSStringDrawingUsesLineFragmentOrigin
 const uses_line_fragment_origin: isize = 1;
@@ -51,6 +52,12 @@ const break_word: isize = 0;
 const break_tail: isize = 4;
 
 var views: std.ArrayList(id) = .empty;
+/// Text areas (UITextView) show their placeholder in a label of their own.
+var placeholders: std.ArrayList(id) = .empty;
+/// The view controller of the window, which presents pickers.
+var root_controller: id = null;
+/// Where the last touch went down, in the root view (an iPad popover points there).
+var last_touch: objc.CGPoint = .{ .x = 0, .y = 0 };
 /// Scroll views put their children in a content view.
 var contents: std.ArrayList(id) = .empty;
 var pressables: std.ArrayList(bool) = .empty;
@@ -154,6 +161,8 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
     slot(&frames, i);
     slot(&origins, i);
     slot(&filters, i);
+    slot(&placeholders, i);
+    placeholders.items[i] = null;
     filters.items[i] = .{};
     origins.items[i] = null;
     const v: id = switch (kind) {
@@ -186,6 +195,20 @@ pub fn create(i: u32, kind: zui.tree.Kind) void {
             add(t, objc.sel("addTarget:action:forControlEvents:"), target, objc.sel("submitted:"), editing_return);
             break :blk t;
         },
+        .text_area => blk: {
+            const tv = objc.new("UITextView");
+            objc.sendVoid1(tv, "setDelegate:", target);
+            objc.sendVoid1(tv, "setBackgroundColor:", objc.send(objc.class("UIColor"), "clearColor"));
+            // Text from the very edge, as zui measured it.
+            objc.msgSend(*const fn (id, objc.SEL, objc.UIEdgeInsets) callconv(.c) void)(tv, objc.sel("setTextContainerInset:"), .{ .top = 0, .left = 0, .bottom = 0, .right = 0 });
+            objc.sendVoidFloat(objc.send(tv, "textContainer"), "setLineFragmentPadding:", 0);
+            const ph = objc.new("UILabel");
+            objc.sendVoidInt(ph, "setNumberOfLines:", 0);
+            objc.sendVoidBool(ph, "setUserInteractionEnabled:", false);
+            objc.sendVoid1(tv, "addSubview:", ph);
+            placeholders.items[i] = ph;
+            break :blk tv;
+        },
         .scroll, .scroll_x => blk: {
             const s = objc.new("UIScrollView");
             const c = objc.new("ZuiView");
@@ -210,6 +233,8 @@ pub fn destroy(i: u32) void {
     image_urls.items[i] = null;
     if (contents.items[i] != null) objc.release(contents.items[i]);
     contents.items[i] = null;
+    if (placeholders.items[i] != null) objc.release(placeholders.items[i]);
+    placeholders.items[i] = null;
 }
 
 pub fn insert(parent: u32, i: u32, index: u32) void {
@@ -230,6 +255,17 @@ pub fn insert(parent: u32, i: u32, index: u32) void {
 pub fn frame(i: u32, r: zui.Rect) void {
     if (i < frames.items.len) frames.items[i] = r;
     place(i, r);
+    placePlaceholder(i);
+}
+
+/// A text area's placeholder: at the top, as high as its lines.
+fn placePlaceholder(i: u32) void {
+    if (i >= placeholders.items.len) return;
+    const ph = placeholders.items[i] orelse return;
+    const w = frames.items[i].w;
+    const fits = objc.msgSend(*const fn (id, objc.SEL, objc.CGSize) callconv(.c) objc.CGSize)(ph, objc.sel("sizeThatFits:"), .{ .w = w, .h = 1e7 });
+    const set_frame = objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void);
+    set_frame(ph, objc.sel("setFrame:"), .{ .w = w, .h = @min(fits.h, frames.items[i].h) });
 }
 
 fn place(i: u32, r: zui.Rect) void {
@@ -270,6 +306,7 @@ pub fn text(i: u32, s: []const u8, f: zui.Font, argb: u32, a: zui.PhysicalAlign)
 
 pub fn input(i: u32, value: []const u8, placeholder: []const u8, f: zui.Font, argb: u32, a: zui.PhysicalAlign) void {
     const t = view(i);
+    if (i < placeholders.items.len and placeholders.items[i] != null) return textArea(i, value, placeholder, f, argb, a);
     const current = objc.send(t, "text");
     const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(current, objc.sel("UTF8String"));
     const same = if (utf8) |p| std.mem.eql(u8, std.mem.span(p), value) else value.len == 0;
@@ -284,6 +321,43 @@ pub fn input(i: u32, value: []const u8, placeholder: []const u8, f: zui.Font, ar
     const ph = attributed(placeholder, attributes(f, faded(argb), a));
     defer objc.release(ph);
     objc.sendVoid1(t, "setAttributedPlaceholder:", ph);
+}
+
+/// A UITextView: the same attributes as text views, for what is there and what is typed.
+fn textArea(i: u32, value: []const u8, placeholder: []const u8, f: zui.Font, argb: u32, a: zui.PhysicalAlign) void {
+    const tv = view(i);
+    const attrs = attributes(f, argb, a);
+    const current = objc.send(tv, "text");
+    const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(current, objc.sel("UTF8String"));
+    const same = if (utf8) |p| std.mem.eql(u8, std.mem.span(p), value) else value.len == 0;
+    if (!same) {
+        const str = attributed(value, attrs);
+        defer objc.release(str);
+        objc.sendVoid1(tv, "setAttributedText:", str);
+    }
+    objc.sendVoid1(tv, "setTypingAttributes:", attrs);
+    objc.sendVoid1(tv, "setTintColor:", color(argb));
+    const ph = placeholders.items[i];
+    const str = attributed(placeholder, attributes(f, faded(argb), a));
+    defer objc.release(str);
+    objc.sendVoid1(ph, "setAttributedText:", str);
+    objc.sendVoidBool(ph, "setHidden:", value.len > 0);
+    placePlaceholder(i);
+}
+
+/// Keyboards (tree.Keyboard) and enter keys (tree.ReturnKey) as UIKeyboardType / UIReturnKeyType.
+pub fn inputType(i: u32, t: zui.InputType) void {
+    const v = view(i);
+    const keyboards = [_]isize{ 0, 7, 4, 5, 3, 8 }; // default, email, number pad, phone pad, URL, decimal pad
+    const returns = [_]isize{ 0, 9, 1, 4, 6, 7 }; // default, done, go, next, search, send
+    objc.sendVoidInt(v, "setKeyboardType:", keyboards[@intFromEnum(t.keyboard)]);
+    objc.sendVoidInt(v, "setReturnKeyType:", returns[@intFromEnum(t.return_key)]);
+    const plain = t.secure or t.keyboard == .email or t.keyboard == .url;
+    objc.sendVoidInt(v, "setAutocapitalizationType:", if (plain) 0 else 2);
+    objc.sendVoidInt(v, "setAutocorrectionType:", if (plain) 1 else 0);
+    const area = i < placeholders.items.len and placeholders.items[i] != null;
+    if (!area) objc.sendVoidBool(v, "setSecureTextEntry:", t.secure);
+    objc.sendVoid(v, "reloadInputViews");
 }
 
 pub fn content(i: u32, s: zui.Size) void {
@@ -317,7 +391,7 @@ pub fn exportEntry(comptime App: type) void {
         var started = false;
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
-            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent };
+            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent, .pick = pickDone };
             if (@hasDecl(App, "rtc")) {
                 Media.defineClasses();
                 Media.setPump(&R.callsPump);
@@ -359,7 +433,12 @@ pub fn exportEntry(comptime App: type) void {
             // A view backed by a CAShapeLayer, for route lines.
             objc.defineClass("ZuiPathView", "UIView", &.{}, &.{});
             objc.addClassMethod("ZuiPathView", "layerClass", @ptrCast(&shapeLayerClass), "#@:");
-            objc.defineClass("ZuiTarget", "NSObject", &.{}, &.{
+            objc.defineClass("ZuiTarget", "NSObject", &.{"UITextViewDelegate"}, &.{
+                .{ "textViewDidChange:", @ptrCast(&textViewChanged), "v@:@" },
+                .{ "textViewDidBeginEditing:", @ptrCast(&inputBegan), "v@:@" },
+                .{ "textViewDidEndEditing:", @ptrCast(&inputEnded), "v@:@" },
+                .{ "pickerDone:", @ptrCast(&pickerDone), "v@:@" },
+                .{ "pickerCancel:", @ptrCast(&pickerCancel), "v@:@" },
                 .{ "changed:", @ptrCast(&textChanged), "v@:@" },
                 .{ "began:", @ptrCast(&inputBegan), "v@:@" },
                 .{ "ended:", @ptrCast(&inputEnded), "v@:@" },
@@ -377,6 +456,7 @@ pub fn exportEntry(comptime App: type) void {
             window = objc.send1(objc.send(objc.class("UIWindow"), "alloc"), "initWithWindowScene:", scene);
             root = objc.new("ZuiRootView");
             const controller = objc.new("UIViewController");
+            root_controller = controller;
             objc.sendVoid1(controller, "setView:", root);
             objc.sendVoid1(window, "setRootViewController:", controller);
             objc.sendVoid(window, "makeKeyAndVisible");
@@ -522,6 +602,7 @@ pub fn exportEntry(comptime App: type) void {
 
         fn touchesBegan(self: id, _: objc.SEL, touches: id, ev: id) callconv(.c) void {
             const i = tagOf(self);
+            last_touch = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) objc.CGPoint)(objc.send(touches, "anyObject"), objc.sel("locationInView:"), root);
             if (wantsPointers(i)) return sendPointers(self, touches, .down);
             if (!isPressable(i)) return objc.sendSuper2(self, "ZuiView", "touchesBegan:withEvent:", touches, ev);
             R.event(i, .press_in);
@@ -545,6 +626,17 @@ pub fn exportEntry(comptime App: type) void {
             R.event(i, .press_out);
         }
 
+        fn textViewChanged(_: id, _: objc.SEL, tv: id) callconv(.c) void {
+            const i = tagOf(tv);
+            const s = objc.send(tv, "text");
+            const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(s, objc.sel("UTF8String"));
+            const value = if (utf8) |p| std.mem.span(p) else "";
+            if (i < placeholders.items.len and placeholders.items[i] != null) objc.sendVoidBool(placeholders.items[i], "setHidden:", value.len > 0);
+            R.textEvent(i, value);
+        }
+        fn pickDone(value: []const u8) void {
+            R.pickDone(value);
+        }
         fn textChanged(_: id, _: objc.SEL, field: id) callconv(.c) void {
             const s = objc.send(field, "text");
             const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(s, objc.sel("UTF8String"));
@@ -1467,4 +1559,170 @@ fn pathChanged(_: *const PathBlock, nw_path: ?*anyopaque) callconv(.c) void {
     if (online == was_online) return;
     was_online = online;
     rt.device(if (online) .online else .offline);
+}
+
+// ---- Pickers: UIDatePicker in a sheet, an action sheet of options ----
+
+var picker_sheet: id = null;
+var date_picker: id = null;
+var picking_date = true;
+
+/// An NSDateFormatter for fixed formats ("yyyy-MM-dd"), +1 retained.
+fn posixFormatter(format: []const u8) id {
+    const f = objc.new("NSDateFormatter");
+    const ident = objc.nsString("en_US_POSIX");
+    defer objc.release(ident);
+    objc.sendVoid1(f, "setLocale:", objc.send1(objc.class("NSLocale"), "localeWithLocaleIdentifier:", ident));
+    const fmt = objc.nsString(format);
+    defer objc.release(fmt);
+    objc.sendVoid1(f, "setDateFormat:", fmt);
+    return f;
+}
+
+fn parseDate(formatter: id, s: []const u8) id {
+    if (s.len == 0) return null;
+    const str = objc.nsString(s);
+    defer objc.release(str);
+    return objc.send1(formatter, "dateFromString:", str);
+}
+
+fn barButton(system_item: isize, action: ?[*:0]const u8) id {
+    const make = objc.msgSend(*const fn (id, objc.SEL, isize, id, objc.SEL) callconv(.c) id);
+    return make(objc.send(objc.class("UIBarButtonItem"), "alloc"), objc.sel("initWithBarButtonSystemItem:target:action:"), system_item, if (action != null) target else null, if (action) |a| objc.sel(a) else null);
+}
+
+pub fn pick(kind: zui.PickKind, value: []const u8, min: []const u8, max: []const u8, title: []const u8, options: []const u8, selected: i32) void {
+    if (root_controller == null) return;
+    if (kind == .option) return pickOption(title, options, selected);
+    if (picker_sheet != null) return;
+    picking_date = kind == .date;
+    const vc = objc.new("UIViewController");
+    const v = objc.send(vc, "view");
+    objc.sendVoid1(v, "setBackgroundColor:", objc.send(objc.class("UIColor"), "systemBackgroundColor"));
+
+    const dp = objc.new("UIDatePicker");
+    objc.sendVoidInt(dp, "setDatePickerMode:", if (picking_date) 1 else 0); // date / time
+    objc.sendVoidInt(dp, "setPreferredDatePickerStyle:", if (picking_date) 3 else 1); // inline / wheels
+    const formatter = posixFormatter(if (picking_date) "yyyy-MM-dd" else "HH:mm");
+    defer objc.release(formatter);
+    if (parseDate(formatter, value)) |d| objc.sendVoid1(dp, "setDate:", d);
+    if (parseDate(formatter, min)) |d| objc.sendVoid1(dp, "setMinimumDate:", d);
+    if (parseDate(formatter, max)) |d| objc.sendVoid1(dp, "setMaximumDate:", d);
+
+    // Cancel and Done from the system, in the system's language.
+    const bar = objc.new("UIToolbar");
+    const cancel = barButton(1, "pickerCancel:");
+    defer objc.release(cancel);
+    const space = barButton(5, null);
+    defer objc.release(space);
+    const done = barButton(0, "pickerDone:");
+    defer objc.release(done);
+    var items = [_]id{ cancel, space, done };
+    const array = objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id)(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &items, items.len);
+    objc.sendVoid1(bar, "setItems:", array);
+
+    const bounds = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) objc.CGRect)(root, objc.sel("bounds"));
+    const set_frame = objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void);
+    set_frame(bar, objc.sel("setFrame:"), .{ .w = bounds.w, .h = 44 });
+    set_frame(dp, objc.sel("setFrame:"), .{ .y = 44, .w = bounds.w, .h = if (picking_date) 380 else 216 });
+    objc.sendVoidInt(bar, "setAutoresizingMask:", 2); // flexible width
+    objc.sendVoidInt(dp, "setAutoresizingMask:", 2);
+    objc.sendVoid1(v, "addSubview:", bar);
+    objc.sendVoid1(v, "addSubview:", dp);
+    objc.release(bar);
+
+    const sheet = objc.send(vc, "sheetPresentationController");
+    if (sheet != null) {
+        const detent = objc.class("UISheetPresentationControllerDetent");
+        var detents = [_]id{ objc.send(detent, "mediumDetent"), objc.send(detent, "largeDetent") };
+        objc.sendVoid1(sheet, "setDetents:", objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id)(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &detents, if (picking_date) 2 else 1));
+        objc.sendVoidBool(sheet, "setPrefersGrabberVisible:", true);
+    }
+    picker_sheet = vc;
+    date_picker = dp;
+    present(vc);
+}
+
+fn present(vc: id) void {
+    objc.msgSend(*const fn (id, objc.SEL, id, bool, ?*anyopaque) callconv(.c) void)(root_controller, objc.sel("presentViewController:animated:completion:"), vc, true, null);
+}
+
+fn closePicker() void {
+    objc.msgSend(*const fn (id, objc.SEL, bool, ?*anyopaque) callconv(.c) void)(root_controller, objc.sel("dismissViewControllerAnimated:completion:"), true, null);
+    if (date_picker != null) objc.release(date_picker);
+    if (picker_sheet != null) objc.release(picker_sheet);
+    date_picker = null;
+    picker_sheet = null;
+}
+
+fn pickerDone(_: id, _: objc.SEL, _: id) callconv(.c) void {
+    if (date_picker == null) return;
+    const formatter = posixFormatter(if (picking_date) "yyyy-MM-dd" else "HH:mm");
+    defer objc.release(formatter);
+    const str = objc.send1(formatter, "stringFromDate:", objc.send(date_picker, "date"));
+    var buf: [32]u8 = undefined;
+    const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(str, objc.sel("UTF8String"));
+    const value = if (utf8) |p| std.mem.span(p) else "";
+    const n = @min(value.len, buf.len);
+    @memcpy(buf[0..n], value[0..n]);
+    closePicker();
+    rt.pick(buf[0..n]);
+}
+
+fn pickerCancel(_: id, _: objc.SEL, _: id) callconv(.c) void {
+    closePicker();
+}
+
+/// The handler of each option's UIAlertAction: a block capturing the option's index.
+const OptionBlock = extern struct { header: objc.BlockHeader, index: i32 };
+const option_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(OptionBlock) };
+var option_blocks: std.ArrayList(*OptionBlock) = .empty;
+
+fn optionChosen(block: *OptionBlock, _: id) callconv(.c) void {
+    if (block.index < 0) return;
+    var buf: [12]u8 = undefined;
+    rt.pick(std.fmt.bufPrint(&buf, "{d}", .{block.index}) catch return);
+}
+
+fn optionBlock(index: i32) ?*OptionBlock {
+    const b = zui.allocator.create(OptionBlock) catch return null;
+    b.* = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&optionChosen), .descriptor = &option_descriptor }, .index = index };
+    option_blocks.append(zui.allocator, b) catch {
+        zui.allocator.destroy(b);
+        return null;
+    };
+    return b;
+}
+
+fn pickOption(title: []const u8, options: []const u8, selected: i32) void {
+    // The blocks of the last list are no longer called.
+    for (option_blocks.items) |b| zui.allocator.destroy(b);
+    option_blocks.clearRetainingCapacity();
+    const t = if (title.len > 0) objc.nsString(title) else null;
+    defer if (t != null) objc.release(t);
+    const make = objc.msgSend(*const fn (id, objc.SEL, id, id, isize) callconv(.c) id);
+    const sheet = make(objc.class("UIAlertController"), objc.sel("alertControllerWithTitle:message:preferredStyle:"), t, null, 0); // action sheet
+    const action = objc.msgSend(*const fn (id, objc.SEL, id, isize, ?*OptionBlock) callconv(.c) id);
+    var lines = std.mem.splitScalar(u8, options, '\n');
+    var index: i32 = 0;
+    while (lines.next()) |line| : (index += 1) {
+        const label = objc.nsString(line);
+        defer objc.release(label);
+        const a = action(objc.class("UIAlertAction"), objc.sel("actionWithTitle:style:handler:"), label, 0, optionBlock(index));
+        objc.sendVoid1(sheet, "addAction:", a);
+        if (index == selected) objc.sendVoid1(sheet, "setPreferredAction:", a);
+    }
+    // "Cancel" in the system's language, from UIKit's own strings.
+    const uikit = objc.send1(objc.class("NSBundle"), "bundleForClass:", objc.class("UIApplication"));
+    const key = objc.nsString("Cancel");
+    defer objc.release(key);
+    const cancel = objc.msgSend(*const fn (id, objc.SEL, id, id, id) callconv(.c) id)(uikit, objc.sel("localizedStringForKey:value:table:"), key, key, null);
+    objc.sendVoid1(sheet, "addAction:", action(objc.class("UIAlertAction"), objc.sel("actionWithTitle:style:handler:"), cancel, 1, null));
+    // iPad: a popover pointing at the last touch.
+    const popover = objc.send(sheet, "popoverPresentationController");
+    if (popover != null) {
+        objc.sendVoid1(popover, "setSourceView:", root);
+        objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(popover, objc.sel("setSourceRect:"), .{ .x = last_touch.x, .y = last_touch.y, .w = 1, .h = 1 });
+    }
+    present(sheet);
 }

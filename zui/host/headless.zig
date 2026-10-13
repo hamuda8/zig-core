@@ -20,6 +20,7 @@ pub const View = struct {
     transform: zui.Transform = .{},
     clip: bool = false,
     path_points: usize = 0,
+    input_type: zui.InputType = .{},
 };
 
 /// Set when the app asked for a frame; `Driver.frame` delivers it.
@@ -82,6 +83,22 @@ pub fn input(id: u32, value: []const u8, placeholder: []const u8, _: zui.Font, _
     v.placeholder.appendSlice(gpa, placeholder) catch {};
 }
 pub fn content(_: u32, _: zui.Size) void {}
+pub fn inputType(id: u32, t: zui.InputType) void {
+    if (views.getPtr(id)) |v| v.input_type = t;
+}
+/// The picker the app opened and what it was given (options one a line).
+pub var picker: ?zui.PickKind = null;
+pub var picker_value: std.ArrayList(u8) = .empty;
+pub var picker_options: std.ArrayList(u8) = .empty;
+pub var picker_selected: i32 = -1;
+pub fn pick(kind: zui.PickKind, value: []const u8, _: []const u8, _: []const u8, _: []const u8, options: []const u8, selected: i32) void {
+    picker = kind;
+    picker_value.clearRetainingCapacity();
+    picker_value.appendSlice(gpa, value) catch {};
+    picker_options.clearRetainingCapacity();
+    picker_options.appendSlice(gpa, options) catch {};
+    picker_selected = selected;
+}
 pub fn transform(id: u32, t: zui.Transform) void {
     if (views.getPtr(id)) |v| v.transform = t;
 }
@@ -291,6 +308,7 @@ pub fn Driver(comptime App: type) type {
             vibrated_ms = 0;
             beeps = 0;
             awake = false;
+            picker = null;
         }
 
         /// Back (Android's button, the iOS swipe). Returns whether the app took it.
@@ -341,11 +359,27 @@ pub fn Driver(comptime App: type) type {
             R.locationEvent(.{ .fix = .{ .lat = lat, .lng = lng, .accuracy = 5 } });
         }
 
+        /// The user chooses in the open picker: a date, a time, or an option's index ("2").
+        pub fn choose(value: []const u8) !void {
+            if (picker == null) return error.NoPicker;
+            picker = null;
+            R.pickDone(value);
+        }
+
+        /// The input or text area whose placeholder is `placeholder`.
+        pub fn inputView(placeholder: []const u8) ?*View {
+            var it = views.iterator();
+            while (it.next()) |e| {
+                if ((e.value_ptr.kind == .input or e.value_ptr.kind == .text_area) and std.mem.eql(u8, e.value_ptr.placeholder.items, placeholder)) return e.value_ptr;
+            }
+            return null;
+        }
+
         /// Focus, blur or enter on the input whose placeholder is `placeholder`.
         pub fn inputEvent(placeholder: []const u8, kind: zui.InputEvent) !void {
             var it = views.iterator();
             while (it.next()) |e| {
-                if (e.value_ptr.kind == .input and std.mem.eql(u8, e.value_ptr.placeholder.items, placeholder)) {
+                if ((e.value_ptr.kind == .input or e.value_ptr.kind == .text_area) and std.mem.eql(u8, e.value_ptr.placeholder.items, placeholder)) {
                     return R.inputEvent(e.key_ptr.*, kind);
                 }
             }
@@ -379,7 +413,7 @@ pub fn Driver(comptime App: type) type {
         pub fn typeInto(placeholder: []const u8, s: []const u8) !void {
             var it = views.iterator();
             while (it.next()) |e| {
-                if (e.value_ptr.kind == .input and std.mem.eql(u8, e.value_ptr.placeholder.items, placeholder)) {
+                if ((e.value_ptr.kind == .input or e.value_ptr.kind == .text_area) and std.mem.eql(u8, e.value_ptr.placeholder.items, placeholder)) {
                     return R.textEvent(e.key_ptr.*, s);
                 }
             }
@@ -635,4 +669,89 @@ test "device events, the wall clock" {
     try std.testing.expectEqual(@as(u32, 2), D.R.appState().events);
     try std.testing.expectEqual(@as(i64, 1_700_000_000_000), D.R.appState().now);
     try std.testing.expectEqual(@as(i64, 1_700_000_000_000), zui.now());
+}
+
+// Inputs of every kind, and the platform's pickers.
+const Form = struct {
+    pub const Msg = union(enum) { date, time, city, picked_date: []const u8, picked_time: []const u8, picked_city: u32, note: []const u8 };
+    pub const State = struct { date: [10]u8 = "2026-01-01".*, time: [5]u8 = "09:00".*, city: u32 = 0, note: [64]u8 = undefined, note_len: usize = 0 };
+    const cities = [_][]const u8{ "Damascus", "Aleppo", "Homs" };
+    pub fn init() State {
+        return .{};
+    }
+    fn onDate(v: []const u8) Msg {
+        return .{ .picked_date = v };
+    }
+    fn onTime(v: []const u8) Msg {
+        return .{ .picked_time = v };
+    }
+    fn onCity(i: u32) Msg {
+        return .{ .picked_city = i };
+    }
+    fn onNote(v: []const u8) Msg {
+        return .{ .note = v };
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .date => fx.pickDate(.{ .value = &s.date, .min = "2026-01-01" }, onDate),
+            .time => fx.pickTime(.{ .value = &s.time }, onTime),
+            .city => fx.pickOption(.{ .title = "City", .options = &cities, .selected = s.city }, onCity),
+            .picked_date => |v| if (v.len == 10) @memcpy(&s.date, v),
+            .picked_time => |v| if (v.len == 5) @memcpy(&s.time, v),
+            .picked_city => |i| if (i < cities.len) {
+                s.city = i;
+            },
+            .note => |v| {
+                s.note_len = @min(v.len, s.note.len);
+                @memcpy(s.note[0..s.note_len], v[0..s.note_len]);
+            },
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{ .width = .{ .px = 80 } }, .{});
+        ui.input(.{ .placeholder = "Password", .secure = true, .return_key = .go });
+        ui.input(.{ .placeholder = "Email", .keyboard = .email });
+        ui.input(.{ .placeholder = "Note", .multiline = true, .value = s.note[0..s.note_len], .on_change = onNote, .style = .{ .line_height = 1 } });
+        ui.begin(.{}, .{ .on_press = .date });
+        ui.text(&s.date, .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .time });
+        ui.text(&s.time, .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .city });
+        ui.text(cities[s.city], .{});
+        ui.end();
+        ui.end();
+    }
+};
+
+test "inputs: password, keyboards, a text area that grows; date, time and option pickers" {
+    const D = Driver(Form);
+    D.start(200, 400);
+    defer D.reset();
+    try std.testing.expect(D.inputView("Password").?.input_type.secure);
+    try std.testing.expectEqual(zui.ReturnKey.go, D.inputView("Password").?.input_type.return_key);
+    try std.testing.expectEqual(zui.Keyboard.email, D.inputView("Email").?.input_type.keyboard);
+    try std.testing.expectEqual(zui.tree.Kind.text_area, D.inputView("Note").?.kind);
+    try std.testing.expectEqual(@as(f32, 15), D.inputView("Note").?.frame.h);
+    try D.typeInto("Note", "one line\nand more text here, and then some more, and more"); // 58 characters, 25 a line
+    try std.testing.expectEqual(@as(f32, 45), D.inputView("Note").?.frame.h);
+
+    try D.press("2026-01-01");
+    try std.testing.expectEqual(zui.PickKind.date, picker.?);
+    try std.testing.expectEqualStrings("2026-01-01", picker_value.items);
+    try D.choose("2026-03-04");
+    try std.testing.expect(D.findText("2026-03-04") != 0);
+
+    try D.press("09:00");
+    try std.testing.expectEqual(zui.PickKind.time, picker.?);
+    try D.choose("17:30");
+    try std.testing.expect(D.findText("17:30") != 0);
+
+    try D.press("Damascus");
+    try std.testing.expectEqualStrings("Damascus\nAleppo\nHoms", picker_options.items);
+    try std.testing.expectEqual(@as(i32, 0), picker_selected);
+    try D.choose("2");
+    try std.testing.expect(D.findText("Homs") != 0);
+    try std.testing.expectError(error.NoPicker, D.choose("1"));
 }

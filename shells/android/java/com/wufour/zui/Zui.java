@@ -61,7 +61,7 @@ import android.widget.TextView;
  * are logical points (dp); they become pixels here.
  */
 public final class Zui {
-    static final int VIEW = 0, TEXT = 1, INPUT = 2, SCROLL = 3, SCROLL_X = 4, IMAGE = 5, PATH = 6, VIDEO = 7;
+    static final int VIEW = 0, TEXT = 1, INPUT = 2, SCROLL = 3, SCROLL_X = 4, IMAGE = 5, PATH = 6, VIDEO = 7, TEXT_AREA = 8;
     static final int POINTER_DOWN = 1, POINTER_MOVE = 2, POINTER_UP = 3, POINTER_CANCEL = 4;
 
     /** Images: decoded bitmaps in memory (1/8 of the heap), downloads on four threads. The HTTP
@@ -178,14 +178,25 @@ public final class Zui {
                 v = t;
                 break;
             }
-            case INPUT: {
+            case INPUT:
+            case TEXT_AREA: {
                 EditText e = new EditText(activity);
                 e.setBackground(null);
                 e.setPadding(0, 0, 0, 0);
                 e.setIncludeFontPadding(false);
-                e.setSingleLine(true);
-                e.setInputType(InputType.TYPE_CLASS_TEXT);
-                e.setImeOptions(EditorInfo.IME_ACTION_DONE);
+                if (kind == TEXT_AREA) {
+                    // Wraps like a text view (zui measured it that way); scrolls past its frame.
+                    e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+                    e.setSingleLine(false);
+                    e.setHorizontallyScrolling(false);
+                    e.setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE);
+                    e.setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
+                    e.setImeOptions(EditorInfo.IME_ACTION_NONE);
+                } else {
+                    e.setSingleLine(true);
+                    e.setInputType(InputType.TYPE_CLASS_TEXT);
+                    e.setImeOptions(EditorInfo.IME_ACTION_DONE);
+                }
                 e.setOnFocusChangeListener((view, has) -> nativeInput(id, has ? INPUT_FOCUS : INPUT_BLUR));
                 e.setOnEditorActionListener((view, action, ev) -> {
                     nativeInput(id, INPUT_SUBMIT);
@@ -361,8 +372,9 @@ public final class Zui {
         }
         e.setHint(placeholder);
         styleText(e, size, weight, lineHeight, mono, color, align);
-        // Text in the middle of the field, as on the web and iOS.
-        e.setGravity((gravity(align) & Gravity.HORIZONTAL_GRAVITY_MASK) | Gravity.CENTER_VERTICAL);
+        // Text in the middle of the field, as on the web and iOS; a text area's from the top.
+        boolean area = (e.getInputType() & InputType.TYPE_TEXT_FLAG_MULTI_LINE) != 0;
+        e.setGravity((gravity(align) & Gravity.HORIZONTAL_GRAVITY_MASK) | (area ? Gravity.TOP : Gravity.CENTER_VERTICAL));
         e.setHintTextColor((Math.round(Color.alpha(color) * 0.45f) << 24) | (color & 0xffffff));
     }
 

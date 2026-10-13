@@ -5,7 +5,8 @@
 //!   create(id, Kind)                 destroy(id)              insert(parent, id, index)
 //!   frame(id, Rect)                  box(id, Box)             pressable(id, bool)
 //!   text(id, []const u8, Font, color: u32, PhysicalAlign)
-//!   input(id, value, placeholder, Font, color: u32, PhysicalAlign)
+//!   input(id, value, placeholder, Font, color: u32, PhysicalAlign)   — inputs and text areas
+//!   inputType(id, tree.InputType)    — before `input`, when it changes
 //!   content(id, Size)                — scroll nodes: size of what scrolls
 //!   transform(id, Transform)         clip(id, bool)           pointer(id, bool)
 //!   image(id, url)                   path(id, tree.Path)
@@ -188,8 +189,11 @@ pub fn Reconciler(comptime H: type) type {
                 st.physicalAlign(o.?.style.text_align, r.prev.rtl) != al;
             switch (n.kind) {
                 .text => if (text_changed) H.text(id, n.text, font, color, al),
-                .input => if (text_changed or !std.mem.eql(u8, o.?.placeholder, n.placeholder))
-                    H.input(id, n.text, n.placeholder, font, color, al),
+                .input, .text_area => {
+                    if (o == null or !std.meta.eql(o.?.input_type, n.input_type)) H.inputType(id, n.input_type);
+                    if (text_changed or !std.mem.eql(u8, o.?.placeholder, n.placeholder))
+                        H.input(id, n.text, n.placeholder, font, color, al);
+                },
                 .scroll, .scroll_x => if (o == null or !std.meta.eql(o.?.content, n.content)) H.content(id, n.content),
                 .image => {
                     if (o == null or !std.mem.eql(u8, o.?.text, n.text)) H.image(id, n.text);
@@ -254,6 +258,9 @@ pub const RecordingHost = struct {
     }
     pub fn input(id: u32, value: []const u8, placeholder: []const u8, _: st.Font, _: u32, _: st.PhysicalAlign) void {
         write("input {d} {s} {s}", .{ id, value, placeholder });
+    }
+    pub fn inputType(id: u32, t: tree_mod.InputType) void {
+        write("input type {d} {t} {}", .{ id, t.keyboard, t.secure });
     }
     pub fn content(id: u32, s: st.Size) void {
         write("content {d} {d} {d}", .{ id, s.w, s.h });

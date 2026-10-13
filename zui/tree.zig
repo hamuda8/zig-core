@@ -8,8 +8,21 @@ pub const none: u32 = std.math.maxInt(u32);
 
 /// `scroll` scrolls vertically, `scroll_x` horizontally (Android needs a different view for each).
 /// `image` shows a picture from a URL; `path` draws a line (routes on a map); `video` shows a
-/// call's camera stream.
-pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4, image = 5, path = 6, video = 7 };
+/// call's camera stream; `text_area` is an input of several lines that grows with its text.
+pub const Kind = enum(u8) { view = 0, text = 1, input = 2, scroll = 3, scroll_x = 4, image = 5, path = 6, video = 7, text_area = 8 };
+
+/// The keyboard an input asks for.
+pub const Keyboard = enum(u8) { text = 0, email = 1, number = 2, phone = 3, url = 4, decimal = 5 };
+/// The label of the keyboard's enter key.
+pub const ReturnKey = enum(u8) { default = 0, done = 1, go = 2, next = 3, search = 4, send = 5 };
+
+/// How an input takes its text.
+pub const InputType = struct {
+    keyboard: Keyboard = .text,
+    return_key: ReturnKey = .default,
+    /// A password: the text is hidden.
+    secure: bool = false,
+};
 
 pub const Video = struct {
     /// A stream id from fx.openMedia or a peer's .track event; 0 shows nothing.
@@ -51,6 +64,8 @@ pub const Node = struct {
     pointer: bool = false,
     path: ?Path = null,
     video: ?Video = null,
+    /// Inputs and text areas.
+    input_type: InputType = .{},
 
     parent: u32 = none,
     first_child: u32 = none,

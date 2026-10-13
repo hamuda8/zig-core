@@ -65,6 +65,8 @@ var device: struct {
     keep_awake: jni.jmethodID,
     vibrate: jni.jmethodID,
     beep: jni.jmethodID,
+    input_type: jni.jmethodID,
+    pick: jni.jmethodID,
 } = undefined;
 
 fn bindDevice(e: *jni.Env) void {
@@ -77,6 +79,8 @@ fn bindDevice(e: *jni.Env) void {
         .{ "keep_awake", "keepAwake", "(Z)V" },
         .{ "vibrate", "vibrate", "(I)V" },
         .{ "beep", "beep", "()V" },
+        .{ "input_type", "inputType", "(IIIZ)V" },
+        .{ "pick", "pick", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V" },
     }) |m| @field(device, m[0]) = f.GetStaticMethodID(e, device_class, m[1], m[2]);
 }
 
@@ -100,6 +104,16 @@ pub fn vibrate(ms: u32) void {
 }
 pub fn beep() void {
     callDevice(device.beep, &.{});
+}
+pub fn inputType(id: u32, t: zui.InputType) void {
+    callDevice(device.input_type, &.{ int(id), int(@intFromEnum(t.keyboard)), int(@intFromEnum(t.return_key)), boolean(t.secure) });
+}
+pub fn pick(kind: zui.PickKind, value: []const u8, min: []const u8, max: []const u8, title: []const u8, options: []const u8, selected: i32) void {
+    const f = env.functions;
+    var refs: [5]jni.jstring = undefined;
+    for ([_][]const u8{ value, min, max, title, options }, &refs) |str, *r| r.* = newString(str);
+    defer for (refs) |r| f.DeleteLocalRef(env, r);
+    callDevice(device.pick, &.{ int(@intFromEnum(kind)), object(refs[0]), object(refs[1]), object(refs[2]), object(refs[3]), object(refs[4]), .{ .i = selected } });
 }
 
 /// The UI thread's JNI environment (for the media backend's calls into Java).
@@ -372,6 +386,11 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.callsPump();
         }
+        fn pickDone(e: *jni.Env, _: jni.jclass, value: jni.jstring) callconv(.c) void {
+            bind(e);
+            var buf: [64]u8 = undefined;
+            R.pickDone(javaString(value, &buf));
+        }
         fn back(e: *jni.Env, _: jni.jclass) callconv(.c) jni.jboolean {
             bind(e);
             return @intFromBool(R.back());
@@ -408,6 +427,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.callEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeCall" });
     @export(&Entry.callsPump, .{ .name = "Java_com_wufour_zui_Zui_nativeCallsPump" });
     @export(&Entry.back, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeBack" });
+    @export(&Entry.pickDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativePickDone" });
     @export(&Entry.linkEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeLink" });
     @export(&Entry.deviceEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeDevice" });
 }

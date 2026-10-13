@@ -48,6 +48,8 @@ const js = struct {
     extern "zui" fn zui_peer_stream(id: u32, stream: u32) void;
     extern "zui" fn zui_peer_close(id: u32) void;
     extern "zui" fn zui_video(id: u32, stream: u32, mirror: u32, cover: u32) void;
+    extern "zui" fn zui_input_type(id: u32, keyboard: u32, return_key: u32, secure: u32) void;
+    extern "zui" fn zui_pick(kind: u32, value: [*]const u8, value_len: usize, min: [*]const u8, min_len: usize, max: [*]const u8, max_len: usize, title: [*]const u8, title_len: usize, options: [*]const u8, options_len: usize, selected: i32) void;
     extern "zui" fn zui_now() f64;
     extern "zui" fn zui_tz_offset() i32;
     extern "zui" fn zui_vibrate(ms: u32) void;
@@ -81,6 +83,12 @@ pub fn text(id: u32, s: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlig
 }
 pub fn input(id: u32, value: []const u8, placeholder: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
     js.zui_input(id, value.ptr, value.len, placeholder.ptr, placeholder.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), color, @backingInt(a));
+}
+pub fn inputType(id: u32, t: zui.InputType) void {
+    js.zui_input_type(id, @intFromEnum(t.keyboard), @intFromEnum(t.return_key), @intFromBool(t.secure));
+}
+pub fn pick(kind: zui.PickKind, value: []const u8, min: []const u8, max: []const u8, title: []const u8, options: []const u8, selected: i32) void {
+    js.zui_pick(@intFromEnum(kind), value.ptr, value.len, min.ptr, min.len, max.ptr, max.len, title.ptr, title.len, options.ptr, options.len, selected);
 }
 pub fn content(id: u32, s: zui.Size) void {
     js.zui_content(id, s.w, s.h);
@@ -286,6 +294,9 @@ pub fn exportEntry(comptime App: type) void {
         fn inputEvent(id: u32, kind: u32) callconv(.c) void {
             R.inputEvent(id, std.enums.fromInt(zui.InputEvent, kind) orelse return);
         }
+        fn pickDone(ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.pickDone(ptr[0..len]);
+        }
         fn back() callconv(.c) u32 {
             return @intFromBool(R.back());
         }
@@ -321,6 +332,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.mediaEvent, .{ .name = "zui_media_event" });
     @export(&Entry.peerEvent, .{ .name = "zui_peer_event" });
     @export(&Entry.back, .{ .name = "zui_back" });
+    @export(&Entry.pickDone, .{ .name = "zui_pick_done" });
     @export(&Entry.linkEvent, .{ .name = "zui_link_event" });
     @export(&Entry.deviceEvent, .{ .name = "zui_device_event" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });
