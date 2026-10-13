@@ -319,7 +319,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 \\p "Add :CFBundleSupportedPlatforms:0 string iPhoneSimulator"
                 \\p "Add :NSExtension dict"
                 \\p "Add :NSExtension:NSExtensionPointIdentifier string com.apple.widgetkit-extension"
-                \\ent="$(mktemp)"
+                \\ent="$(mktemp -d)/entitlements.plist"
                 \\/usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" -c "Add :com.apple.security.application-groups:0 string group.$id" "$ent" >/dev/null
                 \\codesign -f -s - --entitlements "$ent" "$ext"
                 \\codesign -f -s - --entitlements "$ent" "$3"
