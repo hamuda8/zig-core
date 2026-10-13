@@ -475,7 +475,10 @@ export async function start(wasm, mount = document.body, options = {}) {
       ...calls.imports,
       zui_video(id, stream, mirror, cover) {
         const el = views.get(id);
-        const s = calls.streams.get(stream) || null;
+        // u32 from wasm arrives as i32: remote ids (from 0x80000000) would be negative.
+        // The wanted id stays on the element: a stream that is not ready yet attaches later.
+        el._stream = stream >>> 0;
+        const s = calls.streams.get(el._stream) || null;
         if (el.srcObject !== s) el.srcObject = s;
         el.style.transform = mirror ? 'scaleX(-1)' : '';
         el.style.objectFit = cover ? 'cover' : 'contain';
@@ -585,6 +588,10 @@ function webCalls(getEx, getMemory, withBytes, encoder, str) {
   let nextRemote = 0x80000000;
   const mediaEvent = (id, kind, text = '') => withBytes(encoder.encode(text), (p, n) => getEx().zui_media_event(id, kind, p, n));
   const peerEvent = (id, kind, text = '', stream = 0) => withBytes(encoder.encode(text), (p, n) => getEx().zui_peer_event(id, kind, p, n, stream));
+  // Video views that asked for a stream before it existed (zui_video ran first) get it now.
+  const attach = (id, s) => {
+    for (const v of document.querySelectorAll('video')) if (v._stream === id && v.srcObject !== s) v.srcObject = s;
+  };
 
   const camera = (back) => ({ width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: back ? 'environment' : 'user' });
 
@@ -621,6 +628,7 @@ function webCalls(getEx, getMemory, withBytes, encoder, str) {
       ask.then((s) => {
         s._back = !!back;
         streams.set(id, s);
+        attach(id, s);
         for (const t of s.getTracks()) t.onended = () => { if (streams.get(id) === s && t.kind === 'video') mediaEvent(id, MEDIA_ENDED); };
         mediaEvent(id, MEDIA_READY);
       }, (e) => mediaEvent(id, MEDIA_FAILED, e?.name === 'NotAllowedError' ? 'denied' : 'unavailable'));
@@ -679,6 +687,7 @@ function webCalls(getEx, getMemory, withBytes, encoder, str) {
           sid = nextRemote++;
           peer.remote.set(s, sid);
           streams.set(sid, s);
+          attach(sid, s);
           const a = document.createElement('audio');
           a.autoplay = true;
           a.srcObject = s;

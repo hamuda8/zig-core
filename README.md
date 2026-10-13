@@ -38,3 +38,22 @@ Add `-Doptimize=ReleaseSmall` for release-size builds. `zig build test` here run
 `zig build test` runs everything. The MongoDB tests use a local server on 127.0.0.1:27017 when one is
 running (throwaway database `zigcore_test`) and are skipped otherwise. The TLS tests connect std's
 verifying TLS client to our server; the key schedule is checked against RFC 8448.
+
+## Calls
+
+zui's calls API (`fx.openMedia`, `fx.openPeer`, `fx.peerSignal`, `ui.video`) runs on the browser's
+WebRTC on the web. On Android and iOS zui captures, encodes, decodes and draws itself
+(`zui/media/android.zig`: NDK MediaCodec, AAudio, Camera2 through `ZuiMedia.java`;
+`zui/media/ios.zig`: AVCaptureSession, VideoToolbox, AVSampleBufferDisplayLayer, VoiceProcessingIO,
+AudioConverter) and takes the connection from a call engine the app declares in its client root;
+zig-core depends on no engine (`zui/calls.zig` lists what one provides). With reseal-rtc:
+
+```zig
+pub const rtc = @import("reseal_rtc").zui_engine;
+pub const panic = zui.panic; // required on iOS
+```
+
+and `.client_imports = &.{.{ .name = "reseal_rtc", .module = ... }}` in `addApp`. Signals are the
+web host's JSON, so phones and browsers call each other. The app's Android manifest needs
+`INTERNET`, `CAMERA`, `RECORD_AUDIO` and `MODIFY_AUDIO_SETTINGS`; its iOS Info.plist needs
+`NSCameraUsageDescription` and `NSMicrophoneUsageDescription`.
