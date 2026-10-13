@@ -182,6 +182,7 @@ export async function start(wasm, mount = document.body, options = {}) {
   let watchId = null;
   const sockets = new Map();
   const calls = webCalls(() => ex, () => memory, withBytes, encoder, str);
+  const recordings = webMedia(() => ex, () => memory, withBytes, encoder, str, calls.streams);
   const notes = new Map();
 
   // Navigation: fx.setLink replaces the address, fx.pushLink adds a history entry. While the app
@@ -684,15 +685,18 @@ export async function start(wasm, mount = document.body, options = {}) {
         sockets.delete(id);
       },
       ...calls.imports,
+      ...recordings.imports,
       zui_video(id, stream, mirror, cover) {
         const el = views.get(id);
         // u32 from wasm arrives as i32: remote ids (from 0x80000000) would be negative.
         // The wanted id stays on the element: a stream that is not ready yet attaches later.
         el._stream = stream >>> 0;
-        const s = calls.streams.get(el._stream) || null;
-        if (el.srcObject !== s) el.srcObject = s;
         el.style.transform = mirror ? 'scaleX(-1)' : '';
         el.style.objectFit = cover ? 'cover' : 'contain';
+        // A video player plays in the view that shows it.
+        if (recordings.bindVideo(el, el._stream)) return;
+        const s = calls.streams.get(el._stream) || null;
+        if (el.srcObject !== s) el.srcObject = s;
       },
       zui_root_background(argb) {
         const c = css(argb);
@@ -786,6 +790,7 @@ export async function start(wasm, mount = document.body, options = {}) {
       for (const s of sockets.values()) s.close();
       for (const s of streams.values()) { s.live = false; s.control.abort(); }
       calls.destroy();
+      recordings.destroy();
       mount.replaceChildren();
     },
   };
@@ -795,6 +800,168 @@ export async function start(wasm, mount = document.body, options = {}) {
 // for its own (fx.openMedia), and ids from 0x80000000 up for the ones peers send.
 const MEDIA_READY = 1, MEDIA_FAILED = 2, MEDIA_ENDED = 3;
 const PEER_SIGNAL = 1, PEER_STATE = 2, PEER_TRACK = 3;
+
+// Voice and video messages: MediaRecorder (MP4 where the browser can, WebM otherwise) with a
+// level meter, and playback through media elements. A video player plays inside the video view
+// showing it; a video recording's camera shows through the calls' stream map.
+function webMedia(getEx, getMemory, withBytes, encoder, str, streams) {
+  const REC_STARTED = 1, REC_LEVEL = 2, REC_DONE = 3, REC_FAILED = 4;
+  const PLAY_READY = 1, PLAY_PROGRESS = 2, PLAY_ENDED = 3, PLAY_FAILED = 4;
+  const recorders = new Map();
+  const players = new Map();
+  const none = new Uint8Array(0);
+  const recordEvent = (id, kind, level = 0, ms = 0, bytes = none, mime = '') =>
+    withBytes(encoder.encode(mime), (mp, mn) => withBytes(bytes, (p, n) => getEx().zui_record_event(id, kind, level, ms >>> 0, p, n, mp, mn)));
+  const playEvent = (id, kind, el, text = '') => withBytes(encoder.encode(text), (p, n) =>
+    getEx().zui_play_event(id, kind, Math.round((el?.currentTime || 0) * 1000) >>> 0, Math.round(isFinite(el?.duration) ? el.duration * 1000 : 0) >>> 0, p, n));
+  const attach = (id, s) => {
+    for (const v of document.querySelectorAll('video')) if (v._stream === id && v.srcObject !== s) v.srcObject = s;
+  };
+  const pickType = (video) => (video
+    ? ['video/mp4;codecs=avc1,mp4a', 'video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm']
+    : ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'])
+    .find((t) => window.MediaRecorder?.isTypeSupported?.(t)) || '';
+
+  const finish = (id) => {
+    const r = recorders.get(id);
+    if (!r) return;
+    clearInterval(r.meter);
+    clearTimeout(r.limit);
+    r.audio?.close().catch(() => {});
+    for (const t of r.stream.getTracks()) t.stop();
+    streams.delete(id);
+  };
+
+  const listen = (id, p) => {
+    const el = p.el;
+    el.onloadedmetadata = () => playEvent(id, PLAY_READY, el);
+    el.ontimeupdate = () => {
+      const now = performance.now();
+      if (now - p.lastProgress < 240) return;
+      p.lastProgress = now;
+      playEvent(id, PLAY_PROGRESS, el);
+    };
+    el.onended = () => playEvent(id, PLAY_ENDED, el);
+    el.onerror = () => playEvent(id, PLAY_FAILED, el, el.error?.message || 'unavailable');
+  };
+
+  const imports = {
+    zui_record_start(id, video, back, maxMs) {
+      const ask = navigator.mediaDevices?.getUserMedia?.({
+        audio: { echoCancellation: true, noiseSuppression: true },
+        video: video ? { facingMode: back ? 'environment' : 'user', width: { ideal: 640 }, height: { ideal: 480 } } : false,
+      });
+      if (!ask || !window.MediaRecorder) return void setTimeout(() => recordEvent(id, REC_FAILED, 0, 0, encoder.encode('unsupported')));
+      ask.then((stream) => {
+        const type = pickType(!!video);
+        let rec;
+        try { rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined); } catch {
+          for (const t of stream.getTracks()) t.stop();
+          return recordEvent(id, REC_FAILED, 0, 0, encoder.encode('unsupported'));
+        }
+        const r = { stream, rec, chunks: [], start: performance.now(), cancel: false };
+        recorders.set(id, r);
+        if (video) { streams.set(id, stream); attach(id, stream); }
+        rec.ondataavailable = (e) => { if (e.data.size) r.chunks.push(e.data); };
+        rec.onstop = async () => {
+          const ms = performance.now() - r.start;
+          finish(id);
+          recorders.delete(id);
+          if (r.cancel) return;
+          const blob = new Blob(r.chunks, { type: rec.mimeType || type });
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          recordEvent(id, REC_DONE, 0, ms, bytes, (rec.mimeType || type || (video ? 'video/webm' : 'audio/webm')).split(';')[0]);
+        };
+        rec.start(250);
+        // Loudness: the RMS of the microphone signal, ten times a second.
+        try {
+          r.audio = new AudioContext();
+          const analyser = r.audio.createAnalyser();
+          analyser.fftSize = 1024;
+          r.audio.createMediaStreamSource(stream).connect(analyser);
+          const buf = new Float32Array(analyser.fftSize);
+          r.meter = setInterval(() => {
+            analyser.getFloatTimeDomainData(buf);
+            let sum = 0;
+            for (const x of buf) sum += x * x;
+            recordEvent(id, REC_LEVEL, Math.min(1, Math.sqrt(sum / buf.length) * 3), performance.now() - r.start);
+          }, 100);
+        } catch {}
+        r.limit = setTimeout(() => { if (rec.state !== 'inactive') rec.stop(); }, maxMs);
+        recordEvent(id, REC_STARTED);
+      }, (e) => recordEvent(id, REC_FAILED, 0, 0, encoder.encode(e?.name === 'NotAllowedError' ? 'denied' : 'unavailable')));
+    },
+    zui_record_stop(id, cancel) {
+      const r = recorders.get(id);
+      if (!r) return;
+      r.cancel = !!cancel;
+      if (r.rec.state !== 'inactive') r.rec.stop();
+    },
+    zui_play(id, uptr, ulen, dptr, dlen, mptr, mlen, video, autoplay, loop) {
+      let url = str(uptr, ulen);
+      let owned = false;
+      if (dlen) {
+        const bytes = new Uint8Array(getMemory().buffer, dptr >>> 0, dlen).slice();
+        url = URL.createObjectURL(new Blob([bytes], { type: str(mptr, mlen) || (video ? 'video/mp4' : 'audio/mp4') }));
+        owned = true;
+      }
+      const el = document.createElement(video ? 'video' : 'audio');
+      el.preload = 'auto';
+      el.playsInline = true;
+      el.loop = !!loop;
+      el.src = url;
+      const p = { el, url, owned, lastProgress: 0 };
+      players.set(id, p);
+      listen(id, p);
+      p.autoplay = !!autoplay;
+      // AbortError: the player moved into a video view before it started (it plays there).
+      if (autoplay) el.play().catch((e) => { if (e?.name !== 'AbortError' && p.el === el) playEvent(id, PLAY_FAILED, el, e?.name || 'unavailable'); });
+    },
+    zui_playback(id, op, value) {
+      const p = players.get(id);
+      if (!p) return;
+      if (op === 1) p.el.pause();
+      else if (op === 2) p.el.play().catch(() => {});
+      else if (op === 3) p.el.currentTime = (value >>> 0) / 1000;
+      else if (op === 4) {
+        p.el.pause();
+        p.el.onloadedmetadata = p.el.ontimeupdate = p.el.onended = p.el.onerror = null;
+        p.el.removeAttribute('src');
+        p.el.load();
+        if (p.owned) URL.revokeObjectURL(p.url);
+        players.delete(id);
+      }
+    },
+  };
+
+  return {
+    imports,
+    /** A video view showing player `id`: the player moves into it, keeping its place. */
+    bindVideo(view, id) {
+      const p = players.get(id);
+      if (!p) return false;
+      if (p.el === view) return true;
+      const at = p.el.currentTime, playing = !p.el.paused, old = p.el;
+      old.pause();
+      old.onloadedmetadata = old.ontimeupdate = old.onended = old.onerror = null;
+      view.srcObject = null;
+      view.muted = false;
+      view.loop = old.loop;
+      view.src = p.url;
+      p.el = view;
+      listen(id, p);
+      view.addEventListener('loadedmetadata', () => {
+        view.currentTime = at;
+        if (playing || p.autoplay) view.play().catch(() => {});
+      }, { once: true });
+      return true;
+    },
+    destroy() {
+      for (const id of [...recorders.keys()]) { recorders.get(id).cancel = true; imports.zui_record_stop(id, 1); }
+      for (const id of [...players.keys()]) imports.zui_playback(id, 4, 0);
+    },
+  };
+}
 
 function webCalls(getEx, getMemory, withBytes, encoder, str) {
   const streams = new Map();

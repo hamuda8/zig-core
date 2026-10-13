@@ -50,6 +50,10 @@ const js = struct {
     extern "zui" fn zui_peer_stream(id: u32, stream: u32) void;
     extern "zui" fn zui_peer_close(id: u32) void;
     extern "zui" fn zui_video(id: u32, stream: u32, mirror: u32, cover: u32) void;
+    extern "zui" fn zui_record_start(id: u32, video: u32, back: u32, max_ms: u32) void;
+    extern "zui" fn zui_record_stop(id: u32, cancel: u32) void;
+    extern "zui" fn zui_play(id: u32, url: [*]const u8, url_len: usize, data: [*]const u8, data_len: usize, mime: [*]const u8, mime_len: usize, video: u32, autoplay: u32, loop: u32) void;
+    extern "zui" fn zui_playback(id: u32, op: u32, value: u32) void;
     extern "zui" fn zui_input_type(id: u32, keyboard: u32, return_key: u32, secure: u32) void;
     extern "zui" fn zui_pick(kind: u32, value: [*]const u8, value_len: usize, min: [*]const u8, min_len: usize, max: [*]const u8, max_len: usize, title: [*]const u8, title_len: usize, options: [*]const u8, options_len: usize, selected: i32) void;
     extern "zui" fn zui_pick_photo(camera: u32, max_size: u32, quality: u32) void;
@@ -90,10 +94,10 @@ pub fn input(id: u32, value: []const u8, placeholder: []const u8, f: zui.Font, c
     js.zui_input(id, value.ptr, value.len, placeholder.ptr, placeholder.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), color, @backingInt(a));
 }
 pub fn inputType(id: u32, t: zui.InputType) void {
-    js.zui_input_type(id, @intFromEnum(t.keyboard), @intFromEnum(t.return_key), @intFromBool(t.secure));
+    js.zui_input_type(id, @backingInt(t.keyboard), @backingInt(t.return_key), @intFromBool(t.secure));
 }
 pub fn pick(kind: zui.PickKind, value: []const u8, min: []const u8, max: []const u8, title: []const u8, options: []const u8, selected: i32) void {
-    js.zui_pick(@intFromEnum(kind), value.ptr, value.len, min.ptr, min.len, max.ptr, max.len, title.ptr, title.len, options.ptr, options.len, selected);
+    js.zui_pick(@backingInt(kind), value.ptr, value.len, min.ptr, min.len, max.ptr, max.len, title.ptr, title.len, options.ptr, options.len, selected);
 }
 pub fn pickPhoto(camera: bool, max_size: u32, quality: u8) void {
     js.zui_pick_photo(@intFromBool(camera), max_size, quality);
@@ -215,6 +219,23 @@ pub fn peerStream(id: u32, stream: u32) void {
 pub fn closePeer(id: u32) void {
     js.zui_peer_close(id);
 }
+pub fn startRecording(id: u32, r: zui.Recording) void {
+    js.zui_record_start(id, @intFromBool(r.video), @intFromBool(r.back_camera), r.max_ms);
+}
+pub fn stopRecording(id: u32, cancel: bool) void {
+    js.zui_record_stop(id, @intFromBool(cancel));
+}
+pub fn play(id: u32, p: zui.Playback) void {
+    js.zui_play(id, p.url.ptr, p.url.len, p.data.ptr, p.data.len, p.mime.ptr, p.mime.len, @intFromBool(p.video), @intFromBool(p.autoplay), @intFromBool(p.loop));
+}
+pub fn controlPlayback(id: u32, c: zui.PlaybackControl) void {
+    switch (c) {
+        .pause => js.zui_playback(id, 1, 0),
+        .play => js.zui_playback(id, 2, 0),
+        .seek => |ms| js.zui_playback(id, 3, ms),
+        .stop => js.zui_playback(id, 4, 0),
+    }
+}
 pub fn video(id: u32, v: zui.Video) void {
     js.zui_video(id, v.stream, @intFromBool(v.mirror), @intFromBool(v.cover));
 }
@@ -305,6 +326,12 @@ pub fn exportEntry(comptime App: type) void {
         fn mediaEvent(id: u32, kind: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
             R.mediaEvent(id, std.enums.fromInt(zui.MediaEvent.Kind, kind) orelse return, ptr[0..len]);
         }
+        fn recordEvent(id: u32, kind: u32, level: f32, duration_ms: u32, ptr: [*]const u8, len: usize, mime: [*]const u8, mime_len: usize) callconv(.c) void {
+            R.recordEvent(id, std.enums.fromInt(zui.RecordEvent.Kind, kind) orelse return, level, duration_ms, ptr[0..len], mime[0..mime_len]);
+        }
+        fn playEvent(id: u32, kind: u32, position_ms: u32, duration_ms: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.playEvent(id, std.enums.fromInt(zui.PlayEvent.Kind, kind) orelse return, position_ms, duration_ms, ptr[0..len]);
+        }
         fn peerEvent(id: u32, kind: u32, ptr: [*]const u8, len: usize, stream: u32) callconv(.c) void {
             R.peerEvent(id, std.enums.fromInt(zui.PeerEvent.Kind, kind) orelse return, ptr[0..len], stream);
         }
@@ -363,6 +390,8 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.hostMessage, .{ .name = "zui_host_message" });
     @export(&Entry.mediaEvent, .{ .name = "zui_media_event" });
     @export(&Entry.peerEvent, .{ .name = "zui_peer_event" });
+    @export(&Entry.recordEvent, .{ .name = "zui_record_event" });
+    @export(&Entry.playEvent, .{ .name = "zui_play_event" });
     @export(&Entry.back, .{ .name = "zui_back" });
     @export(&Entry.pickDone, .{ .name = "zui_pick_done" });
     @export(&Entry.fileDone, .{ .name = "zui_file_done" });
