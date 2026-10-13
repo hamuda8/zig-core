@@ -16,6 +16,9 @@ pub const Method = std.http.Method;
 pub const Status = std.http.Status;
 pub const Header = std.http.Header;
 pub const ws = @import("ws.zig");
+/// Server-Sent Events fan-out to named channels.
+pub const sse = @import("sse.zig");
+pub const RateLimiter = @import("ratelimit.zig").RateLimiter;
 
 pub const Handler = *const fn (ctx: *Context) anyerror!void;
 
@@ -25,6 +28,8 @@ pub const Param = struct { name: []const u8, value: []const u8 };
 pub const Context = struct {
     io: Io,
     arena: std.mem.Allocator,
+    /// For memory that outlives a request's arena use (WebSocket message buffers).
+    gpa: std.mem.Allocator,
     request: *std.http.Server.Request,
     method: Method,
     /// Path without the query string, still percent-encoded.
@@ -36,16 +41,24 @@ pub const Context = struct {
     /// Headers added to whatever response is sent (CORS, security headers, cookies).
     response_headers: std.ArrayList(Header) = .empty,
     responded: bool = false,
-    /// Set when the response took over the connection (event streams, WebSockets): it is
-    /// closed when the handler returns instead of waiting for another request.
+    /// Set when the response took over the connection (event streams, WebSockets), or when
+    /// the request left bytes on it: it is closed when the handler returns instead of waiting
+    /// for another request.
     close_connection: bool = false,
     max_body: usize,
+    /// The body once read: `body()` reads it once. Bodies of methods without body semantics
+    /// (DELETE, GET, ...) are read before the handler runs; std.http would leave them on the
+    /// connection, where they would be taken for the next request.
+    raw_body: ?[]const u8 = null,
+    body_error: ?Error = null,
     /// Free for middleware to pass data to handlers (the signed-in user, for example).
     user_data: ?*anyopaque = null,
     /// The TCP connection: its peer address, and a handle WebSocket rooms use to close it.
     stream: Io.net.Stream,
     /// Whether to take the client address from the proxy headers (Cloudflare Tunnel).
     trust_proxy: bool,
+
+    pub const Error = error{ BadRequest, PayloadTooLarge };
 
     /// The visitor's IP address. Behind a trusted proxy, from CF-Connecting-IP or the first
     /// X-Forwarded-For entry; otherwise the TCP peer.
@@ -57,23 +70,30 @@ pub const Context = struct {
         return formatIp(ctx.arena, ctx.stream.socket.address) catch "";
     }
 
-    /// The value of cookie `name`.
+    /// The value of cookie `name`, percent-decoded, the last one when it is sent twice (as
+    /// wufour-auth's parseCookies reads it). A value that does not decode is returned as sent.
     pub fn cookie(ctx: *const Context, name: []const u8) ?[]const u8 {
+        const raw = ctx.cookieRaw(name) orelse return null;
+        return decodeComponent(ctx.arena, raw) catch raw;
+    }
+
+    /// The value of cookie `name` exactly as sent (the last one).
+    pub fn cookieRaw(ctx: *const Context, name: []const u8) ?[]const u8 {
+        var found: ?[]const u8 = null;
         for (ctx.headers) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "cookie")) continue;
             var it = std.mem.splitScalar(u8, h.value, ';');
             while (it.next()) |part| {
-                const p = std.mem.trim(u8, part, " ");
-                const eq = std.mem.indexOfScalar(u8, p, '=') orelse continue;
-                if (std.mem.eql(u8, p[0..eq], name)) return p[eq + 1 ..];
+                const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
+                if (std.mem.eql(u8, std.mem.trim(u8, part[0..eq], " "), name)) found = std.mem.trim(u8, part[eq + 1 ..], " ");
             }
         }
-        return null;
+        return found;
     }
 
     /// Adds a Set-Cookie header. `max_age` 0 deletes the cookie.
     pub fn setCookie(ctx: *Context, name: []const u8, value: []const u8, max_age: u32) !void {
-        try ctx.response_headers.append(ctx.arena, .{ .name = "set-cookie", .value = try std.fmt.allocPrint(ctx.arena, "{s}={s}; Path=/; Max-Age={d}; HttpOnly; SameSite=Lax", .{ name, value, max_age }) });
+        try ctx.addHeader("set-cookie", try std.fmt.allocPrint(ctx.arena, "{s}={s}; Path=/; Max-Age={d}; HttpOnly; SameSite=Lax", .{ name, value, max_age }));
     }
 
     pub fn redirect(ctx: *Context, location: []const u8) !void {
@@ -104,14 +124,53 @@ pub const Context = struct {
         return null;
     }
 
-    /// The whole request body, up to `max_body` bytes.
-    pub fn body(ctx: *Context) ![]const u8 {
+    /// Whether the request says it carries a body (a length above zero, or chunked).
+    pub fn hasBody(ctx: *const Context) bool {
+        const h = &ctx.request.head;
+        return h.transfer_encoding != .none or (h.content_length orelse 0) > 0;
+    }
+
+    /// The whole request body, up to `max_body` bytes, on any method. A body over the limit is
+    /// read away (up to 64 MiB, so the client sees the answer instead of a reset) or the
+    /// connection is closed after the response.
+    pub fn body(ctx: *Context) Error![]const u8 {
+        if (ctx.raw_body) |b| return b;
+        if (ctx.body_error) |e| return e;
+        const req = ctx.request;
         var buf: [4096]u8 = undefined;
-        const r = ctx.request.readerExpectContinue(&buf) catch return error.BadRequest;
-        return r.allocRemaining(ctx.arena, .limited(ctx.max_body)) catch |err| switch (err) {
-            error.StreamTooLong => error.PayloadTooLarge,
-            else => error.BadRequest,
+        var r: *std.Io.Reader = undefined;
+        if (req.head.method.requestHasBody()) {
+            r = req.readerExpectContinue(&buf) catch return ctx.bodyFailed(error.BadRequest);
+        } else {
+            if (!ctx.hasBody()) {
+                ctx.raw_body = "";
+                return "";
+            }
+            req.writeExpectContinue() catch return ctx.bodyFailed(error.BadRequest);
+            r = req.server.reader.bodyReader(&buf, req.head.transfer_encoding, req.head.content_length);
+        }
+        const data = r.allocRemaining(ctx.arena, .limited(ctx.max_body)) catch |err| switch (err) {
+            error.StreamTooLong => {
+                const total = req.head.content_length orelse std.math.maxInt(u64);
+                if (total > 64 * 1024 * 1024) {
+                    ctx.close_connection = true;
+                } else {
+                    _ = r.discardRemaining() catch {
+                        ctx.close_connection = true;
+                    };
+                }
+                return ctx.bodyFailed(error.PayloadTooLarge);
+            },
+            else => return ctx.bodyFailed(error.BadRequest),
         };
+        ctx.raw_body = data;
+        return data;
+    }
+
+    fn bodyFailed(ctx: *Context, e: Error) Error {
+        if (e == error.BadRequest) ctx.close_connection = true;
+        ctx.body_error = e;
+        return e;
     }
 
     /// The body parsed as JSON into `T`. Unknown fields are ignored.
@@ -120,18 +179,32 @@ pub const Context = struct {
         return std.json.parseFromSliceLeaky(T, ctx.arena, b, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch error.BadRequest;
     }
 
+    /// Sets a response header (replacing one of the same name). CR and LF in the value are
+    /// replaced by spaces: std.http asserts on them, and values often come from the request.
     pub fn setHeader(ctx: *Context, name: []const u8, value: []const u8) !void {
+        const v = try headerSafe(ctx.arena, value);
         for (ctx.response_headers.items) |*h| if (std.ascii.eqlIgnoreCase(h.name, name)) {
-            h.value = value;
+            h.value = v;
             return;
         };
-        try ctx.response_headers.append(ctx.arena, .{ .name = name, .value = value });
+        try ctx.response_headers.append(ctx.arena, .{ .name = name, .value = v });
+    }
+
+    /// Adds a response header even when one of the same name is already set (Set-Cookie).
+    pub fn addHeader(ctx: *Context, name: []const u8, value: []const u8) !void {
+        try ctx.response_headers.append(ctx.arena, .{ .name = name, .value = try headerSafe(ctx.arena, value) });
     }
 
     pub fn send(ctx: *Context, status: Status, content_type: []const u8, data: []const u8) !void {
         try ctx.setHeader("content-type", content_type);
         ctx.responded = true;
         try ctx.request.respond(data, .{ .status = status, .extra_headers = ctx.response_headers.items });
+    }
+
+    /// A response without a body or a content type (304, 416, a bare 404).
+    pub fn end(ctx: *Context, status: Status) !void {
+        ctx.responded = true;
+        try ctx.request.respond("", .{ .status = status, .extra_headers = ctx.response_headers.items });
     }
 
     pub fn text(ctx: *Context, status: Status, s: []const u8) !void {
@@ -150,6 +223,41 @@ pub const Context = struct {
         return ctx.sendJson(status, .{ .@"error" = message });
     }
 
+    /// The `Range: bytes=…` of the request against a body of `total` bytes (one range, as
+    /// Express's send serves it).
+    pub fn range(ctx: *const Context, total: u64) Range {
+        return parseRange(ctx.header("range") orelse return .full, total);
+    }
+
+    /// Starts a response of exactly `length` bytes, written with `BodyStream.write`. HEAD
+    /// requests get the headers only. With a `range` from `Context.range`, the status is 206
+    /// with Content-Range; an unsatisfiable range is answered here with 416 (and null returned).
+    pub fn startBody(ctx: *Context, buffer: []u8, status: Status, content_type: ?[]const u8, length: u64) !BodyStream {
+        if (content_type) |t| try ctx.setHeader("content-type", t);
+        ctx.responded = true;
+        if (ctx.request.head.method == .HEAD) {
+            // std's streaming writer expects every promised byte; a HEAD answer has none, so the
+            // length goes out as a plain header on an otherwise empty response.
+            try ctx.setHeader("content-length", try std.fmt.allocPrint(ctx.arena, "{d}", .{length}));
+            const w = try ctx.request.respondStreaming(buffer, .{ .respond_options = .{ .status = status, .extra_headers = ctx.response_headers.items, .transfer_encoding = .none } });
+            return .{ .ctx = ctx, .body = w, .remaining = 0, .elide = true };
+        }
+        const w = try ctx.request.respondStreaming(buffer, .{ .content_length = length, .respond_options = .{ .status = status, .extra_headers = ctx.response_headers.items } });
+        return .{ .ctx = ctx, .body = w, .remaining = length, .elide = false };
+    }
+
+    /// Answers a range that does not fit the body: 416 with `Content-Range: bytes */total`.
+    pub fn unsatisfiable(ctx: *Context, total: u64) !void {
+        try ctx.setHeader("content-range", try std.fmt.allocPrint(ctx.arena, "bytes */{d}", .{total}));
+        return ctx.end(.range_not_satisfiable);
+    }
+
+    /// Sets 206 headers for a partial body and returns its length.
+    pub fn partial(ctx: *Context, start: u64, last: u64, total: u64) !u64 {
+        try ctx.setHeader("content-range", try std.fmt.allocPrint(ctx.arena, "bytes {d}-{d}/{d}", .{ start, last, total }));
+        return last - start + 1;
+    }
+
     /// Whether the client asked to upgrade to a WebSocket.
     pub fn wantsWebSocket(ctx: *const Context) bool {
         return ctx.request.upgradeRequested() == .websocket;
@@ -165,7 +273,7 @@ pub const Context = struct {
         ctx.close_connection = true;
         var std_ws = try ctx.request.respondWebSocket(.{ .key = k, .extra_headers = ctx.response_headers.items });
         try std_ws.flush();
-        return .{ .io = ctx.io, .in = std_ws.input, .out = std_ws.output, .stream = ctx.stream };
+        return .{ .io = ctx.io, .gpa = ctx.gpa, .in = std_ws.input, .out = std_ws.output, .stream = ctx.stream };
     }
 
     /// Starts a `text/event-stream` response.
@@ -180,6 +288,94 @@ pub const Context = struct {
     }
 };
 
+/// A response body of a promised length (`Context.startBody`). Writing more than promised is
+/// cut off; finishing with less closes the connection instead of tripping std's assertion,
+/// so a short file never takes the server down.
+pub const BodyStream = struct {
+    ctx: *Context,
+    body: std.http.BodyWriter,
+    remaining: u64,
+    elide: bool,
+
+    pub fn write(s: *BodyStream, data: []const u8) !void {
+        if (s.elide) return;
+        const n: usize = @intCast(@min(data.len, s.remaining));
+        try s.body.writer.writeAll(data[0..n]);
+        s.remaining -= n;
+    }
+
+    pub fn finish(s: *BodyStream) !void {
+        if (s.remaining != 0) {
+            s.body.writer.flush() catch {};
+            s.body.http_protocol_output.flush() catch {};
+            s.ctx.close_connection = true;
+            return;
+        }
+        try s.body.end();
+    }
+};
+
+pub const Range = union(enum) {
+    /// No (usable) Range header: the whole body.
+    full,
+    /// Inclusive byte offsets.
+    partial: struct { start: u64, last: u64 },
+    unsatisfiable,
+};
+
+/// `bytes=a-b`, `bytes=a-`, `bytes=-n`. Anything else is the whole body.
+pub fn parseRange(h: []const u8, total: u64) Range {
+    if (!std.mem.startsWith(u8, h, "bytes=")) return .full;
+    const spec = h[6..];
+    if (std.mem.indexOfScalar(u8, spec, ',') != null) return .full;
+    const dash = std.mem.indexOfScalar(u8, spec, '-') orelse return .full;
+    const a = spec[0..dash];
+    const b = spec[dash + 1 ..];
+    for (a) |c| if (!std.ascii.isDigit(c)) return .full;
+    for (b) |c| if (!std.ascii.isDigit(c)) return .full;
+    if (a.len == 0 and b.len == 0) return .full;
+    if (total == 0) return .unsatisfiable;
+    if (a.len == 0) {
+        const n = std.fmt.parseInt(u64, b, 10) catch return .full;
+        return .{ .partial = .{ .start = total - @min(n, total), .last = total - 1 } };
+    }
+    const start = std.fmt.parseInt(u64, a, 10) catch return .unsatisfiable;
+    var last = total - 1;
+    if (b.len > 0) last = @min(std.fmt.parseInt(u64, b, 10) catch total - 1, total - 1);
+    if (start > last or start >= total) return .unsatisfiable;
+    return .{ .partial = .{ .start = start, .last = last } };
+}
+
+/// A header value without CR or LF.
+pub fn headerSafe(arena: std.mem.Allocator, value: []const u8) ![]const u8 {
+    if (std.mem.indexOfAny(u8, value, "\r\n") == null) return value;
+    const out = try arena.dupe(u8, value);
+    for (out) |*c| if (c.* == '\r' or c.* == '\n') {
+        c.* = ' ';
+    };
+    return out;
+}
+
+/// decodeURIComponent: `%XX` only (`+` stays), and the result must be UTF-8.
+pub fn decodeComponent(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, s, '%') == null) return s;
+    var out = try arena.alloc(u8, s.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (n += 1) {
+        if (s[i] == '%') {
+            if (i + 3 > s.len) return error.BadEncoding;
+            out[n] = std.fmt.parseInt(u8, s[i + 1 .. i + 3], 16) catch return error.BadEncoding;
+            i += 3;
+        } else {
+            out[n] = s[i];
+            i += 1;
+        }
+    }
+    if (!std.unicode.utf8ValidateSlice(out[0..n])) return error.BadEncoding;
+    return out[0..n];
+}
+
 pub const EventStream = struct {
     body: std.http.BodyWriter,
 
@@ -190,12 +386,16 @@ pub const EventStream = struct {
         var lines = std.mem.splitScalar(u8, data, '\n');
         while (lines.next()) |line| try w.print("data: {s}\n", .{line});
         try w.writeAll("\n");
+        // The body writer has its own buffer in front of the connection's: empty both.
+        try s.body.writer.flush();
         try s.body.flush();
     }
 
     /// A comment line, to keep idle connections open through proxies.
     pub fn ping(s: *EventStream) !void {
         try s.body.writer.writeAll(": ping\n\n");
+        // The body writer has its own buffer in front of the connection's: empty both.
+        try s.body.writer.flush();
         try s.body.flush();
     }
 
@@ -229,7 +429,8 @@ pub fn encode(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     return out.items;
 }
 
-/// Percent-decodes `s` (and `+` as space) into new memory.
+/// Percent-decodes a query string part (`+` is a space, as in forms) into new memory. Paths and
+/// cookies use `decodeComponent`, where `+` stays a plus.
 pub fn decode(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     if (std.mem.indexOfAny(u8, s, "%+") == null) return s;
     var out = try arena.alloc(u8, s.len);
@@ -305,7 +506,8 @@ pub const Router = struct {
             ctx.params.clearRetainingCapacity();
             if (!try match(ctx, route.pattern, ctx.path)) continue;
             path_matched = true;
-            if (route.method) |m| if (m != ctx.method) continue;
+            // HEAD is answered by the GET route; std.http leaves the body out.
+            if (route.method) |m| if (m != ctx.method and !(m == .GET and ctx.method == .HEAD)) continue;
             return route.handler(ctx);
         }
         if (path_matched) return ctx.fail(.method_not_allowed, "Method not allowed");
@@ -318,13 +520,13 @@ pub const Router = struct {
         var si = std.mem.splitScalar(u8, std.mem.trim(u8, path, "/"), '/');
         while (pi.next()) |p| {
             if (p.len > 0 and p[0] == '*') {
-                try ctx.params.append(ctx.arena, .{ .name = p[1..], .value = try decode(ctx.arena, si.rest()) });
+                try ctx.params.append(ctx.arena, .{ .name = p[1..], .value = try decodeComponent(ctx.arena, si.rest()) });
                 return true;
             }
             const s = si.next() orelse return p.len == 0;
             if (p.len > 0 and p[0] == ':') {
                 if (s.len == 0) return false;
-                try ctx.params.append(ctx.arena, .{ .name = p[1..], .value = try decode(ctx.arena, s) });
+                try ctx.params.append(ctx.arena, .{ .name = p[1..], .value = try decodeComponent(ctx.arena, s) });
             } else if (!std.mem.eql(u8, p, s)) return false;
         }
         return si.next() == null;
@@ -411,13 +613,13 @@ fn exchange(io: Io, gpa: std.mem.Allocator, stream: Io.net.Stream, in: *std.Io.R
     while (true) {
         _ = arena_state.reset(.retain_capacity);
         var request = server.receiveHead() catch return;
-        const keep = handle(io, arena_state.allocator(), stream, &request, options) catch return;
+        const keep = handle(io, gpa, arena_state.allocator(), stream, &request, options) catch return;
         if (!keep or !request.head.keep_alive) return;
     }
 }
 
 /// Returns whether the connection can take another request.
-fn handle(io: Io, arena: std.mem.Allocator, stream: Io.net.Stream, request: *std.http.Server.Request, options: *const Options) !bool {
+fn handle(io: Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, stream: Io.net.Stream, request: *std.http.Server.Request, options: *const Options) !bool {
     // A request with neither Content-Length nor Transfer-Encoding has an empty body (RFC 9112
     // 6.3). std.http asserts otherwise, so one bodiless POST would crash the server.
     if (request.head.method.requestHasBody() and request.head.transfer_encoding == .none and request.head.content_length == null)
@@ -433,6 +635,7 @@ fn handle(io: Io, arena: std.mem.Allocator, stream: Io.net.Stream, request: *std
     var ctx: Context = .{
         .io = io,
         .arena = arena,
+        .gpa = gpa,
         .request = request,
         .method = request.head.method,
         .path = target[0 .. q orelse target.len],
@@ -442,6 +645,9 @@ fn handle(io: Io, arena: std.mem.Allocator, stream: Io.net.Stream, request: *std
         .stream = stream,
         .trust_proxy = options.trust_proxy,
     };
+    // std.http reads no body for DELETE, GET, OPTIONS...; left unread, it would be parsed as the
+    // next request on this connection. Read it now, whatever the handler does with it.
+    if (!request.head.method.requestHasBody() and ctx.hasBody() and !ctx.wantsWebSocket()) _ = ctx.body() catch {};
     options.router.dispatch(&ctx) catch |err| {
         if (ctx.responded) return err;
         const status: Status = switch (err) {
@@ -483,7 +689,7 @@ pub fn redirectToHttps(ctx: *Context) !void {
 /// `*path`). Directories serve `index.html`. With `spa_fallback`, unknown paths without a file
 /// extension serve `index.html` too (client-side routing).
 pub fn serveDir(ctx: *Context, root: []const u8, spa_fallback: bool) !void {
-    var rel = ctx.param("path") orelse (decode(ctx.arena, ctx.path) catch return ctx.fail(.bad_request, "Bad path"));
+    var rel = ctx.param("path") orelse (decodeComponent(ctx.arena, ctx.path) catch return ctx.fail(.bad_request, "Bad path"));
     rel = std.mem.trimStart(u8, rel, "/");
     if (rel.len == 0) rel = "index.html";
     var parts = std.mem.splitAny(u8, rel, "/\\");
@@ -538,4 +744,6 @@ test {
     _ = tls.Server;
     _ = tls.acme;
     _ = ws;
+    _ = sse;
+    _ = @import("ratelimit.zig");
 }

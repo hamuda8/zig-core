@@ -18,10 +18,20 @@ pub fn build(b: *std.Build) void {
 
     const zui = b.addModule("zui", .{ .root_source_file = b.path("zui/zui.zig") });
     _ = b.addModule("map", .{ .root_source_file = b.path("map/map.zig"), .imports = &.{.{ .name = "zui", .module = zui }} });
-    _ = b.addModule("http", .{ .root_source_file = b.path("http/http.zig") });
-    _ = b.addModule("mongo", .{ .root_source_file = b.path("mongo/mongo.zig") });
+    const http_mod = b.addModule("http", .{ .root_source_file = b.path("http/http.zig") });
+    const mongo_mod = b.addModule("mongo", .{ .root_source_file = b.path("mongo/mongo.zig") });
     _ = b.addModule("env", .{ .root_source_file = b.path("env/env.zig") });
-    _ = b.addModule("fetch", .{ .root_source_file = b.path("fetch/fetch.zig") });
+    // Outgoing HTTP with time limits, recovery from dead pooled connections, and the SSRF guard.
+    const fetch_mod = b.addModule("fetch", .{ .root_source_file = b.path("fetch/fetch.zig") });
+    _ = b.addModule("smtp", .{ .root_source_file = b.path("smtp/smtp.zig") });
+    _ = b.addModule("ec", .{ .root_source_file = b.path("ec/ec.zig") });
+    // Wufour sign-in (tokens from cookies or Bearer, verified and cached).
+    const wufour_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "http", .module = http_mod },
+        .{ .name = "fetch", .module = fetch_mod },
+        .{ .name = "mongo", .module = mongo_mod },
+    };
+    _ = b.addModule("wufour", .{ .root_source_file = b.path("wufour/wufour.zig"), .imports = wufour_imports });
     const push = b.addModule("push", .{ .root_source_file = b.path("push/push.zig") });
     const geo = b.addModule("geo", .{ .root_source_file = b.path("geo/geo.zig") });
 
@@ -82,7 +92,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "http", .module = b.createModule(.{ .root_source_file = b.path("http/http.zig"), .target = target, .optimize = optimize }) }},
     }) })).step);
-    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "push/push.zig", "fetch/fetch.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
+    // Wufour sign-in against a stand-in Wufour.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("wufour/wufour.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = wufour_imports,
+    }) })).step);
+    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "push/push.zig", "fetch/fetch.zig", "smtp/smtp.zig", "ec/ec.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
@@ -359,6 +376,9 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 .{ .name = "geo", .module = server_core.module("geo") },
                 .{ .name = "push", .module = server_core.module("push") },
                 .{ .name = "fetch", .module = server_core.module("fetch") },
+                .{ .name = "smtp", .module = server_core.module("smtp") },
+                .{ .name = "ec", .module = server_core.module("ec") },
+                .{ .name = "wufour", .module = server_core.module("wufour") },
             } });
         }
     }.module;

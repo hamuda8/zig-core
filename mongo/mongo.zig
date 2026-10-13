@@ -10,6 +10,10 @@
 const std = @import("std");
 const Io = std.Io;
 pub const bson = @import("bson.zig");
+/// JavaScript-like values (JSON, BSON, Extended JSON), for servers ported from Node.
+pub const val = @import("val.zig");
+/// Collections that take and return `val.Val`s, with the Node driver's option names.
+pub const db = @import("db.zig");
 
 const Doc = bson.Doc;
 
@@ -111,13 +115,13 @@ pub const Client = struct {
         return c.last_error[0..c.last_error_len];
     }
 
-    /// Runs `cmd` against `db` and returns the reply (in `arena`). `cmd` is a document or a
+    /// Runs `cmd` against the database `db_name` and returns the reply (in `arena`). `cmd` is a document or a
     /// struct literal whose first field is the command name.
-    pub fn command(c: *Client, arena: std.mem.Allocator, db: []const u8, cmd: anytype) !Doc {
+    pub fn command(c: *Client, arena: std.mem.Allocator, db_name: []const u8, cmd: anytype) !Doc {
         const conn = try c.acquire();
         var healthy = false;
         defer c.release(conn, healthy);
-        const reply = try conn.run(arena, c.io, db, cmd);
+        const reply = try conn.run(arena, c.io, db_name, cmd);
         healthy = true;
         try c.check(reply);
         return reply;
@@ -198,7 +202,7 @@ const Conn = struct {
     }
 
     /// Sends one OP_MSG and reads its reply.
-    fn run(conn: *Conn, arena: std.mem.Allocator, io: Io, db: []const u8, cmd: anytype) !Doc {
+    fn run(conn: *Conn, arena: std.mem.Allocator, io: Io, db_name: []const u8, cmd: anytype) !Doc {
         _ = io;
         // The command document with `$db` appended (the command name stays first).
         var b = try bson.Builder.init(arena);
@@ -206,7 +210,7 @@ const Conn = struct {
             var it = cmd.iterator();
             while (try it.next()) |e| try b.value(e.key, e.value);
         } else try b.fields(cmd);
-        try b.string("$db", db);
+        try b.string("$db", db_name);
         const body = try b.finish();
 
         const id = conn.next_id;
@@ -668,5 +672,7 @@ pub const Cursor = struct {
 
 test {
     _ = bson;
+    _ = val;
+    _ = db;
     _ = @import("test.zig");
 }

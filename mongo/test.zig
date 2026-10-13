@@ -148,3 +148,59 @@ test "bulk update with upserts" {
     try testing.expectEqual(@as(i64, 5), k1.getPath("counts.route").?.asInt().?);
     try testing.expectEqual(@as(i64, 2), try usage.countDocuments(a, .{}));
 }
+
+test "db: Vals in, Vals out, with the Node driver's options" {
+    const c = try connectOrSkip();
+    defer c.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const val = mongo.val;
+    const items: mongo.db.Coll = .{ .client = c, .db = "zigcore_test_db", .name = "items" };
+    defer _ = c.command(a, "zigcore_test_db", .{ .dropDatabase = 1 }) catch {};
+
+    // insertOne adds an _id at the end of the Val, like the driver; it is stored first.
+    const doc = try val.from(a, .{ .name = "a", .n = 1, .tags = .{ "x", "y" } });
+    const id = try items.insertOne(a, doc);
+    try testing.expectEqualStrings("_id", doc.keys()[3]);
+    var docs: [150]val.Val = undefined;
+    for (&docs, 0..) |*d, i| d.* = try val.from(a, .{ .name = "b", .n = i + 2 });
+    try testing.expectEqual(@as(usize, 150), (try items.insertMany(a, &docs)).len);
+
+    const one = (try items.findOne(a, .{ ._id = id }, .{})).?;
+    try testing.expectEqualStrings("_id", one.keys()[0]);
+    try testing.expectEqualStrings("y", one.get("tags").at(1).str);
+    // More than one batch, sorted, with a projection.
+    const all = try items.find(a, .{}, .{ .sort = .{ .n = -1 }, .projection = .{ .n = 1 } });
+    try testing.expectEqual(@as(usize, 151), all.len);
+    try testing.expectEqual(@as(f64, 151), all[0].n("n").?);
+    try testing.expect(all[0].get("name") == .undef);
+    var opts: mongo.db.FindOpts = .{};
+    opts.limit = 5;
+    opts.skip = 1;
+    try testing.expectEqual(@as(usize, 5), (try items.find(a, .{ .name = "b" }, opts)).len);
+    try testing.expectEqual(@as(i64, 150), try items.count(a, .{ .name = "b" }, .{}));
+    try testing.expectEqual(@as(i64, 10), try items.count(a, .{ .name = "b" }, .{ .limit = 10 }));
+
+    // Returns the document before the update unless asked for the one after.
+    const before = (try items.findOneAndUpdate(a, .{ ._id = id }, .{ .@"$inc" = .{ .n = 1 } }, .{})).?;
+    try testing.expectEqual(@as(f64, 1), before.n("n").?);
+    const after = (try items.findOneAndUpdate(a, .{ ._id = id }, .{ .@"$inc" = .{ .n = 1 } }, .{ .returnDocument = .after })).?;
+    try testing.expectEqual(@as(f64, 3), after.n("n").?);
+    // arrayFilters, and a pipeline update.
+    _ = try items.updateOne(a, .{ ._id = id }, .{ .@"$set" = .{ .@"tags.$[t]" = "z" } }, .{ .arrayFilters = .{.{ .t = "x" }} });
+    _ = try items.updateOne(a, .{ ._id = id }, .{.{ .@"$set" = .{ .m = .{ .@"$add" = .{ "$n", 1 } } } }}, .{});
+    const changed = (try items.findOne(a, .{ ._id = id }, .{})).?;
+    try testing.expectEqualStrings("z", changed.get("tags").at(0).str);
+    try testing.expectEqual(@as(f64, 4), changed.n("m").?);
+    const up = try items.updateOne(a, .{ .name = "new" }, .{ .@"$set" = .{ .n = 0 } }, .{ .upsert = true });
+    try testing.expect(up.upserted_id != null);
+
+    const names = try items.distinct(a, "name", .{});
+    try testing.expectEqual(@as(usize, 3), names.len);
+    const groups = try items.aggregate(a, .{ .{ .@"$group" = .{ ._id = "$name", .c = .{ .@"$sum" = 1 } } }, .{ .@"$sort" = .{ .c = -1 } } });
+    try testing.expectEqual(@as(f64, 150), groups[0].n("c").?);
+    try items.createIndex(a, .{ .name = 1, .n = -1 }, .{ .unique = false });
+    try testing.expectEqual(@as(i64, 150), try items.deleteMany(a, .{ .name = "b" }));
+    try testing.expectEqual(@as(i64, 1), try items.deleteOne(a, .{ ._id = id }));
+}

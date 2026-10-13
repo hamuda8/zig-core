@@ -106,12 +106,26 @@ pub const Vapid = struct {
     subject: []const u8,
 };
 
-/// The Authorization header value for a push to `endpoint`: "vapid t=<jwt>, k=<public key>".
-pub fn vapidHeader(gpa: std.mem.Allocator, v: Vapid, endpoint: []const u8, now_s: i64) ![]u8 {
+/// The `aud` claim for `endpoint`: its origin (`new URL(endpoint).origin`), which keeps a port
+/// other than the scheme's default.
+pub fn audience(gpa: std.mem.Allocator, endpoint: []const u8) ![]u8 {
     const uri = try std.Uri.parse(endpoint);
     const host = (uri.host orelse return error.BadEndpoint).percent_encoded;
-    const scheme = uri.scheme;
-    const claims = try std.fmt.allocPrint(gpa, "{{\"aud\":\"{s}://{s}\",\"exp\":{d},\"sub\":{f}}}", .{ scheme, host, now_s + 12 * 3600, std.json.fmt(v.subject, .{}) });
+    const default_port: u16 = if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) 80 else 443;
+    const out = if (uri.port) |p| (if (p != default_port)
+        try std.fmt.allocPrint(gpa, "{s}://{s}:{d}", .{ uri.scheme, host, p })
+    else
+        null) else null;
+    const origin = out orelse try std.fmt.allocPrint(gpa, "{s}://{s}", .{ uri.scheme, host });
+    _ = std.ascii.lowerString(origin, origin);
+    return origin;
+}
+
+/// The Authorization header value for a push to `endpoint`: "vapid t=<jwt>, k=<public key>".
+pub fn vapidHeader(gpa: std.mem.Allocator, v: Vapid, endpoint: []const u8, now_s: i64) ![]u8 {
+    const aud = try audience(gpa, endpoint);
+    defer gpa.free(aud);
+    const claims = try std.fmt.allocPrint(gpa, "{{\"aud\":{f},\"exp\":{d},\"sub\":{f}}}", .{ std.json.fmt(aud, .{}), now_s + 12 * 3600, std.json.fmt(v.subject, .{}) });
     defer gpa.free(claims);
     var key: [32]u8 = undefined;
     try b64url.Decoder.decode(&key, v.private_key);
@@ -261,6 +275,20 @@ test "VAPID header verifies with the public key" {
     const t_end = std.mem.indexOf(u8, header, ", k=").?;
     try jwt.verifyEs256(header["vapid t=".len..t_end], kp.public_key);
     try testing.expect(std.mem.endsWith(u8, header, &pub_b64));
+}
+
+test "VAPID audience is the endpoint's origin, port included" {
+    const cases = [_][2][]const u8{
+        .{ "https://fcm.googleapis.com/fcm/send/abc", "https://fcm.googleapis.com" },
+        .{ "https://Push.Example:8443/x?y", "https://push.example:8443" },
+        .{ "https://push.example:443/x", "https://push.example" },
+        .{ "http://127.0.0.1:5005/push", "http://127.0.0.1:5005" },
+    };
+    for (cases) |c| {
+        const aud = try audience(testing.allocator, c[0]);
+        defer testing.allocator.free(aud);
+        try testing.expectEqualStrings(c[1], aud);
+    }
 }
 
 test {

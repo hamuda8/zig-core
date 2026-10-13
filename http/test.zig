@@ -281,3 +281,266 @@ test "port 80: ACME challenges are answered, everything else redirects to HTTPS"
     try expectContains(res, "location: https://maps.wufour.com/map?lat=1");
     a.free(res);
 }
+
+fn echoBody(ctx: *http.Context) !void {
+    const b = try ctx.body();
+    try ctx.text(.ok, b);
+}
+
+fn headerEcho(ctx: *http.Context) !void {
+    try ctx.setHeader("x-next", ctx.queryParam("next") orelse "");
+    try ctx.addHeader("set-cookie", "a=1");
+    try ctx.addHeader("set-cookie", "b=2");
+    try ctx.text(.ok, ctx.cookie("tok") orelse "none");
+}
+
+fn file(ctx: *http.Context) !void {
+    const data = "0123456789";
+    const short = ctx.queryParam("short") != null;
+    var buf: [64]u8 = undefined;
+    switch (ctx.range(data.len)) {
+        .unsatisfiable => return ctx.unsatisfiable(data.len),
+        .partial => |p| {
+            const len = try ctx.partial(p.start, p.last, data.len);
+            var s = try ctx.startBody(&buf, .partial_content, "text/plain", len);
+            try s.write(data[@intCast(p.start)..@intCast(p.last + 1)]);
+            return s.finish();
+        },
+        .full => {
+            var s = try ctx.startBody(&buf, .ok, "text/plain", data.len);
+            // A file that turns out shorter than promised must not crash the server.
+            try s.write(if (short) data[0..4] else data);
+            return s.finish();
+        },
+    }
+}
+
+test "bodies on any method, oversized bodies, header values, cookies" {
+    var router: http.Router = .init(testing.allocator);
+    defer router.deinit();
+    try router.add(null, "/echo", echoBody);
+    try router.get("/headers", headerEcho);
+    var server = try startServer(&router);
+    defer _ = server.cancel(io) catch {};
+    const a = testing.allocator;
+
+    // A DELETE body is read (std.http ignores it) and the next request on the connection works.
+    var res = try roundTrip(a, "DELETE /echo HTTP/1.1\r\ncontent-length: 5\r\n\r\nhelloGET /headers HTTP/1.1\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "\r\n\r\nhello");
+    try expectContains(res, "none");
+    a.free(res);
+    // A GET body the handler never reads must not become the next request either.
+    res = try roundTrip(a, "GET /headers HTTP/1.1\r\ncontent-length: 4\r\n\r\nxxxxGET /headers HTTP/1.1\r\nconnection: close\r\n\r\n");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, res, "HTTP/1.1 200 OK"));
+    a.free(res);
+
+    // Over the limit: 413, the rest of the body is read away, the connection keeps working.
+    const big = try a.alloc(u8, 2 * 1024 * 1024);
+    defer a.free(big);
+    @memset(big, 'x');
+    const head = try std.fmt.allocPrint(a, "POST /echo HTTP/1.1\r\ncontent-length: {d}\r\n\r\n", .{big.len});
+    defer a.free(head);
+    const req = try std.mem.concat(a, u8, &.{ head, big, "GET /headers HTTP/1.1\r\nconnection: close\r\n\r\n" });
+    defer a.free(req);
+    res = try roundTrip(a, req);
+    try expectContains(res, "413 Payload Too Large");
+    try expectContains(res, "none");
+    a.free(res);
+
+    // CR/LF in a header value (from the query here) is neutralized, not an assertion failure.
+    res = try roundTrip(a, "GET /headers?next=%0D%0Aset-cookie:%20evil=1 HTTP/1.1\r\ncookie: tok=a%20b; tok=c%2Fd\r\nconnection: close\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, res, "\r\nset-cookie: evil") == null);
+    try expectContains(res, "set-cookie: a=1\r\nset-cookie: b=2\r\n");
+    // Cookies are percent-decoded, and a repeated one gives its last value.
+    try expectContains(res, "\r\n\r\nc/d");
+    a.free(res);
+}
+
+test "ranges, HEAD and short bodies" {
+    var router: http.Router = .init(testing.allocator);
+    defer router.deinit();
+    try router.get("/file", file);
+    var server = try startServer(&router);
+    defer _ = server.cancel(io) catch {};
+    const a = testing.allocator;
+
+    var res = try roundTrip(a, "GET /file HTTP/1.1\r\nrange: bytes=2-4\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "206 Partial Content");
+    try expectContains(res, "content-range: bytes 2-4/10");
+    try expectContains(res, "\r\n\r\n234");
+    a.free(res);
+    res = try roundTrip(a, "GET /file HTTP/1.1\r\nrange: bytes=-3\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "\r\n\r\n789");
+    a.free(res);
+    res = try roundTrip(a, "GET /file HTTP/1.1\r\nrange: bytes=20-30\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "416 Range Not Satisfiable");
+    try expectContains(res, "content-range: bytes */10");
+    a.free(res);
+    // HEAD: the length, no body, and the connection still answers.
+    res = try roundTrip(a, "HEAD /file HTTP/1.1\r\n\r\nGET /file HTTP/1.1\r\nrange: bytes=0-0\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "content-length: 10");
+    try expectContains(res, "\r\n\r\nHTTP/1.1 206");
+    a.free(res);
+    // Short: the connection is closed after what there is, and the server lives on.
+    res = try roundTrip(a, "GET /file?short=1 HTTP/1.1\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, res, "\r\n\r\n0123"));
+    a.free(res);
+    res = try roundTrip(a, "GET /file HTTP/1.1\r\nconnection: close\r\n\r\n");
+    try expectContains(res, "0123456789");
+    a.free(res);
+    try testing.expectEqual(http.Range.full, http.parseRange("bytes=1-2,4-5", 10));
+}
+
+fn echoSocketLarge(ctx: *http.Context) !void {
+    var sock = try ctx.webSocket();
+    defer sock.deinit();
+    sock.max_payload = 512 * 1024;
+    sock.queued = true;
+    var writer: Io.Group = .init;
+    try writer.concurrent(io, http.ws.Socket.writerLoop, .{&sock});
+    defer {
+        sock.close(1000);
+        writer.await(io) catch {};
+    }
+    while (true) {
+        const f = sock.read() catch return;
+        if (f.op != .text) continue;
+        try sock.sendText(f.data);
+        if (std.mem.eql(u8, f.data, "bye")) return;
+    }
+}
+
+fn maskedFrame(a: std.mem.Allocator, out: *std.ArrayList(u8), fin: bool, op: u8, payload: []const u8) !void {
+    try out.append(a, (if (fin) @as(u8, 0x80) else 0) | op);
+    if (payload.len < 126) {
+        try out.append(a, 0x80 | @as(u8, @intCast(payload.len)));
+    } else if (payload.len <= 0xffff) {
+        try out.append(a, 0x80 | 126);
+        var n: [2]u8 = undefined;
+        std.mem.writeInt(u16, &n, @intCast(payload.len), .big);
+        try out.appendSlice(a, &n);
+    } else {
+        try out.append(a, 0x80 | 127);
+        var n: [8]u8 = undefined;
+        std.mem.writeInt(u64, &n, payload.len, .big);
+        try out.appendSlice(a, &n);
+    }
+    const mask = [4]u8{ 9, 8, 7, 6 };
+    try out.appendSlice(a, &mask);
+    for (payload, 0..) |b, i| try out.append(a, b ^ mask[i % 4]);
+}
+
+test "websocket: fragmented and large messages, queued sending" {
+    var router: http.Router = .init(testing.allocator);
+    defer router.deinit();
+    try router.get("/ws", echoSocketLarge);
+    var server = try startServer(&router);
+    defer _ = server.cancel(io) catch {};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var req: std.ArrayList(u8) = .empty;
+    try req.appendSlice(a, "GET /ws HTTP/1.1\r\nhost: x\r\nconnection: upgrade\r\nupgrade: websocket\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n");
+    // "hel" + a ping + "lo" in two fragments, then a 100 KB message (bigger than the read buffer).
+    try maskedFrame(a, &req, false, 1, "hel");
+    try maskedFrame(a, &req, true, 9, "p");
+    try maskedFrame(a, &req, true, 0, "lo");
+    const large = try a.alloc(u8, 100 * 1024);
+    @memset(large, 'z');
+    try maskedFrame(a, &req, true, 1, large);
+    try maskedFrame(a, &req, true, 1, "bye");
+    const res = try roundTrip(testing.allocator, req.items);
+    defer testing.allocator.free(res);
+    try expectContains(res, "101 Switching Protocols");
+    try expectContains(res, &.{ 0x8a, 0x01, 'p' }); // the pong
+    try expectContains(res, &.{ 0x81, 0x05, 'h', 'e', 'l', 'l', 'o' });
+    try expectContains(res, &.{ 0x81, 127, 0, 0, 0, 0, 0, 1, 0x90, 0 }); // 102400 bytes echoed
+    try expectContains(res, &.{ 0x81, 0x03, 'b', 'y', 'e' });
+    try expectContains(res, &.{ 0x88, 0x02, 0x03, 0xe8 }); // close 1000
+}
+
+var test_hub: http.sse.Hub = undefined;
+
+fn live(ctx: *http.Context) !void {
+    test_hub.serve(ctx, "1.2.3.4", &.{ "a", "b" }, .{ .first = "event: hello\ndata: {}\n\n" }) catch |e| switch (e) {
+        error.TooManyStreams => return ctx.fail(.too_many_requests, "Too many open streams"),
+        else => return e,
+    };
+}
+
+/// Reads from `r` until `needle` has arrived (the stream stays open).
+fn readUntil(r: *Io.Reader, got: *std.ArrayList(u8), needle: []const u8) !void {
+    while (std.mem.indexOf(u8, got.items, needle) == null) {
+        const b = try r.takeByte();
+        try got.append(testing.allocator, b);
+    }
+}
+
+test "server-sent events: fan-out arrives while the stream stays open, one stream per address" {
+    test_hub = .init(io, testing.allocator);
+    defer test_hub.deinit();
+    test_hub.max_per_ip = 1;
+    var router: http.Router = .init(testing.allocator);
+    defer router.deinit();
+    try router.get("/live", live);
+    var server = try startServer(&router);
+    defer _ = server.cancel(io) catch {};
+
+    const addr = try Io.net.IpAddress.parse("127.0.0.1", bound.load(.acquire));
+    var stream = try addr.connect(io, .{ .mode = .stream });
+    var wbuf: [256]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.writeAll("GET /live HTTP/1.1\r\n\r\n");
+    try w.interface.flush();
+    var rbuf: [1024]u8 = undefined;
+    var r = stream.reader(io, &rbuf);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(testing.allocator);
+    try readUntil(&r.interface, &got, "event: hello\ndata: {}\n\n");
+    try expectContains(got.items, "content-type: text/event-stream; charset=utf-8");
+    try expectContains(got.items, "retry: 5000\n\n");
+
+    while (!test_hub.hasSubscribers("b")) try io.sleep(.fromMilliseconds(5), .awake);
+    test_hub.publish("b", "shipment", "{\"id\":1}");
+    try readUntil(&r.interface, &got, "event: shipment\ndata: {\"id\":1}\n\n");
+
+    // A second stream from the same address is refused.
+    const res = try roundTrip(testing.allocator, "GET /live HTTP/1.1\r\nconnection: close\r\n\r\n");
+    defer testing.allocator.free(res);
+    try expectContains(res, "429");
+
+    // The client leaves: its place is freed.
+    stream.close(io);
+    while (test_hub.hasSubscribers("a")) try io.sleep(.fromMilliseconds(5), .awake);
+}
+
+fn slowEvents(ctx: *http.Context) !void {
+    var buf: [256]u8 = undefined;
+    var s = try ctx.eventStream(&buf);
+    try s.send("first", "now");
+    try io.sleep(.fromSeconds(3), .awake);
+    try s.end();
+}
+
+test "event stream: each event goes out when sent" {
+    var router: http.Router = .init(testing.allocator);
+    defer router.deinit();
+    try router.get("/slow", slowEvents);
+    var server = try startServer(&router);
+    defer _ = server.cancel(io) catch {};
+    const addr = try Io.net.IpAddress.parse("127.0.0.1", bound.load(.acquire));
+    var stream = try addr.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var wbuf: [256]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.writeAll("GET /slow HTTP/1.1\r\n\r\n");
+    try w.interface.flush();
+    var rbuf: [1024]u8 = undefined;
+    var r = stream.reader(io, &rbuf);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(testing.allocator);
+    const start = Io.Clock.awake.now(io);
+    try readUntil(&r.interface, &got, "event: first\ndata: now\n\n");
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < 2000);
+}

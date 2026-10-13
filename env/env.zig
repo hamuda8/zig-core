@@ -8,6 +8,27 @@ pub const Env = struct {
     environ: *const std.process.Environ.Map,
     file: std.StringHashMapUnmanaged([]const u8) = .empty,
 
+    /// The one order every app server uses: the file named by `<APP>_ENV_FILE` when that is set
+    /// ("" = no file), else the first of `.env.local`, `.env.production`, `.env` that exists, so
+    /// a developer machine that also keeps a copy of `.env.production` never starts against
+    /// production by accident. With NODE_ENV=test no file is read. Real environment variables
+    /// always win over the file.
+    pub fn loadApp(arena: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ.Map, comptime app: []const u8) !Env {
+        const name = comptime blk: {
+            var upper: [app.len]u8 = undefined;
+            for (app, 0..) |c, i| upper[i] = std.ascii.toUpper(c);
+            break :blk upper ++ "_ENV_FILE";
+        };
+        if (environ.get(name)) |f| {
+            if (f.len == 0) return .{ .environ = environ };
+            return load(arena, io, environ, &.{f});
+        }
+        if (environ.get("NODE_ENV")) |e| if (std.mem.eql(u8, e, "test")) return .{ .environ = environ };
+        return load(arena, io, environ, &app_files);
+    }
+
+    pub const app_files = [_][]const u8{ ".env.local", ".env.production", ".env" };
+
     /// Reads the first of `files` that exists (none is fine).
     pub fn load(arena: std.mem.Allocator, io: std.Io, environ: *const std.process.Environ.Map, files: []const []const u8) !Env {
         var e: Env = .{ .environ = environ };
@@ -82,4 +103,23 @@ test "file values, quotes, comments, and the environment winning" {
     try std.testing.expectEqualStrings("http://127.0.0.1:8002/route", e.str("VALHALLA_URL", ""));
     try std.testing.expectEqualStrings("fallback", e.str("EMPTY", "fallback"));
     try std.testing.expect(e.flag("TRUST_PROXY", false));
+}
+
+test "loadApp: the named file, or none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "x.env", .data = "PORT=7000\nNAME=file\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "x.env", a);
+    var map = std.process.Environ.Map.init(a);
+    try map.put("MAPS_ENV_FILE", path);
+    try map.put("NAME", "env");
+    const e = try Env.loadApp(a, std.testing.io, &map, "maps");
+    try std.testing.expectEqual(@as(u16, 7000), e.int(u16, "PORT", 1));
+    try std.testing.expectEqualStrings("env", e.str("NAME", ""));
+    try map.put("MAPS_ENV_FILE", "");
+    const none = try Env.loadApp(a, std.testing.io, &map, "maps");
+    try std.testing.expectEqual(@as(u16, 1), none.int(u16, "PORT", 1));
 }
