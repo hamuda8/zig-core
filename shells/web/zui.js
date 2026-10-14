@@ -758,6 +758,12 @@ export async function start(wasm, mount = document.body, options = {}) {
       zui_image_filter(id, s, c, b) {
         views.get(id).style.filter = s === 1 && c === 1 && b === 1 ? '' : `saturate(${s}) contrast(${c}) brightness(${b})`;
       },
+      zui_label(id, ptr, len) {
+        const el = views.get(id);
+        if (!el) return;
+        const s = str(ptr, len);
+        if (s) { el.title = s; el.setAttribute('aria-label', s); } else { el.removeAttribute('title'); el.removeAttribute('aria-label'); }
+      },
       zui_focus(id) {
         views.get(id)?.focus();
       },

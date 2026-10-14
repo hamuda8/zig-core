@@ -2474,6 +2474,41 @@ pub fn imageFit(i: u32, fit: zui.Fit) void {
 
 pub fn gestures(_: u32, _: zui.Gestures) void {}
 
+/// A box's label: what VoiceOver says.
+pub fn boxLabel(i: u32, s: []const u8) void {
+    const v = view(i);
+    objc.sendVoid1(v, "setAccessibilityLabel:", if (s.len > 0) objc.nsString(s) else null);
+}
+
+/// An icon button held down: its label in a dark pill above it for a moment and a half.
+pub fn showLabel(i: u32, s: []const u8) void {
+    if (root == null) return;
+    const v = view(i);
+    const l = objc.new("UILabel");
+    defer objc.release(l);
+    objc.sendVoid1(l, "setText:", objc.nsString(s));
+    objc.sendVoid1(l, "setTextColor:", color(0xffffffff));
+    objc.sendVoid1(l, "setBackgroundColor:", color(0xe6202124));
+    objc.sendVoidInt(l, "setTextAlignment:", 1); // centre
+    objc.sendVoidBool(l, "setClipsToBounds:", true);
+    objc.sendVoidFloat(objc.send(l, "layer"), "setCornerRadius:", 8);
+    const small = objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) id)(objc.class("UIFont"), objc.sel("systemFontOfSize:"), 14);
+    objc.sendVoid1(l, "setFont:", small);
+    objc.sendVoid(l, "sizeToFit");
+    const get_rect = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) objc.CGRect);
+    const conv = objc.msgSend(*const fn (id, objc.SEL, objc.CGRect, id) callconv(.c) objc.CGRect);
+    const at = conv(v, objc.sel("convertRect:toView:"), get_rect(v, objc.sel("bounds")), root);
+    const size = get_rect(l, objc.sel("bounds"));
+    const rb = get_rect(root, objc.sel("bounds"));
+    const w = size.w + 20;
+    const h = size.h + 10;
+    const x = @max(8, @min(rb.w - w - 8, at.x + at.w / 2 - w / 2));
+    const y = if (at.y - h - 6 > 8) at.y - h - 6 else at.y + at.h + 6;
+    objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(l, objc.sel("setFrame:"), .{ .x = x, .y = y, .w = w, .h = h });
+    objc.sendVoid1(root, "addSubview:", l);
+    objc.msgSend(*const fn (id, objc.SEL, objc.SEL, id, CGFloat) callconv(.c) void)(l, objc.sel("performSelector:withObject:afterDelay:"), objc.sel("removeFromSuperview"), null, 1.5);
+}
+
 pub fn haptic() void {
     const g = objc.msgSend(*const fn (id, objc.SEL, isize) callconv(.c) id)(objc.send(objc.class("UIImpactFeedbackGenerator"), "alloc"), objc.sel("initWithStyle:"), 1);
     defer objc.release(g);

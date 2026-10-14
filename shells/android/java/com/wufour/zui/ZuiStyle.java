@@ -476,6 +476,17 @@ final class ZuiStyle {
         spins.put(id, a);
     }
 
+    /** A box's label: what TalkBack says. */
+    static void label(int id, String s) {
+        View v = Zui.views.get(id);
+        if (v != null) v.setContentDescription(s.isEmpty() ? null : s);
+    }
+
+    /** An icon button held down: its label for a moment. */
+    static void showLabel(int id, String s) {
+        if (Zui.activity != null) android.widget.Toast.makeText(Zui.activity, s, android.widget.Toast.LENGTH_SHORT).show();
+    }
+
     static void haptic() {
         if (Zui.root != null) Zui.root.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
     }

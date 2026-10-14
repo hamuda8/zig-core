@@ -853,6 +853,8 @@ var style_m: struct {
     watch_scroll: jni.jmethodID,
     radius: jni.jmethodID,
     scroll_to: jni.jmethodID,
+    label: jni.jmethodID,
+    show_label: jni.jmethodID,
 } = undefined;
 
 fn styleBind() void {
@@ -876,6 +878,8 @@ fn styleBind() void {
         .{ "watch_scroll", "watchScroll", "(I)V" },
         .{ "scroll_to", "scrollTo", "(IFZ)V" },
         .{ "radius", "radius", "(IF)V" },
+        .{ "label", "label", "(ILjava/lang/String;)V" },
+        .{ "show_label", "showLabel", "(ILjava/lang/String;)V" },
     }) |m| @field(style_m, m[0]) = f.GetStaticMethodID(env, style_class, m[1], m[2]);
 }
 
@@ -1020,6 +1024,18 @@ pub fn spin(id: u32, period_ms: u16) void {
 }
 pub fn haptic() void {
     callStyle(style_m.haptic, &.{});
+}
+/// A box's label: what TalkBack says (content description).
+pub fn boxLabel(id: u32, s: []const u8) void {
+    const js = newString(s);
+    defer env.functions.DeleteLocalRef(env, js);
+    callStyle(style_m.label, &.{ int(id), object(js) });
+}
+/// A long press on an icon button: its label for a moment (a toast).
+pub fn showLabel(id: u32, s: []const u8) void {
+    const js = newString(s);
+    defer env.functions.DeleteLocalRef(env, js);
+    callStyle(style_m.show_label, &.{ int(id), object(js) });
 }
 pub fn scrollTo(id: u32, offset: f32, animated: bool) void {
     callStyle(style_m.scroll_to, &.{ int(id), float(offset), boolean(animated) });

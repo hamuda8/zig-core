@@ -99,6 +99,8 @@ pub const Node = struct {
     /// Text content, or the value of an input.
     text: []const u8 = "",
     placeholder: []const u8 = "",
+    /// What the view is, for screen readers and as its tooltip (`BoxOptions.label`).
+    label: []const u8 = "",
     pressable: bool = false,
     /// Receives pointer events (gestures).
     pointer: bool = false,
@@ -166,6 +168,7 @@ pub const Tree = struct {
         var n = node;
         n.text = try a.dupe(u8, node.text);
         n.placeholder = try a.dupe(u8, node.placeholder);
+        n.label = try a.dupe(u8, node.label);
         n.headers = try a.dupe(u8, node.headers);
         n.spans = try a.dupe(Span, node.spans);
         if (node.path) |p| {

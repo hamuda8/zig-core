@@ -82,6 +82,13 @@ pub var haptics: u32 = 0;
 pub fn haptic() void {
     haptics += 1;
 }
+/// The label a long press showed last (an icon button's `label`).
+pub var shown_label: std.ArrayList(u8) = .empty;
+pub fn boxLabel(_: u32, _: []const u8) void {}
+pub fn showLabel(_: u32, s: []const u8) void {
+    shown_label.clearRetainingCapacity();
+    shown_label.appendSlice(gpa, s) catch {};
+}
 
 /// Set when the app asked for a frame; `Driver.frame` delivers it.
 pub var frame_requested = false;
@@ -457,6 +464,7 @@ pub fn Driver(comptime App: type) type {
             file_accept = null;
             stream_conn = 0;
             haptics = 0;
+            shown_label.clearRetainingCapacity();
             scan_open = 0;
             push_registered = 0;
         }
@@ -859,7 +867,7 @@ const Nav = struct {
         ui.begin(.{}, .{ .on_press = .{ .open = "/a" } });
         ui.text("A", .{});
         ui.end();
-        ui.begin(.{}, .{ .on_press = .{ .open = "/b" } });
+        ui.begin(.{}, .{ .on_press = .{ .open = "/b" }, .label = "Open B" });
         ui.text("B", .{});
         ui.end();
         ui.begin(.{}, .{ .on_press = .open_sheet });
@@ -899,6 +907,17 @@ test "links: pushLink makes history, Back walks it, the app's onBack comes first
     try std.testing.expect(!back_history);
     D.openLink("/deep");
     try std.testing.expect(D.findText("/deep") != 0);
+}
+
+test "labels: a long press shows a button's label instead of pressing it" {
+    const D = Driver(Nav);
+    D.start(200, 400);
+    defer D.reset();
+    try D.longPress("B");
+    try std.testing.expectEqualStrings("Open B", shown_label.items);
+    try std.testing.expect(D.findText("/b") == 0);
+    try D.press("B");
+    try std.testing.expect(D.findText("/b") != 0);
 }
 
 test "keys: the app takes Escape, leaves the others" {

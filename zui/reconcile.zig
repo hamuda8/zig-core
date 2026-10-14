@@ -205,6 +205,10 @@ pub fn Reconciler(comptime H: type) type {
             if (o == null or o.?.pointer != n.pointer) {
                 if (n.pointer or o != null) H.pointer(id, n.pointer);
             }
+            if (@hasDecl(H, "boxLabel")) {
+                const was: []const u8 = if (o) |old| old.label else "";
+                if (!std.mem.eql(u8, was, n.label)) H.boxLabel(id, n.label);
+            }
 
             const tr = st.Transform.of(s);
             const old_tr: st.Transform = if (o) |old| st.Transform.of(old.style) else .{};

@@ -454,6 +454,7 @@ const js_style = struct {
     extern "zui" fn zui_transition(id: u32, duration_ms: u32, x1: f32, y1: f32, x2: f32, y2: f32) void;
     extern "zui" fn zui_spin(id: u32, period_ms: u32) void;
     extern "zui" fn zui_scroll_to(id: u32, offset: f32, animated: u32) void;
+    extern "zui" fn zui_label(id: u32, ptr: [*]const u8, len: usize) void;
 };
 
 /// A box's decoration as the shim reads it: 30 words.
@@ -530,6 +531,10 @@ pub fn spin(id: u32, period_ms: u16) void {
 }
 pub fn scrollTo(id: u32, offset: f32, animated: bool) void {
     js_style.zui_scroll_to(id, offset, @intFromBool(animated));
+}
+/// A box's label: its tooltip (title) and what screen readers say (aria-label).
+pub fn boxLabel(id: u32, s: []const u8) void {
+    js_style.zui_label(id, s.ptr, s.len);
 }
 
 fn exportStyle(comptime R: type) void {

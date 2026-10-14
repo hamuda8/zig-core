@@ -826,6 +826,10 @@ pub fn Ui(comptime Msg: type) type {
             on_hover: ?*const fn (bool) Msg = null,
             /// Raw pointer events (gestures): pan, pinch, rotate, wheel. They carry `key`.
             on_pointer: ?*const fn (Pointer) Msg = null,
+            /// What the box does, in words, for a button with only an icon: read by screen
+            /// readers, the web's tooltip (title), and shown for a moment on a long press on the
+            /// phones (when there is no `on_long_press`).
+            label: []const u8 = "",
         };
 
         /// A run of text in `richText`.
@@ -906,6 +910,7 @@ pub fn Ui(comptime Msg: type) type {
                 .kind = .view,
                 .style = style,
                 .key = o.key,
+                .label = o.label,
                 .pressable = o.on_press != null or o.on_long_press != null or o.on_context != null,
                 .pointer = o.on_pointer != null,
                 .gestures = .{ .long_press = o.on_long_press != null, .context = o.on_context != null, .hover = hover },
@@ -1217,10 +1222,27 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             hold_timer = 0;
             const id = pressed;
             if (id == 0) return;
-            const msg = find(holds, id) orelse find(contexts, id) orelse return;
+            const msg = find(holds, id) orelse find(contexts, id) orelse {
+                // An icon button's label, shown for a moment instead of pressing it.
+                const label = labelOf(id);
+                if (label.len == 0) return;
+                held = id;
+                if (@hasDecl(H, "haptic")) H.haptic();
+                if (@hasDecl(H, "showLabel")) H.showLabel(id, label);
+                pressed = 0;
+                render();
+                return;
+            };
             held = id;
             if (@hasDecl(H, "haptic")) H.haptic();
             dispatch(msg);
+        }
+
+        /// The `label` of the view on screen with this host id ("" if none).
+        fn labelOf(id: u32) []const u8 {
+            if (!has_old) return "";
+            for (trees[current].nodes.items) |n| if (n.host == id) return n.label;
+            return "";
         }
 
         /// A link in a text view was pressed: the `index`th link span.
@@ -2135,7 +2157,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
                     pressed = id;
                     held = 0;
                     hold_timer = 0;
-                    if (find(holds, id) != null or find(contexts, id) != null) {
+                    if (find(holds, id) != null or find(contexts, id) != null or (@hasDecl(H, "showLabel") and labelOf(id).len > 0)) {
                         hold_timer = newId();
                         H.timer(hold_timer, hold_ms);
                     }
