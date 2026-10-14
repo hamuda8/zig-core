@@ -90,6 +90,13 @@ public final class Zui {
     static final int PRESS_IN = 1, PRESS_OUT = 2, PRESS = 3;
 
     static Activity activity;
+    /** The application, when the app runs without its activity (a push woke it: ZuiPushHost). */
+    static Context app;
+
+    /** The activity, or the application while there is none. */
+    static Context ctx() {
+        return activity != null ? activity : app;
+    }
     static ZuiLayout root;
     static float density = 1;
     static boolean started, dark;
@@ -145,6 +152,7 @@ public final class Zui {
             nativeStart(w / density, h / density, dark, insetTop, insetRight, insetBottom, insetLeft, java.util.Locale.getDefault().toLanguageTag(), link);
             for (Object[] e : pendingCalls) nativeCall((Integer) e[0], (String) e[1]);
             pendingCalls.clear();
+            ZuiPushHost.flush();
             ZuiDevice.watchNetwork();
         } else {
             nativeResize(w / density, h / density);
@@ -653,7 +661,7 @@ public final class Zui {
     // ---- Storage: SharedPreferences; secure values encrypted with an Android Keystore key ----
 
     static android.content.SharedPreferences prefs() {
-        return activity.getSharedPreferences("zui", Context.MODE_PRIVATE);
+        return ctx().getSharedPreferences("zui", Context.MODE_PRIVATE);
     }
 
     static javax.crypto.SecretKey keystoreKey() throws Exception {
@@ -727,9 +735,10 @@ public final class Zui {
     static final String CHANNEL_NORMAL = "zui-normal", CHANNEL_URGENT = "zui-urgent";
 
     static void notify(int id, String title, String body, boolean urgent) {
+        Context activity = ctx();
         android.app.NotificationManager nm = activity.getSystemService(android.app.NotificationManager.class);
-        if (Build.VERSION.SDK_INT >= 33 && activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            activity.requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 7003);
+        if (Zui.activity != null && Build.VERSION.SDK_INT >= 33 && activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            Zui.activity.requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 7003);
         }
         if (nm.getNotificationChannel(CHANNEL_NORMAL) == null) {
             nm.createNotificationChannel(new android.app.NotificationChannel(CHANNEL_NORMAL, "Notifications", android.app.NotificationManager.IMPORTANCE_DEFAULT));
@@ -740,7 +749,7 @@ public final class Zui {
             urgentChannel.setBypassDnd(true);
             nm.createNotificationChannel(urgentChannel);
         }
-        Intent open = new Intent(activity, activity.getClass()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        Intent open = new Intent(activity, ZuiActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         open.putExtra("zui_alert", urgent);
         android.app.PendingIntent tap = android.app.PendingIntent.getActivity(activity, id, open, android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
         android.app.Notification.Builder b = new android.app.Notification.Builder(activity, urgent ? CHANNEL_URGENT : CHANNEL_NORMAL)
@@ -759,7 +768,7 @@ public final class Zui {
     }
 
     static void cancelNotify(int id) {
-        activity.getSystemService(android.app.NotificationManager.class).cancel(id);
+        ctx().getSystemService(android.app.NotificationManager.class).cancel(id);
     }
 
     /** A video view shows stream `stream` (a local camera, or a remote one). */
@@ -768,11 +777,11 @@ public final class Zui {
     }
 
     static void ringCall(String id, String name, boolean video) {
-        ZuiCallService.ring(activity, id, name, video);
+        ZuiCallService.ring(ctx(), id, name, video);
     }
 
     static void startCall(String id, String name, boolean video) {
-        ZuiCallService.outgoing(activity, id, name, video);
+        ZuiCallService.outgoing(ctx(), id, name, video);
     }
 
     static void callConnected(String id) {
@@ -780,11 +789,11 @@ public final class Zui {
     }
 
     static void endCall(String id) {
-        ZuiCallService.end(activity, id);
+        ZuiCallService.end(ctx(), id);
     }
 
     static void widgetUpdate(String title, String l1, String l2, String l3) {
-        ZuiWidget.update(activity, title, l1, l2, l3);
+        ZuiWidget.update(ctx(), title, l1, l2, l3);
     }
 
     static void openSocket(int id, String url) {

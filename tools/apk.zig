@@ -324,6 +324,8 @@ fn countClasses(entries: []const zip.Entry) usize {
 fn isJavaResource(name: []const u8) bool {
     const skip_prefix = [_][]const u8{ "META-INF/MANIFEST.MF", "META-INF/versions/", "META-INF/maven/", "META-INF/proguard/", "META-INF/com.android.tools/", "AndroidManifest.xml", "res/", "resources.arsc", "lib/", "assets/" };
     for (skip_prefix) |p| if (std.mem.startsWith(u8, name, p)) return false;
+    // Kotlin multiplatform metadata (commonMain/default/linkdata/...): compile-time only.
+    if (std.mem.indexOf(u8, name, "/default/linkdata/") != null or std.mem.endsWith(u8, name, "/default/manifest") or std.mem.endsWith(u8, name, ".knm") or std.mem.eql(u8, name, "META-INF/kotlin-project-structure-metadata.json")) return false;
     const skip_suffix = [_][]const u8{ ".SF", ".RSA", ".DSA", ".EC", ".kotlin_metadata", ".kotlin_builtins", ".java", ".proto", "LICENSE", "LICENSE.txt", "NOTICE", "NOTICE.txt", ".dex" };
     for (skip_suffix) |s| if (std.mem.endsWith(u8, name, s)) return false;
     return true;
@@ -621,4 +623,6 @@ test isJavaResource {
     try std.testing.expect(isJavaResource("META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory"));
     try std.testing.expect(!isJavaResource("META-INF/MANIFEST.MF"));
     try std.testing.expect(!isJavaResource("kotlin/collections/collections.kotlin_builtins"));
+    try std.testing.expect(!isJavaResource("commonMain/default/linkdata/root_package/0_.knm"));
+    try std.testing.expect(!isJavaResource("nonJvmMain/default/manifest"));
 }

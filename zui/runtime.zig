@@ -253,6 +253,21 @@ pub const CallEvent = struct {
     pub const Kind = enum(u8) { answer = 1, decline = 2, end = 3 };
 };
 
+/// Where a push token comes from. The app sends it to its server, which pushes through the
+/// matching service: `.fcm` Firebase Cloud Messaging (Android), `.apns` Apple's alert pushes,
+/// `.voip` Apple's VoIP pushes (PushKit: incoming calls), `.web` Web Push (the token is the
+/// subscription's JSON: endpoint and keys).
+pub const PushKind = enum(u8) { fcm = 1, apns = 2, voip = 3, web = 4 };
+
+/// `fx.registerPush`: asks for permission where the platform needs it and delivers the token(s)
+/// to the app's `pub fn pushToken(token: []const u8, kind: zui.PushKind) ?Msg` (again whenever
+/// the platform changes them). Pushes arrive at `pub fn pushMessage(json: []const u8) ?Msg`:
+/// the data map on Android, the payload on iOS. On the web the service worker shows them.
+pub const PushOptions = struct {
+    /// Web Push: the server's VAPID public key (base64url). Ignored on phones.
+    web_key: []const u8 = "",
+};
+
 /// The platform's own pickers (`fx.pickDate`, `fx.pickTime`, `fx.pickOption`).
 pub const PickKind = enum(u8) { date = 1, time = 2, option = 3 };
 
@@ -398,6 +413,7 @@ pub fn Fx(comptime Msg: type) type {
             open_events: *const fn (EventStream, *const fn (ServerEvent) Msg) u32,
             close_events: *const fn (u32) void,
             key: *const fn (keys.Request, *const fn (keys.Result) Msg) u32,
+            register_push: *const fn (PushOptions) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -658,6 +674,12 @@ pub fn Fx(comptime Msg: type) type {
         /// Stops ringing / ends the call on the system's side.
         pub fn endCall(fx: Self, id: []const u8) void {
             fx.vt.end_call(id);
+        }
+
+        /// Push notifications: see `PushOptions`. Call it after sign-in; the token arrives at the
+        /// app's `pushToken`.
+        pub fn registerPush(fx: Self, o: PushOptions) void {
+            fx.vt.register_push(o);
         }
 
         /// Puts `text` on the clipboard.
@@ -1125,6 +1147,9 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         var env: Env = .{};
         var pressed: u32 = 0;
         var started = false;
+        /// Started without a screen (a push woke the app: `startHeadless`); nothing is drawn
+        /// until `start` brings the screen.
+        var headless = false;
         var background: u32 = 0;
         /// Handlers of the frame on screen, by host id.
         var presses: []const Binding(Msg) = &.{};
@@ -1465,6 +1490,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .open_events = fxOpenEvents,
             .close_events = fxCloseEvents,
             .key = fxKey,
+            .register_push = fxRegisterPush,
         };
 
         // ---- Secure keys: the web's WebCrypto answers later (H.keyRequest); elsewhere zui's
@@ -1810,6 +1836,10 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             if (has_system_calls) H.endCall(id);
         }
 
+        fn fxRegisterPush(o: PushOptions) void {
+            if (@hasDecl(H, "registerPush")) H.registerPush(o);
+        }
+
         // Calls. The web host has them built in (H.openMedia...). The phones have a media
         // backend (H.Media) and need a call engine from the app (App.rtc, see zui/calls.zig).
         // Without either, media answers "unsupported" and peers "failed".
@@ -1993,11 +2023,46 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         /// `lang` is the system language ("ar", "en-US", ...); the app starts in it when it has a
         /// bundle for it, otherwise in English.
         pub fn start(allocator: std.mem.Allocator, e: Env, lang: []const u8) void {
+            if (started and headless) {
+                // Woken by a push earlier: the state stays, the screen arrives now.
+                headless = false;
+                const visible = env.visible;
+                env = e;
+                env.visible = e.visible or visible;
+                env.link = intern(e.link);
+                render();
+                if (@hasDecl(App, "boot")) dispatch(App.boot);
+                return;
+            }
+            begin(allocator, lang);
+            env = e;
+            env.link = intern(e.link);
+            state = App.init();
+            started = true;
+            render();
+            // An app that needs effects at startup (location, reading its link) declares
+            // `pub const boot: Msg`.
+            if (@hasDecl(App, "boot")) dispatch(App.boot);
+        }
+
+        /// Starts the app without a screen: a push arrived while it was not running (Android:
+        /// FirebaseMessagingService started the process; iOS: PushKit launched it in the
+        /// background). `init` runs and messages are handled (`pushMessage` can ring a call or
+        /// notify, fetch, store); nothing is drawn and `boot` waits until `start` brings the
+        /// screen, which keeps the state.
+        pub fn startHeadless(allocator: std.mem.Allocator, lang: []const u8) void {
+            if (started) return;
+            begin(allocator, lang);
+            env = .{ .visible = false };
+            state = App.init();
+            headless = true;
+            started = true;
+        }
+
+        fn begin(allocator: std.mem.Allocator, lang: []const u8) void {
             gpa = allocator;
             trees = .{ Tree.init(gpa), Tree.init(gpa) };
             rec = .{ .gpa = gpa };
-            env = e;
-            env.link = intern(e.link);
             if (@hasDecl(App, "locales")) {
                 const global = if (@hasDecl(App, "global_locale")) App.global_locale else "{}";
                 i18n.init(gpa, global, App.locales) catch {};
@@ -2006,12 +2071,6 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
                     if (std.ascii.eqlIgnoreCase(l.lang, base)) i18n.setLanguage(l.lang);
                 }
             }
-            state = App.init();
-            started = true;
-            render();
-            // An app that needs effects at startup (location, reading its link) declares
-            // `pub const boot: Msg`.
-            if (@hasDecl(App, "boot")) dispatch(App.boot);
         }
 
         pub fn resize(width: f32, height: f32) void {
@@ -2193,6 +2252,21 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             if (App.callEvent(.{ .kind = kind, .id = id })) |m| dispatch(m);
         }
 
+        /// A push token from the platform (see `PushOptions`): the app's
+        /// `pub fn pushToken(token: []const u8, kind: PushKind) ?Msg`.
+        pub fn pushToken(token: []const u8, kind: PushKind) void {
+            if (!started or !@hasDecl(App, "pushToken")) return;
+            if (App.pushToken(token, kind)) |m| dispatch(m);
+        }
+
+        /// A push's data (JSON) for the app's `pub fn pushMessage(json: []const u8) ?Msg`,
+        /// handled before this returns: a VoIP push on iOS must report the call to CallKit
+        /// (`fx.ringCall`) right there, and Android may stop the process soon after.
+        pub fn pushMessage(json: []const u8) void {
+            if (!started or !@hasDecl(App, "pushMessage")) return;
+            if (App.pushMessage(json)) |m| dispatch(m);
+        }
+
         /// A message from the embedding page; the app turns it into a Msg with
         /// `pub fn hostMessage(json: []const u8) ?Msg`.
         pub fn hostMessage(json: []const u8) void {
@@ -2237,6 +2311,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         }
 
         fn render() void {
+            if (headless) return;
             readClock();
             rendering = true;
             defer rendering = false;

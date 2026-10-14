@@ -559,6 +559,25 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             R.deviceEvent(std.enums.fromInt(zui.DeviceEvent, @as(u8, @intCast(kind))) orelse return);
         }
+        /// A push woke the app (ZuiPushHost): the app without its screen.
+        fn startHeadless(e: *jni.Env, _: jni.jclass, lang: jni.jstring) callconv(.c) void {
+            bind(e);
+            var buf: [32]u8 = undefined;
+            R.startHeadless(zui.allocator, javaString(lang, &buf));
+        }
+        fn pushToken(e: *jni.Env, _: jni.jclass, token: jni.jstring, kind: jni.jint) callconv(.c) void {
+            bind(e);
+            var buf: [4096]u8 = undefined;
+            R.pushToken(javaString(token, &buf), std.enums.fromInt(zui.PushKind, @as(u8, @intCast(kind))) orelse return);
+        }
+        fn pushMessage(e: *jni.Env, _: jni.jclass, json: jni.jstring) callconv(.c) void {
+            bind(e);
+            const f = e.functions;
+            const units: usize = @intCast(f.GetStringLength(e, json));
+            const buf = zui.allocator.alloc(u8, units * 3 + 1) catch return;
+            defer zui.allocator.free(buf);
+            R.pushMessage(javaStringLong(json, buf));
+        }
         fn textEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, s: jni.jstring) callconv(.c) void {
             bind(e);
             var buf: [4096]u8 = undefined;
@@ -591,6 +610,9 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.streamEnd, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeStreamEnd" });
     @export(&Entry.linkEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeLink" });
     @export(&Entry.deviceEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeDevice" });
+    @export(&Entry.startHeadless, .{ .name = "Java_com_wufour_zui_ZuiPushHost_nativeStartHeadless" });
+    @export(&Entry.pushToken, .{ .name = "Java_com_wufour_zui_ZuiPushHost_nativeToken" });
+    @export(&Entry.pushMessage, .{ .name = "Java_com_wufour_zui_ZuiPushHost_nativeMessage" });
     exportStyle(R);
     exportScanner(R);
 }
@@ -718,6 +740,17 @@ pub fn requestFrame() void {
 
 /// There is no embedding page on a phone.
 pub fn post(_: []const u8) void {}
+
+/// fx.registerPush: ZuiPushHost.register (notification permission, then ZuiPush through
+/// Firebase when the app is built with push). Tokens come back through nativeToken.
+pub fn registerPush(_: zui.PushOptions) void {
+    const f = env.functions;
+    const local = f.FindClass(env, "com/wufour/zui/ZuiPushHost");
+    defer f.DeleteLocalRef(env, local);
+    const m = f.GetStaticMethodID(env, local, "register", "()V");
+    f.CallStaticVoidMethodA(env, local, m, &[_]jni.jvalue{});
+    check();
+}
 
 pub fn notify(n: zui.Notification) void {
     const jt = newString(n.title);

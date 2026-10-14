@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = wufour_imports,
     }) })).step);
-    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "push/push.zig", "fetch/fetch.zig", "smtp/smtp.zig", "ec/ec.zig", "tools/zip.zig", "tools/strings.zig" }) |root| {
+    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "push/push.zig", "fetch/fetch.zig", "smtp/smtp.zig", "ec/ec.zig", "tools/zip.zig", "tools/strings.zig", "tools/xml.zig", "tools/maven.zig", "tools/apk.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
@@ -110,6 +110,15 @@ pub fn build(b: *std.Build) void {
 }
 
 pub const WebExtra = struct { name: []const u8, root: std.Build.LazyPath };
+
+pub const AndroidPush = struct {
+    /// The app's google-services.json, kept outside the repository (it is never committed);
+    /// `-Dgoogle-services=PATH` overrides it. Its project id, app id, API key and sender id go
+    /// into the APK's manifest for ZuiPush. Missing: the APK builds and push stays off.
+    google_services: []const u8 = "",
+    /// The Firebase Cloud Messaging client: the one third-party library zui apps ship.
+    firebase_messaging: []const u8 = "com.google.firebase:firebase-messaging:26.0.0",
+};
 
 pub const AppOptions = struct {
     /// Short lowercase name: "maps", "turf", "reseal". Used for file names.
@@ -140,11 +149,20 @@ pub const AppOptions = struct {
     /// Its data travels through the app group "group.<bundle id>": a device build needs that
     /// group in the app's provisioning profile.
     ios_widget: bool = false,
+    /// Maven artifacts the Android app needs ("group:artifact:version"), resolved with their
+    /// dependencies from Google's Maven and Maven Central into a cache (-Dmaven-cache=,
+    /// default %LOCALAPPDATA%/zig-core/maven or ~/.cache/zig-core/maven) and packaged without
+    /// Gradle (tools/apk.zig: AAR resources and manifests merged, classes dexed).
+    android_deps: []const []const u8 = &.{},
+    /// Push on Android through Firebase Cloud Messaging: adds firebase-messaging and the
+    /// ZuiPush service (shells/android/push), which the app's manifest declares (see
+    /// ZuiPush.java).
+    android_push: ?AndroidPush = null,
     optimize: std.builtin.OptimizeMode,
 };
 
 /// The fixed Android shim (shells/android/java/com/wufour/zui). Listed so the APK rebuilds when one changes.
-const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java", "ZuiStyle.java", "ZuiScanner.java" };
+const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java", "ZuiStyle.java", "ZuiScanner.java", "ZuiPushHost.java" };
 /// zui's Android resources (the widget), listed for the same reason.
 const android_res = [_][]const u8{ "layout/zui_widget.xml", "xml/zui_widget_info.xml", "drawable/zui_widget_bg.xml" };
 
@@ -242,6 +260,31 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 run.addArg("--res");
                 run.addDirectoryArg(res);
                 for (opts.android_res_files) |f| run.addFileInput(res.path(b, f));
+            }
+            // Maven libraries (and, with push, firebase-messaging and ZuiPush).
+            var deps: std.ArrayList([]const u8) = .empty;
+            deps.appendSlice(b.allocator, opts.android_deps) catch @panic("OOM");
+            if (opts.android_push) |p| {
+                deps.append(b.allocator, p.firebase_messaging) catch @panic("OOM");
+                run.addArg("--java");
+                run.addDirectoryArg(core.path("shells/android/push"));
+                run.addFileInput(core.path("shells/android/push/com/wufour/zui/ZuiPush.java"));
+                const gs = b.option([]const u8, "google-services", "The app's google-services.json (push; kept outside the repository)") orelse p.google_services;
+                if (gs.len > 0) {
+                    const abs = if (std.fs.path.isAbsolute(gs)) gs else b.fmt("{f}", .{b.root.join(b.allocator, gs) catch @panic("OOM")});
+                    if (std.Io.Dir.cwd().access(b.graph.io, abs, .{})) |_| {
+                        run.addArg("--firebase");
+                        run.addFileArg(.{ .cwd_relative = abs });
+                    } else |_| std.log.warn("{s} not found: the APK is built without push", .{abs});
+                }
+            }
+            if (deps.items.len > 0) {
+                const local = b.graph.environ_map.get("LOCALAPPDATA");
+                const home = b.graph.environ_map.get("HOME") orelse ".";
+                const default_cache = if (local) |l| b.pathJoin(&.{ l, "zig-core", "maven" }) else b.pathJoin(&.{ home, ".cache", "zig-core", "maven" });
+                const cache = b.option([]const u8, "maven-cache", "Where Maven artifacts are kept") orelse default_cache;
+                run.addArgs(&.{ "--maven-cache", cache });
+                for (deps.items) |d| run.addArgs(&.{ "--dep", d });
             }
             const sysroot = b.pathJoin(&.{ sdk, "ndk", ndk_version, "toolchains", "llvm", "prebuilt", ndk_host, "sysroot" });
             for (android_abis) |a| {

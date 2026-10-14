@@ -330,6 +330,15 @@ pub fn callConnected(_: []const u8) void {}
 pub fn endCall(_: []const u8) void {
     ringing.clearRetainingCapacity();
 }
+/// fx.registerPush: how many times, and the Web Push key it was given (a test answers with
+/// R.pushToken).
+pub var push_registered: u32 = 0;
+pub var push_web_key: std.ArrayList(u8) = .empty;
+pub fn registerPush(o: zui.PushOptions) void {
+    push_registered += 1;
+    push_web_key.clearRetainingCapacity();
+    push_web_key.appendSlice(gpa, o.web_key) catch {};
+}
 pub var notified: std.ArrayList(u8) = .empty;
 pub fn notify(n: zui.Notification) void {
     notified.clearRetainingCapacity();
@@ -412,6 +421,12 @@ pub fn Driver(comptime App: type) type {
             R.start(std.heap.page_allocator, .{ .width = width, .height = height, .link = link_ }, "en");
         }
 
+        /// Starts as a push would when the app is not running: no screen yet.
+        pub fn startHeadless() void {
+            reset();
+            R.startHeadless(std.heap.page_allocator, "en");
+        }
+
         pub fn reset() void {
             for (views.values()) |*v| {
                 v.text.deinit(gpa);
@@ -442,6 +457,7 @@ pub fn Driver(comptime App: type) type {
             stream_conn = 0;
             haptics = 0;
             scan_open = 0;
+            push_registered = 0;
         }
 
         /// Back (Android's button, the iOS swipe). Returns whether the app took it.

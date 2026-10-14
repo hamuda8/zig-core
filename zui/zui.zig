@@ -60,6 +60,8 @@ pub const ReturnKey = tree.ReturnKey;
 pub const InputType = tree.InputType;
 pub const Call = runtime.Call;
 pub const CallEvent = runtime.CallEvent;
+pub const PushKind = runtime.PushKind;
+pub const PushOptions = runtime.PushOptions;
 pub const DeviceEvent = runtime.DeviceEvent;
 pub const DatePick = runtime.DatePick;
 pub const TimePick = runtime.TimePick;
@@ -137,6 +139,7 @@ test {
     _ = text;
     _ = barcode;
     if (platform == .headless) _ = @import("ui_test.zig");
+    if (platform == .headless) _ = @import("push_test.zig");
     _ = i18n;
     _ = layout;
     _ = tree;
