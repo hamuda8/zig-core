@@ -248,6 +248,12 @@ pub const Playback = struct {
     video: bool = false,
     autoplay: bool = true,
     loop: bool = false,
+    /// Which sound it is, for the phone's volume and routing: a message or video (media), a
+    /// ringtone (the ringer's volume), or a sound inside a call (ringback, connect, hang-up:
+    /// the call's volume and earpiece or speaker). The web plays them all alike.
+    stream: Stream = .media,
+
+    pub const Stream = enum(u8) { media = 0, ringtone = 1, call = 2 };
 };
 
 pub const PlayEvent = struct {
@@ -263,7 +269,14 @@ pub const PlayEvent = struct {
 };
 
 /// What `fx.pausePlayback`, `resumePlayback`, `seekPlayback` and `stopPlayback` ask a host.
-pub const PlaybackControl = union(enum) { pause, play, seek: u32, stop };
+pub const PlaybackControl = union(enum) {
+    pause,
+    play,
+    seek: u32,
+    stop,
+    /// Speed in percent (100 normal, 150, 200), pitch kept.
+    rate: u16,
+};
 
 /// A call the phone itself shows: the ringing screen over the lock screen, and the call in
 /// Bluetooth, the car and the system's "in call" state. Android: a self-managed ConnectionService
@@ -708,6 +721,11 @@ pub fn Fx(comptime Msg: type) type {
         /// Stops and releases the player (no more events).
         pub fn stopPlayback(fx: Self, player: u32) void {
             fx.vt.control_playback(player, .stop);
+        }
+
+        /// Plays faster or slower: `percent` of normal speed (voice messages at 150, 200).
+        pub fn playbackRate(fx: Self, player: u32, percent: u16) void {
+            fx.vt.control_playback(player, .{ .rate = percent });
         }
 
         /// An incoming call: the phone rings and shows its call screen, even when locked.

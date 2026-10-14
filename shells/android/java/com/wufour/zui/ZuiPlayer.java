@@ -19,6 +19,7 @@ final class ZuiPlayer {
     static final class P {
         int id, width, height;
         boolean video, prepared, autoplay;
+        float speed = 1f;
         MediaPlayer player;
         File file;
         Runnable tick;
@@ -27,7 +28,8 @@ final class ZuiPlayer {
 
     static final HashMap<Integer, P> players = new HashMap<>();
 
-    static void play(int id, String url, byte[] data, String mime, boolean video, boolean autoplay, boolean loop) {
+    /** stream: 0 media, 1 ringtone, 2 a sound inside a call. */
+    static void play(int id, String url, byte[] data, String mime, boolean video, boolean autoplay, boolean loop, int stream) {
         P p = new P();
         p.id = id;
         p.video = video;
@@ -36,7 +38,9 @@ final class ZuiPlayer {
         MediaPlayer m = new MediaPlayer();
         p.player = m;
         try {
-            m.setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(video ? AudioAttributes.CONTENT_TYPE_MOVIE : AudioAttributes.CONTENT_TYPE_SPEECH).build());
+            int usage = stream == 1 ? AudioAttributes.USAGE_NOTIFICATION_RINGTONE : stream == 2 ? AudioAttributes.USAGE_VOICE_COMMUNICATION_SIGNALLING : AudioAttributes.USAGE_MEDIA;
+            int content = stream != 0 ? AudioAttributes.CONTENT_TYPE_SONIFICATION : video ? AudioAttributes.CONTENT_TYPE_MOVIE : AudioAttributes.CONTENT_TYPE_SPEECH;
+            m.setAudioAttributes(new AudioAttributes.Builder().setUsage(usage).setContentType(content).build());
             if (data != null && data.length > 0) {
                 p.file = File.createTempFile("zui-play", extension(mime), Zui.activity.getCacheDir());
                 try (FileOutputStream out = new FileOutputStream(p.file)) {
@@ -81,6 +85,18 @@ final class ZuiPlayer {
         }
     }
 
+    /** Speed: percent of normal, pitch kept (Android 6+). */
+    static void rate(P p) {
+        if (!p.prepared || Build.VERSION.SDK_INT < 23) return;
+        try {
+            boolean was = p.player.isPlaying();
+            p.player.setPlaybackParams(p.player.getPlaybackParams().setSpeed(p.speed));
+            // Setting a speed starts a paused player.
+            if (!was) p.player.pause();
+        } catch (Exception ignored) {
+        }
+    }
+
     static String extension(String mime) {
         if (mime == null) return ".bin";
         if (mime.contains("webm")) return ".webm";
@@ -113,11 +129,16 @@ final class ZuiPlayer {
             case 4:
                 release(p);
                 break;
+            case 5:
+                p.speed = Math.max(0.25f, Math.min(4f, value / 100f));
+                rate(p);
+                break;
         }
     }
 
     static void resume(P p) {
         p.player.start();
+        if (p.speed != 1f) rate(p);
         if (p.tick != null) return;
         p.tick = new Runnable() {
             @Override

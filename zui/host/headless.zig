@@ -336,7 +336,11 @@ pub fn play(id: u32, p: zui.Playback) void {
     playing_url.clearRetainingCapacity();
     playing_url.appendSlice(gpa, p.url) catch {};
     playing_bytes = p.data.len;
+    playing_stream = p.stream;
+    playing_loop = p.loop;
 }
+pub var playing_stream: zui.Playback.Stream = .media;
+pub var playing_loop = false;
 pub fn controlPlayback(_: u32, c: zui.PlaybackControl) void {
     playback_controls.append(gpa, c) catch {};
 }
@@ -1195,7 +1199,7 @@ test "an app closing its stream while an event is handled" {
 }
 
 const Voice = struct {
-    pub const Msg = union(enum) { record, stop, rec: zui.RecordEvent, play, seek, ev: zui.PlayEvent };
+    pub const Msg = union(enum) { record, stop, rec: zui.RecordEvent, play, seek, fast, ev: zui.PlayEvent };
     pub const State = struct {
         recorder: u32 = 0,
         player: u32 = 0,
@@ -1225,6 +1229,7 @@ const Voice = struct {
             },
             .play => s.player = fx.play(.{ .url = "https://example.com/voice.m4a" }, onPlay),
             .seek => fx.seekPlayback(s.player, 1500),
+            .fast => fx.playbackRate(s.player, 150),
             .ev => |e| switch (e.kind) {
                 .ready => s.duration = e.duration_ms,
                 .progress => s.position = e.position_ms,
@@ -1246,6 +1251,9 @@ const Voice = struct {
         ui.end();
         ui.begin(.{}, .{ .on_press = .seek });
         ui.text("Seek", .{});
+        ui.end();
+        ui.begin(.{}, .{ .on_press = .fast });
+        ui.text("1.5x", .{});
         ui.end();
         ui.text(ui.tf("{b} bytes, {p} of {d} ms", .{ .b = s.bytes, .p = s.position, .d = s.duration }), .{});
         ui.end();
@@ -1269,6 +1277,8 @@ test "recording a voice message and playing it" {
     try std.testing.expect(D.findText("9 bytes, 750 of 2000 ms") != 0);
     try D.press("Seek");
     try std.testing.expectEqual(@as(u32, 1500), playback_controls.items[playback_controls.items.len - 1].seek);
+    try D.press("1.5x");
+    try std.testing.expectEqual(@as(u16, 150), playback_controls.items[playback_controls.items.len - 1].rate);
 }
 
 const Keys = struct {

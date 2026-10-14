@@ -396,6 +396,7 @@ const Player = struct {
     want_play: bool,
     loop: bool,
     ended: bool = false,
+    speed: f32 = 1,
 };
 
 var players: std.AutoHashMapUnmanaged(u32, *Player) = .empty;
@@ -472,14 +473,14 @@ fn playTick(ctx: ?*anyopaque) callconv(.c) void {
     if (!pl.ready and status == 1) {
         pl.ready = true;
         on_play(pl.id, .ready, 0, durationMs(pl), "");
-        if (pl.want_play) objc.sendVoid(pl.player, "play");
+        if (pl.want_play) start(pl);
     } else if (pl.ready and !pl.ended) {
         const pos = positionMs(pl);
         const dur = durationMs(pl);
         if (pl.want_play and rate(pl) == 0 and dur > 0 and pos + 60 >= dur) {
             if (pl.loop) {
                 seekTo(pl, 0);
-                objc.sendVoid(pl.player, "play");
+                start(pl);
             } else {
                 pl.ended = true;
                 on_play(pl.id, .ended, dur, dur, "");
@@ -508,7 +509,7 @@ pub fn controlPlayback(player_id: u32, c: zui.PlaybackControl) void {
             pl.want_play = true;
             if (pl.ended) seekTo(pl, 0);
             pl.ended = false;
-            if (pl.ready) objc.sendVoid(pl.player, "play");
+            if (pl.ready) start(pl);
         },
         .seek => |ms| {
             pl.ended = false;
@@ -520,7 +521,21 @@ pub fn controlPlayback(player_id: u32, c: zui.PlaybackControl) void {
             release(pl);
             refreshViews(player_id);
         },
+        .rate => |pct| {
+            pl.speed = @max(0.25, @min(4, @as(f32, @floatFromInt(pct)) / 100));
+            if (pl.ready and pl.want_play) setRate(pl);
+        },
     }
+}
+
+/// Plays at the player's speed (AVPlayer's play is speed 1).
+fn setRate(pl: *Player) void {
+    msgSend(*const fn (id, SEL, f32) callconv(.c) void)(pl.player, objc.sel("setRate:"), pl.speed);
+}
+
+fn start(pl: *Player) void {
+    objc.sendVoid(pl.player, "play");
+    if (pl.speed != 1) setRate(pl);
 }
 
 fn release(pl: *Player) void {

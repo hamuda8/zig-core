@@ -250,6 +250,7 @@ pub fn controlPlayback(id: u32, c: zui.PlaybackControl) void {
         .play => js.zui_playback(id, 2, 0),
         .seek => |ms| js.zui_playback(id, 3, ms),
         .stop => js.zui_playback(id, 4, 0),
+        .rate => |pct| js.zui_playback(id, 5, pct),
     }
 }
 pub fn video(id: u32, v: zui.Video) void {

@@ -1097,6 +1097,7 @@ function webMedia(getEx, getMemory, withBytes, encoder, str, streams) {
       if (op === 1) p.el.pause();
       else if (op === 2) p.el.play().catch(() => {});
       else if (op === 3) p.el.currentTime = (value >>> 0) / 1000;
+      else if (op === 5) { p.el.preservesPitch = true; p.el.playbackRate = Math.max(0.25, Math.min(4, (value >>> 0) / 100)); }
       else if (op === 4) {
         p.el.pause();
         p.el.onloadedmetadata = p.el.ontimeupdate = p.el.onended = p.el.onerror = null;

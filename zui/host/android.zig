@@ -147,7 +147,7 @@ fn bindMessages(e: *jni.Env) void {
     f.DeleteLocalRef(e, p);
     messages.start = f.GetStaticMethodID(e, messages.recorder, "start", "(IZZI)V");
     messages.stop = f.GetStaticMethodID(e, messages.recorder, "stop", "(IZ)V");
-    messages.play = f.GetStaticMethodID(e, messages.player, "play", "(ILjava/lang/String;[BLjava/lang/String;ZZZ)V");
+    messages.play = f.GetStaticMethodID(e, messages.player, "play", "(ILjava/lang/String;[BLjava/lang/String;ZZZI)V");
     messages.control = f.GetStaticMethodID(e, messages.player, "control", "(III)V");
 }
 
@@ -168,7 +168,7 @@ pub fn play(id: u32, p: zui.Playback) void {
     const jd = f.NewByteArray(env, @intCast(p.data.len));
     defer f.DeleteLocalRef(env, jd);
     if (p.data.len > 0) f.SetByteArrayRegion(env, jd, 0, @intCast(p.data.len), p.data.ptr);
-    f.CallStaticVoidMethodA(env, messages.player, messages.play, &[_]jni.jvalue{ int(id), object(ju), object(jd), object(jm), boolean(p.video), boolean(p.autoplay), boolean(p.loop) });
+    f.CallStaticVoidMethodA(env, messages.player, messages.play, &[_]jni.jvalue{ int(id), object(ju), object(jd), object(jm), boolean(p.video), boolean(p.autoplay), boolean(p.loop), int(@intFromEnum(p.stream)) });
     check();
 }
 pub fn controlPlayback(id: u32, c: zui.PlaybackControl) void {
@@ -177,6 +177,7 @@ pub fn controlPlayback(id: u32, c: zui.PlaybackControl) void {
         .play => .{ 2, 0 },
         .seek => |ms| .{ 3, @min(ms, std.math.maxInt(i32)) },
         .stop => .{ 4, 0 },
+        .rate => |pct| .{ 5, pct },
     };
     env.functions.CallStaticVoidMethodA(env, messages.player, messages.control, &[_]jni.jvalue{ int(id), int(op), int(value) });
     check();
