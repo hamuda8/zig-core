@@ -7,7 +7,11 @@ Zig code shared by Reseal, Maps and Turf, and the build steps every app gets thr
 | `zui/` | UI framework. One app source shows real native views: DOM on the web, `android.view.View` through JNI, `UIView` through the Objective-C runtime |
 | `zui/platform/` | Hand-written bindings: `jni.zig` (generated once from the NDK's `jni.h` by `tools/gen_jni.js`), `objc.zig` |
 | `http/` | HTTP server for the app servers: router, JSON, static files, WebSocket, server-sent events. `http/tls/`: our TLS 1.3 server, certificates, and the ACME (Let's Encrypt) client |
-| `mongo/` | MongoDB driver: BSON, OP_MSG, connection pool, SCRAM-SHA-256, collections and cursors |
+| `mongo/` | MongoDB driver: BSON, OP_MSG, connection pool, SCRAM-SHA-256, collections and cursors; `mongo.val` (a JSON/BSON value like Node's) and `mongo.db` (the Node driver's options: findOneAndUpdate, distinct, arrayFilters, any index) |
+| `map/` | Map engine (no MapLibre): Web Mercator raster tiles, pan/pinch/rotate/tilt, fly-to, route lines, markers (pressable, draggable) |
+| `geo/` | `.osm.pbf` parser and the memory-mapped search / reverse-geocoding index (Arabic and Latin folding, any number of regions) |
+| `push/` | Web Push (RFC 8291/8292), FCM HTTP v1 (RS256), APNs over our HTTP/2 client (TLS with ALPN, HPACK) |
+| `fetch/`, `smtp/`, `wufour/`, `env/` | Server helpers: outgoing HTTP with time limits and a self-healing connection pool, SMTP, Wufour sign-in (cookie or Bearer), `.env` loading (`<APP>_ENV_FILE`, `.env.local`, `.env.production`, `.env`) |
 | `shells/` | The fixed per-platform entry points: `web/zui.js` and `android/.../ZuiActivity.java`. They never change per screen |
 | `tools/` | `apk.zig` packages and signs APKs without Gradle; `zip.zig` writes the archive with page-aligned native libraries |
 | `toolchain.zon` | Where the Android SDK, NDK and JDK live on this machine |
@@ -38,6 +42,27 @@ Add `-Doptimize=ReleaseSmall` for release-size builds. `zig build test` here run
 `zig build test` runs everything. The MongoDB tests use a local server on 127.0.0.1:27017 when one is
 running (throwaway database `zigcore_test`) and are skipped otherwise. The TLS tests connect std's
 verifying TLS client to our server; the key schedule is checked against RFC 8448.
+
+## zui at a glance
+
+An app is `Msg`, `State`, `init`, `update(state, msg, env, fx)` and `view(state, ui)`, plus
+`comptime { zui.exportApp(@This()); }`. The Zig layout engine places every view; hosts only draw.
+
+- **Views:** boxes (flex rows/columns, wrap, grid, shadows, gradients, per-side borders, per-corner
+  radius, transitions, labels), text and rich text, inputs (secure, keyboards, multi-line,
+  max length), images (URL with headers, or bytes), scroll views (anchored to the end,
+  `fx.scrollTo`), paths and icons, video, spinner, map.
+- **Events:** press, long press, context menu, hover, pointers, keys (`pub fn keyEvent`), Back
+  (`ui.onBack`), links (`fx.setLink` / `fx.pushLink`, `pub fn linkEvent`), online/visible
+  (`pub fn deviceEvent`).
+- **Effects (`fx`):** fetch, timers, WebSockets, server-sent events, location (and background
+  location), notifications, the system call screen (`ringCall`, `startCall`, `endCall`), push,
+  pickers (date, time, option, photo, file), save/share files, clipboard, speech, vibrate,
+  keep awake, recording and playback, barcode scanning (Code 128 and QR, decoded in Zig),
+  calls (below), secure keys (`fx.key`: WebCrypto / AndroidKeyStore / Keychain).
+- **Also:** `zui.storage` (plain and secure), `zui.widget` (Android widget; iOS through the fixed
+  SwiftUI extension in `shells/ios/widget`, opt-in with `ios_widget`), `t("English")`
+  translation bundles in Lassan's format with `t("Text|context")` for clashing keys.
 
 ## Calls
 
