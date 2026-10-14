@@ -272,6 +272,7 @@ export async function start(wasm, mount = document.body, options = {}) {
   const sockets = new Map();
   const calls = webCalls(() => ex, () => memory, withBytes, encoder, str);
   const style = webStyle(views, () => ex, () => memory, str, decoder, measurer);
+  const scan = webScan(() => ex, () => memory, withBytes, encoder, calls.streams);
   const recordings = webMedia(() => ex, () => memory, withBytes, encoder, str, calls.streams);
   const notes = new Map();
 
@@ -800,6 +801,7 @@ export async function start(wasm, mount = document.body, options = {}) {
       },
       ...calls.imports,
       ...style.imports,
+      ...scan.imports,
       ...recordings.imports,
       zui_video(id, stream, mirror, cover) {
         const el = views.get(id);
@@ -905,6 +907,7 @@ export async function start(wasm, mount = document.body, options = {}) {
       for (const s of sockets.values()) s.close();
       for (const s of streams.values()) { s.live = false; s.control.abort(); }
       calls.destroy();
+      scan.destroy();
       recordings.destroy();
       mount.replaceChildren();
     },
@@ -1394,4 +1397,79 @@ function webStyle(views, getEx, getMemory, str, decoder, measurer) {
     },
   };
   return { imports };
+}
+
+// Barcode scanners (fx.scanBarcode): the camera's stream is kept under the scanner's id, so
+// ui.video(id) shows it; five times a second a frame goes to the browser's BarcodeDetector where
+// it has one, else to zui.barcode in the app (its luminance, at most 960 wide).
+function webScan(getEx, getMemory, withBytes, encoder, streams) {
+  const scanners = new Map();
+  const FORMATS = [['code_128', 1], ['qr_code', 2]];
+  const state = (id, kind, why = '') => withBytes(encoder.encode(why), (p, n) => getEx().zui_scan_state(id, kind, p, n));
+  const imports = {
+    zui_scan_open(id, formats, back) {
+      const s = { live: true, timer: 0, stream: null, detector: null };
+      scanners.set(id, s);
+      const ask = navigator.mediaDevices?.getUserMedia?.({ video: { facingMode: back ? 'environment' : 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      if (!ask) return void setTimeout(() => state(id, 3, 'unsupported'));
+      ask.then(async (stream) => {
+        if (!s.live) return void stream.getTracks().forEach((t) => t.stop());
+        s.stream = stream;
+        streams.set(id, stream);
+        for (const v of document.querySelectorAll('video')) if (v._stream === id && v.srcObject !== stream) v.srcObject = stream;
+        // Frames come from a video element of our own: the app may show none.
+        const video = document.createElement('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.srcObject = stream;
+        await video.play().catch(() => {});
+        const wanted = FORMATS.filter(([, bit]) => formats & bit).map(([name]) => name);
+        if ('BarcodeDetector' in window) {
+          try {
+            const supported = await window.BarcodeDetector.getSupportedFormats();
+            if (wanted.every((f) => supported.includes(f))) s.detector = new window.BarcodeDetector({ formats: wanted });
+          } catch {}
+        }
+        const canvas = document.createElement('canvas');
+        const g = canvas.getContext('2d', { willReadFrequently: true });
+        state(id, 1);
+        const tick = async () => {
+          if (!s.live) return;
+          if (video.videoWidth > 0) {
+            if (s.detector) {
+              try {
+                for (const code of await s.detector.detect(video)) {
+                  const fmt = code.format === 'qr_code' ? 2 : 1;
+                  withBytes(encoder.encode(code.rawValue), (p, n) => getEx().zui_scan_found(id, fmt, p, n));
+                  break;
+                }
+              } catch {}
+            } else {
+              const k = Math.min(1, 960 / video.videoWidth);
+              const w = Math.round(video.videoWidth * k), h = Math.round(video.videoHeight * k);
+              canvas.width = w;
+              canvas.height = h;
+              g.drawImage(video, 0, 0, w, h);
+              const rgba = g.getImageData(0, 0, w, h).data;
+              const gray = new Uint8Array(w * h);
+              for (let i = 0, j = 0; j < gray.length; i += 4, j++) gray[j] = (rgba[i] * 77 + rgba[i + 1] * 150 + rgba[i + 2] * 29) >> 8;
+              withBytes(gray, (p) => getEx().zui_scan_frame(id, p, w, h));
+            }
+          }
+          if (s.live) s.timer = setTimeout(tick, 200);
+        };
+        tick();
+      }, (e) => { if (s.live) state(id, 3, e?.name === 'NotAllowedError' ? 'denied' : 'unavailable'); });
+    },
+    zui_scan_close(id) {
+      const s = scanners.get(id);
+      if (!s) return;
+      scanners.delete(id);
+      s.live = false;
+      clearTimeout(s.timer);
+      s.stream?.getTracks().forEach((t) => t.stop());
+      streams.delete(id);
+    },
+  };
+  return { imports, destroy() { for (const id of [...scanners.keys()]) imports.zui_scan_close(id); } };
 }

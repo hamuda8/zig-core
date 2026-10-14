@@ -526,4 +526,37 @@ fn exportStyle(comptime R: type) void {
     };
     @export(&Entry.spanPress, .{ .name = "zui_span_press" });
     @export(&Entry.scroll, .{ .name = "zui_scroll" });
+    exportScan(R);
+}
+
+// ---- Barcode scanners: the camera through getUserMedia, frames to zui.barcode (or the
+// browser's own BarcodeDetector where there is one) ----
+
+const js_scan = struct {
+    extern "zui" fn zui_scan_open(id: u32, formats: u32, back: u32) void;
+    extern "zui" fn zui_scan_close(id: u32) void;
+};
+
+pub fn scanOpen(id: u32, formats: zui.barcode.Formats, back: bool) void {
+    js_scan.zui_scan_open(id, @as(u8, @bitCast(formats)), @intFromBool(back));
+}
+pub fn scanClose(id: u32) void {
+    js_scan.zui_scan_close(id);
+}
+
+fn exportScan(comptime R: type) void {
+    const Entry = struct {
+        fn frame(id: u32, ptr: [*]const u8, w: u32, h: u32) callconv(.c) void {
+            R.scanFrame(id, .{ .width = w, .height = h, .pixels = ptr[0 .. @as(usize, w) * h] });
+        }
+        fn found(id: u32, format: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.scanFound(id, std.enums.fromInt(zui.barcode.Format, format) orelse return, ptr[0..len]);
+        }
+        fn state(id: u32, kind: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.scanState(id, std.enums.fromInt(zui.ScanEvent.Kind, kind) orelse return, ptr[0..len]);
+        }
+    };
+    @export(&Entry.frame, .{ .name = "zui_scan_frame" });
+    @export(&Entry.found, .{ .name = "zui_scan_found" });
+    @export(&Entry.state, .{ .name = "zui_scan_state" });
 }

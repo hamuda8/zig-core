@@ -7,7 +7,7 @@
 
 const std = @import("std");
 /// Prints what the QR finder sees (tests, by hand).
-var debug = false;
+const debug = false;
 
 pub const Format = enum(u8) { code_128 = 1, qr = 2 };
 
