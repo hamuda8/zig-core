@@ -158,11 +158,15 @@ pub const AppOptions = struct {
     /// ZuiPush service (shells/android/push), which the app's manifest declares (see
     /// ZuiPush.java).
     android_push: ?AndroidPush = null,
+    /// One Wufour sign-in shared with our other apps on the phone (zui.wufour; Android:
+    /// ZuiAuthProvider and a signature permission added to the manifest, zui/wufour_apps.zig).
+    /// Every APK is signed with the same key (toolchain.zon's keystore, -Dandroid-keystore=).
+    wufour_sso: bool = true,
     optimize: std.builtin.OptimizeMode,
 };
 
 /// The fixed Android shim (shells/android/java/com/wufour/zui). Listed so the APK rebuilds when one changes.
-const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java", "ZuiStyle.java", "ZuiScanner.java", "ZuiPushHost.java", "ZuiWebAuth.java" };
+const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java", "ZuiStyle.java", "ZuiScanner.java", "ZuiPushHost.java", "ZuiWebAuth.java", "ZuiAuthProvider.java" };
 /// zui's Android resources (the widget), listed for the same reason.
 const android_res = [_][]const u8{ "layout/zui_widget.xml", "xml/zui_widget_info.xml", "drawable/zui_widget_bg.xml" };
 
@@ -247,6 +251,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
             run.addArgs(&.{ "--min-sdk", b.fmt("{d}", .{opts.android_min_sdk}), "--keystore", keystore });
             run.addArg("--manifest");
             run.addFileArg(opts.android_manifest);
+            if (opts.wufour_sso) run.addArgs(&.{ "--wufour-apps", @import("zui/wufour_apps.zig").csv });
             run.addArg("--java");
             run.addDirectoryArg(core.path("shells/android/java"));
             // The cache does not look inside a directory argument, so each source is also an input:

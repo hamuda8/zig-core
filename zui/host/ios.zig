@@ -472,6 +472,7 @@ pub fn exportEntry(comptime App: type) void {
             });
             objc.defineClass("ZuiWebAuthDelegate", "NSObject", &.{"WKNavigationDelegate"}, &.{
                 .{ "webView:decidePolicyForNavigationAction:decisionHandler:", @ptrCast(&webAuthDecide), "v@:@@@?" },
+                .{ "webView:didFinishNavigation:", @ptrCast(&webAuthLoaded), "v@:@@" },
             });
             objc.defineClass("ZuiLocation", "NSObject", &.{"CLLocationManagerDelegate"}, &.{
                 .{ "locationManager:didUpdateLocations:", @ptrCast(&locationUpdated), "v@:@@" },
@@ -1858,21 +1859,41 @@ fn pickOption(title: []const u8, options: []const u8, selected: i32) void {
     present(sheet);
 }
 
-// ---- fx.webAuth: a WKWebView presented over the app, with only a Cancel button ----
+// ---- fx.webAuth: a WKWebView as one of the app's pages: its bar (title, back chevron, the
+// app's colours), pushed in from the side, a spinner until the page has loaded ----
 
-/// The navigation controller presented (null when none is open), its web view, the callback
-/// prefix (allocator-owned) and the delegate that watches the navigations.
+/// The navigation controller presented (null when none is open), its web view and spinner, the
+/// callback prefix (allocator-owned), the delegate that watches the navigations, and the side
+/// it slides from.
 var web_auth_nav: id = null;
 var web_auth_web: id = null;
+var web_auth_spinner: id = null;
 var web_auth_prefix: []u8 = &.{};
 var web_auth_delegate: id = null;
+var web_auth_rtl = false;
 
-pub fn webAuth(url: []const u8, callback_prefix: []const u8) void {
+extern "QuartzCore" var kCATransitionPush: id;
+extern "QuartzCore" var kCATransitionFromRight: id;
+extern "QuartzCore" var kCATransitionFromLeft: id;
+
+/// A push transition on the window, so presenting looks like a new page sliding in.
+fn slide(in: bool) void {
+    const window = objc.send(root, "window");
+    if (window == null) return;
+    const tr = objc.send(objc.class("CATransition"), "animation");
+    objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) void)(tr, objc.sel("setDuration:"), 0.28);
+    objc.sendVoid1(tr, "setType:", kCATransitionPush);
+    objc.sendVoid1(tr, "setSubtype:", if (in != web_auth_rtl) kCATransitionFromRight else kCATransitionFromLeft);
+    objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void)(objc.send(window, "layer"), objc.sel("addAnimation:forKey:"), tr, null);
+}
+
+pub fn webAuth(url: []const u8, callback_prefix: []const u8, look: zui.WebAuthLook) void {
     if (root_controller == null) return rt.web_auth(null);
     // A page still open is replaced without an answer (zui already forgot its callback).
-    if (web_auth_nav != null) closeWebAuth();
+    if (web_auth_nav != null) closeWebAuth(false);
     zui.allocator.free(web_auth_prefix);
     web_auth_prefix = zui.allocator.dupe(u8, callback_prefix) catch &.{};
+    web_auth_rtl = look.rtl;
     if (web_auth_delegate == null) web_auth_delegate = objc.new("ZuiWebAuthDelegate");
 
     // The default configuration keeps cookies and storage (the site's session) across launches.
@@ -1882,40 +1903,87 @@ pub fn webAuth(url: []const u8, callback_prefix: []const u8) void {
     const web = make(objc.send(objc.class("WKWebView"), "alloc"), objc.sel("initWithFrame:configuration:"), .{}, config);
     if (web == null) return rt.web_auth(null);
     objc.sendVoid1(web, "setNavigationDelegate:", web_auth_delegate);
+    // No browser feel: no link previews, no zoom; hidden until the first page has loaded.
+    objc.sendVoidBool(web, "setAllowsLinkPreview:", false);
+    objc.sendVoidBool(web, "setOpaque:", false);
+    objc.sendVoid1(web, "setBackgroundColor:", color(look.background));
+    const scroll = objc.send(web, "scrollView");
+    objc.sendVoidFloat(scroll, "setMinimumZoomScale:", 1);
+    objc.sendVoidFloat(scroll, "setMaximumZoomScale:", 1);
+    objc.sendVoidBool(scroll, "setBouncesZoom:", false);
+    objc.sendVoidBool(web, "setHidden:", true);
+    objc.sendVoidInt(web, "setAutoresizingMask:", 18); // flexible width and height
 
     const vc = objc.new("UIViewController");
-    objc.sendVoid1(vc, "setView:", web);
-    const cancel = barButton(1, "webAuthCancel:");
-    defer objc.release(cancel);
-    objc.sendVoid1(objc.send(vc, "navigationItem"), "setLeftBarButtonItem:", cancel);
+    const page = objc.send(vc, "view");
+    objc.sendVoid1(page, "setBackgroundColor:", color(look.background));
+    const bounds = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) objc.CGRect)(page, objc.sel("bounds"));
+    objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(web, objc.sel("setFrame:"), bounds);
+    objc.sendVoid1(page, "addSubview:", web);
+    const spinner = objc.msgSend(*const fn (id, objc.SEL, isize) callconv(.c) id)(objc.send(objc.class("UIActivityIndicatorView"), "alloc"), objc.sel("initWithActivityIndicatorStyle:"), 101); // large
+    objc.sendVoid1(spinner, "setColor:", color(look.ink));
+    objc.msgSend(*const fn (id, objc.SEL, objc.CGPoint) callconv(.c) void)(spinner, objc.sel("setCenter:"), .{ .x = bounds.w / 2, .y = bounds.h / 2 });
+    objc.sendVoidInt(spinner, "setAutoresizingMask:", 45); // stays centred
+    objc.sendVoid(spinner, "startAnimating");
+    objc.sendVoid1(page, "addSubview:", spinner);
+    if (look.title.len > 0) {
+        const title = objc.nsString(look.title);
+        defer objc.release(title);
+        objc.sendVoid1(vc, "setTitle:", title);
+    }
+    // The back chevron (it points the other way right to left by itself) cancels.
+    const name = objc.nsString("chevron.backward");
+    defer objc.release(name);
+    const chevron = objc.send1(objc.class("UIImage"), "systemImageNamed:", name);
+    const item = objc.msgSend(*const fn (id, objc.SEL, id, isize, id, objc.SEL) callconv(.c) id)(objc.send(objc.class("UIBarButtonItem"), "alloc"), objc.sel("initWithImage:style:target:action:"), chevron, 0, target, objc.sel("webAuthCancel:"));
+    defer objc.release(item);
+    objc.sendVoid1(objc.send(vc, "navigationItem"), "setLeftBarButtonItem:", item);
+
     const nav = objc.send1(objc.send(objc.class("UINavigationController"), "alloc"), "initWithRootViewController:", vc);
     objc.release(vc);
     objc.sendVoidInt(nav, "setModalPresentationStyle:", 0); // UIModalPresentationFullScreen
     objc.sendVoidBool(nav, "setModalInPresentation:", true);
+    objc.sendVoidInt(objc.send(nav, "view"), "setSemanticContentAttribute:", if (look.rtl) 4 else 3);
+    // The app's bar: its colour, the title and the chevron in its ink.
+    const bar = objc.send(nav, "navigationBar");
+    objc.sendVoidInt(bar, "setSemanticContentAttribute:", if (look.rtl) 4 else 3);
+    const appearance = objc.new("UINavigationBarAppearance");
+    defer objc.release(appearance);
+    objc.sendVoid(appearance, "configureWithOpaqueBackground");
+    objc.sendVoid1(appearance, "setBackgroundColor:", color(look.bar));
+    objc.sendVoid1(appearance, "setTitleTextAttributes:", nsDict(&.{NSForegroundColorAttributeName}, &.{color(look.ink)}));
+    objc.sendVoid1(bar, "setStandardAppearance:", appearance);
+    objc.sendVoid1(bar, "setScrollEdgeAppearance:", appearance);
+    objc.sendVoid1(bar, "setTintColor:", color(look.ink));
     web_auth_nav = nav;
     web_auth_web = web;
+    web_auth_spinner = spinner;
 
     const s = objc.nsString(url);
     defer objc.release(s);
     const u = objc.send1(objc.class("NSURL"), "URLWithString:", s);
     if (u != null) _ = objc.send1(web, "loadRequest:", objc.send1(objc.class("NSURLRequest"), "requestWithURL:", u));
-    present(nav);
+    slide(true);
+    objc.msgSend(*const fn (id, objc.SEL, id, bool, ?*anyopaque) callconv(.c) void)(root_controller, objc.sel("presentViewController:animated:completion:"), nav, false, null);
 }
 
-fn closeWebAuth() void {
+fn closeWebAuth(animated: bool) void {
     if (web_auth_nav == null) return;
     objc.sendVoid1(web_auth_web, "setNavigationDelegate:", null);
     objc.sendVoid(web_auth_web, "stopLoading");
-    objc.msgSend(*const fn (id, objc.SEL, bool, ?*anyopaque) callconv(.c) void)(web_auth_nav, objc.sel("dismissViewControllerAnimated:completion:"), true, null);
+    if (animated) slide(false);
+    objc.msgSend(*const fn (id, objc.SEL, bool, ?*anyopaque) callconv(.c) void)(web_auth_nav, objc.sel("dismissViewControllerAnimated:completion:"), false, null);
+    objc.release(web_auth_spinner);
     objc.release(web_auth_web);
     objc.release(web_auth_nav);
+    web_auth_spinner = null;
     web_auth_web = null;
     web_auth_nav = null;
 }
 
 fn webAuthCancel(_: id, _: objc.SEL, _: id) callconv(.c) void {
     if (web_auth_nav == null) return;
-    closeWebAuth();
+    closeWebAuth(true);
     rt.web_auth(null);
 }
 
@@ -1929,8 +1997,63 @@ fn webAuthDecide(_: id, _: objc.SEL, _: id, action: id, handler: *objc.BlockHead
     decide(handler, 0); // WKNavigationActionPolicyCancel
     const copy_ = zui.allocator.dupe(u8, url) catch return;
     defer zui.allocator.free(copy_);
-    closeWebAuth();
+    closeWebAuth(true);
     rt.web_auth(copy_);
+}
+
+/// WKNavigationDelegate: the first page has loaded; it replaces the spinner.
+fn webAuthLoaded(_: id, _: objc.SEL, web: id, _: id) callconv(.c) void {
+    if (web == null or web != web_auth_web) return;
+    objc.sendVoidBool(web, "setHidden:", false);
+    objc.sendVoid(web_auth_spinner, "stopAnimating");
+    objc.sendVoidBool(web_auth_spinner, "setHidden:", true);
+}
+
+// ---- One Wufour sign-in for our apps on this phone (zui.wufour): a Keychain item in the access
+// group named by the Info.plist key WufourKeychainGroup ("<team id>.com.wufour.shared"), which
+// every app also lists in its keychain-access-groups entitlement. Without the key: not shared.
+
+extern "Security" var kSecAttrAccessGroup: id;
+
+fn sharedGroup() id {
+    const key = objc.nsString("WufourKeychainGroup");
+    defer objc.release(key);
+    const v = objc.send1(objc.send(objc.class("NSBundle"), "mainBundle"), "objectForInfoDictionaryKey:", key);
+    if (v == null or objc.sendInt(v, "length") == 0) return null;
+    return v;
+}
+
+fn sharedQuery(group: id) [4][2]id {
+    const service = objc.send1(objc.class("NSString"), "stringWithUTF8String:", @ptrCast(@constCast("wufour")));
+    const account = objc.send1(objc.class("NSString"), "stringWithUTF8String:", @ptrCast(@constCast("token")));
+    return .{ .{ kSecClass, kSecClassGenericPassword }, .{ kSecAttrService, service }, .{ kSecAttrAccount, account }, .{ kSecAttrAccessGroup, group } };
+}
+
+pub fn sharedAuthGet(a: std.mem.Allocator, _: []const u8) ?[]u8 {
+    const group = sharedGroup();
+    if (group == null) return null;
+    const q = sharedQuery(group);
+    var data: id = null;
+    if (SecItemCopyMatching(nsDict(&.{ q[0][0], q[1][0], q[2][0], q[3][0], kSecReturnData }, &.{ q[0][1], q[1][1], q[2][1], q[3][1], kCFBooleanTrue }), &data) != 0 or data == null) return null;
+    defer objc.release(data);
+    const bytes = dataBytes(data);
+    if (bytes.len == 0) return null;
+    return a.dupe(u8, bytes) catch null;
+}
+
+pub fn sharedAuthSet(token: []const u8) void {
+    const group = sharedGroup();
+    if (group == null) return;
+    const q = sharedQuery(group);
+    _ = SecItemDelete(nsDict(&.{ q[0][0], q[1][0], q[2][0], q[3][0] }, &.{ q[0][1], q[1][1], q[2][1], q[3][1] }));
+    _ = SecItemAdd(nsDict(&.{ q[0][0], q[1][0], q[2][0], q[3][0], kSecValueData, kSecAttrAccessible }, &.{ q[0][1], q[1][1], q[2][1], q[3][1], nsData(token), kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly }), null);
+}
+
+pub fn sharedAuthClear(_: []const u8) void {
+    const group = sharedGroup();
+    if (group == null) return;
+    const q = sharedQuery(group);
+    _ = SecItemDelete(nsDict(&.{ q[0][0], q[1][0], q[2][0], q[3][0] }, &.{ q[0][1], q[1][1], q[2][1], q[3][1] }));
 }
 
 // ---- Photos and files: UIImagePickerController, UIDocumentPickerViewController, the share sheet ----

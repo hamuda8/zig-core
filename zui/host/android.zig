@@ -105,20 +105,58 @@ fn bindDevice(e: *jni.Env) void {
     const wa = f.FindClass(e, "com/wufour/zui/ZuiWebAuth");
     web_auth_class = f.NewGlobalRef(e, wa);
     f.DeleteLocalRef(e, wa);
-    web_auth_open = f.GetStaticMethodID(e, web_auth_class, "open", "(Ljava/lang/String;Ljava/lang/String;)V");
+    web_auth_open = f.GetStaticMethodID(e, web_auth_class, "open", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IIIZ)V");
+    const ap = f.FindClass(e, "com/wufour/zui/ZuiAuthProvider");
+    auth_class = f.NewGlobalRef(e, ap);
+    f.DeleteLocalRef(e, ap);
+    auth_find = f.GetStaticMethodID(e, auth_class, "findShared", "(Ljava/lang/String;)Ljava/lang/String;");
+    auth_clear = f.GetStaticMethodID(e, auth_class, "clearShared", "(Ljava/lang/String;)V");
 }
 
 /// ZuiWebAuth.java: fx.webAuth's full-screen WebView over the app.
 var web_auth_class: jni.jclass = null;
 var web_auth_open: jni.jmethodID = null;
 
-pub fn webAuth(url: []const u8, callback_prefix: []const u8) void {
+pub fn webAuth(url: []const u8, callback_prefix: []const u8, look: zui.WebAuthLook) void {
     const f = env.functions;
     const ju = newString(url);
     defer f.DeleteLocalRef(env, ju);
     const jp = newString(callback_prefix);
     defer f.DeleteLocalRef(env, jp);
-    f.CallStaticVoidMethodA(env, web_auth_class, web_auth_open, &[_]jni.jvalue{ object(ju), object(jp) });
+    const jt = newString(look.title);
+    defer f.DeleteLocalRef(env, jt);
+    f.CallStaticVoidMethodA(env, web_auth_class, web_auth_open, &[_]jni.jvalue{ object(ju), object(jp), object(jt), int(look.bar), int(look.ink), int(look.background), boolean(look.rtl) });
+    check();
+}
+
+/// ZuiAuthProvider.java: the Wufour token shared between our apps on this phone (zui.wufour).
+var auth_class: jni.jclass = null;
+var auth_find: jni.jmethodID = null;
+var auth_clear: jni.jmethodID = null;
+
+/// The token another of our apps keeps (`apps`: their packages, comma-separated), or null.
+pub fn sharedAuthGet(a: std.mem.Allocator, apps: []const u8) ?[]u8 {
+    const f = env.functions;
+    const ja = newString(apps);
+    defer f.DeleteLocalRef(env, ja);
+    const r = f.CallStaticObjectMethodA(env, auth_class, auth_find, &[_]jni.jvalue{object(ja)});
+    check();
+    if (r == null) return null;
+    defer f.DeleteLocalRef(env, r);
+    const units: usize = @intCast(f.GetStringLength(env, r));
+    const buf = a.alloc(u8, units * 3 + 1) catch return null;
+    const s = javaStringLong(r, buf);
+    return a.realloc(buf, s.len) catch buf[0..s.len];
+}
+
+/// Android: the provider serves the token kept in this app's secure storage; nothing to do.
+pub fn sharedAuthSet(_: []const u8) void {}
+
+/// Signs every other app of ours out (their providers forget their tokens).
+pub fn sharedAuthClear(apps: []const u8) void {
+    const ja = newString(apps);
+    defer env.functions.DeleteLocalRef(env, ja);
+    env.functions.CallStaticVoidMethodA(env, auth_class, auth_clear, &[_]jni.jvalue{object(ja)});
     check();
 }
 

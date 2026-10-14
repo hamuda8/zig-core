@@ -661,7 +661,12 @@ public final class Zui {
     // ---- Storage: SharedPreferences; secure values encrypted with an Android Keystore key ----
 
     static android.content.SharedPreferences prefs() {
-        return ctx().getSharedPreferences("zui", Context.MODE_PRIVATE);
+        return prefs(ctx());
+    }
+
+    /** Also from ZuiAuthProvider, which may run before (or without) the activity. */
+    static android.content.SharedPreferences prefs(Context c) {
+        return c.getSharedPreferences("zui", Context.MODE_PRIVATE);
     }
 
     static javax.crypto.SecretKey keystoreKey() throws Exception {
@@ -680,7 +685,11 @@ public final class Zui {
     }
 
     static String storageGet(String key, boolean secure) {
-        String v = prefs().getString((secure ? "s:" : "p:") + key, null);
+        return storageGet(ctx(), key, secure);
+    }
+
+    static String storageGet(Context cx, String key, boolean secure) {
+        String v = prefs(cx).getString((secure ? "s:" : "p:") + key, null);
         if (v == null || !secure) return v;
         try {
             byte[] all = android.util.Base64.decode(v, android.util.Base64.NO_WRAP);
@@ -713,6 +722,11 @@ public final class Zui {
 
     static void storageRemove(String key, boolean secure) {
         prefs().edit().remove((secure ? "s:" : "p:") + key).apply();
+    }
+
+    /** At once (a sibling app asked: it reads again right after). */
+    static void storageRemoveNow(Context cx, String key, boolean secure) {
+        prefs(cx).edit().remove((secure ? "s:" : "p:") + key).commit();
     }
 
     /** The foreground service that keeps the process (and the location listener) alive. */

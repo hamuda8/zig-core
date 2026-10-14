@@ -12,9 +12,15 @@
 //!     // the answer
 //!     fn onSignIn(r: zui.WebAuthResult) Msg { return .{ .signed_in = r }; }
 //!     ...  .signed_in => |r| if (zui.wufour.tokenOfResult(a, r)) |tok| { zui.wufour.save(tok); ... }
-//!     // sign out
+//!     // start: this app's token, else one another of our apps keeps (single sign-on)
+//!     if (zui.wufour.saved(a)) |tok| ...
+//!     // a 401 from the app's server
+//!     zui.wufour.refused(tok);
+//!     // back on screen: signed in or out in another app meanwhile?
+//!     switch (zui.wufour.recheck(a, current_token)) { ... }
+//!     // sign out (here and in our other apps)
 //!     if (zui.wufour.logoutRequest(a, auth_host, tok)) |req| fx.fetch(req, onAnything);
-//!     zui.wufour.forget();
+//!     zui.wufour.signOutEverywhere();
 
 const std = @import("std");
 const runtime = @import("runtime.zig");
@@ -42,7 +48,14 @@ pub const SignIn = struct {
     /// The app server's callback, a host Wufour accepts (its ALLOWED_SSO_DOMAINS), e.g.
     /// "https://app.example.com/auth/callback?next=%2F". On the phones it is never loaded.
     callback: []const u8,
+    /// The page's top bar (`WebAuth`): its title ("Sign in with Wufour") and the app's colours.
+    title: []const u8 = "",
+    bar: ?Color = null,
+    ink: ?Color = null,
+    background: ?Color = null,
 };
+
+const Color = @import("color.zig").Color;
 
 /// Opens Wufour's sign-in inside the app (`fx.webAuth`); `done` gets the callback address
 /// (`tokenOfResult` reads the token from it) or `.cancelled`.
@@ -50,7 +63,7 @@ pub fn signIn(comptime Msg: type, fx: runtime.Fx(Msg), o: SignIn, done: *const f
     var buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const url = signInUrl(fba.allocator(), o.auth_host, o.callback) catch return;
-    fx.webAuth(.{ .url = url, .callback_prefix = callbackPrefix(o.callback) }, done);
+    fx.webAuth(.{ .url = url, .callback_prefix = callbackPrefix(o.callback), .title = o.title, .bar = o.bar, .ink = o.ink, .background = o.background }, done);
 }
 
 /// The `token` query parameter of a callback address, percent-decoded (in `a`), or null.
@@ -76,19 +89,99 @@ pub fn tokenOfResult(a: std.mem.Allocator, r: runtime.WebAuthResult) ?[]u8 {
     };
 }
 
-/// The token kept on this device (in `a`), or null when signed out.
-pub fn saved(a: std.mem.Allocator) ?[]u8 {
+// ---- Keeping the token, shared by our apps on the phone (single sign-on) ----
+//
+// Like Google's apps: signed in once in any of our apps (zui/wufour_apps.zig), the others start
+// signed in; signed out in one, all are. Android: each app serves its token to the others
+// (ZuiAuthProvider, readable only by apps signed with our key); iOS: a Keychain item in a
+// shared access group (WufourKeychainGroup in Info.plist, keychain-access-groups entitlement);
+// the web: Wufour's own session cookie already does it.
+
+const zui = @import("zui.zig");
+pub const apps = @import("wufour_apps.zig");
+const refused_key = "token_refused";
+
+/// The token kept by this app (in `a`), or null.
+pub fn local(a: std.mem.Allocator) ?[]u8 {
     const t = storage.get(a, storage_key, .{ .secure = true }) orelse return null;
     if (t.len == 0) return null;
     return t;
 }
 
-pub fn save(token: []const u8) void {
-    storage.set(storage_key, token, .{ .secure = true });
+/// The token to start with (in `a`): this app's, else the one another of our apps keeps (it is
+/// adopted and kept here; the app's first request checks it with its server, which asks Wufour
+/// (/api/auth/verify), and a 401 goes to `refused`). Null: signed out.
+pub fn saved(a: std.mem.Allocator) ?[]u8 {
+    if (local(a)) |t| return t;
+    const t = zui.host.sharedAuthGet(a, apps.csv) orelse return null;
+    if (t.len == 0 or isRefused(t)) {
+        a.free(t);
+        return null;
+    }
+    storage.set(storage_key, t, .{ .secure = true });
+    return t;
 }
 
+/// Signed in here: kept for this app and offered to the others.
+pub fn save(token: []const u8) void {
+    storage.set(storage_key, token, .{ .secure = true });
+    storage.remove(refused_key, .{});
+    zui.host.sharedAuthSet(token);
+}
+
+/// Forgets this app's token only.
 pub fn forget() void {
     storage.remove(storage_key, .{ .secure = true });
+}
+
+/// The app's server answered 401 for `token`: forget it here, and do not take the same token
+/// from another app again (that one is signed out on its own 401).
+pub fn refused(token: []const u8) void {
+    forget();
+    var hex: [64]u8 = undefined;
+    storage.set(refused_key, hashOf(token, &hex), .{});
+}
+
+/// Sign out on this phone: this app and every other of ours (send `logoutRequest` too, which
+/// ends the session at Wufour).
+pub fn signOutEverywhere() void {
+    forget();
+    zui.host.sharedAuthClear(apps.csv);
+}
+
+pub const Recheck = union(enum) {
+    /// Nothing changed.
+    same,
+    /// Signed out in another app meanwhile: show sign-in.
+    signed_out,
+    /// Signed in in another app meanwhile (or as someone else): start with this token (in `a`).
+    signed_in: []u8,
+};
+
+/// When the app comes back to the screen: has another app signed in or out meanwhile?
+/// `current` is the token the app is using (null: it shows sign-in).
+pub fn recheck(a: std.mem.Allocator, current: ?[]const u8) Recheck {
+    const cur = current orelse return if (saved(a)) |t| .{ .signed_in = t } else .same;
+    const t = local(a) orelse return .signed_out;
+    if (std.mem.eql(u8, t, cur)) {
+        a.free(t);
+        return .same;
+    }
+    return .{ .signed_in = t };
+}
+
+fn hashOf(token: []const u8, out: *[64]u8) []const u8 {
+    var d: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(token, &d, .{});
+    return std.fmt.bufPrint(out, "{x}", .{&d}) catch "";
+}
+
+fn isRefused(token: []const u8) bool {
+    var buf: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const r = storage.get(fba.allocator(), refused_key, .{}) orelse return false;
+    var hex: [64]u8 = undefined;
+    return std.mem.eql(u8, r, hashOf(token, &hex));
 }
 
 /// Ends the session at Wufour: `POST <auth_host>/api/auth/logout {"token": ...}` (the body in
@@ -168,4 +261,48 @@ test "logout request" {
     try testing.expectEqualStrings("https://www.wreseal.com/api/auth/logout", r.url);
     try testing.expectEqual(runtime.Method.POST, r.method);
     try testing.expectEqualStrings("{\"token\":\"T\\\"1\"}", r.body);
+}
+
+test "single sign-on: another app's token is adopted, a refused one is not, sign-out reaches all" {
+    if (zui.platform != .headless) return;
+    const h = zui.host;
+    const a = testing.allocator;
+    forget();
+    storage.remove(refused_key, .{});
+    h.shared_token.clearRetainingCapacity();
+    defer h.shared_token.clearRetainingCapacity();
+    try testing.expect(saved(a) == null);
+    try testing.expect(recheck(a, null) == .same);
+
+    // Signed in in another app: adopted and kept here.
+    try h.shared_token.appendSlice(std.heap.page_allocator, "T1");
+    const t1 = saved(a).?;
+    defer a.free(t1);
+    try testing.expectEqualStrings("T1", t1);
+    const l1 = local(a).?;
+    defer a.free(l1);
+    try testing.expectEqualStrings("T1", l1);
+    try testing.expect(recheck(a, "T1") == .same);
+
+    // Our server refused it: not taken from the other app again.
+    refused("T1");
+    try testing.expect(saved(a) == null);
+    // A new sign-in there is.
+    h.shared_token.clearRetainingCapacity();
+    try h.shared_token.appendSlice(std.heap.page_allocator, "T2");
+    const r = recheck(a, null);
+    try testing.expectEqualStrings("T2", r.signed_in);
+    a.free(r.signed_in);
+
+    // Signed out in another app (its provider cleared ours): this one notices.
+    forget();
+    try testing.expect(recheck(a, "T2") == .signed_out);
+
+    // Signing out here signs the others out.
+    save("T3");
+    const before = h.shared_cleared;
+    signOutEverywhere();
+    try testing.expectEqual(before + 1, h.shared_cleared);
+    try testing.expect(local(a) == null);
+    try testing.expect(saved(a) == null);
 }

@@ -192,12 +192,32 @@ pub fn pick(kind: zui.PickKind, value: []const u8, _: []const u8, _: []const u8,
 pub var web_auth_open = false;
 pub var web_auth_url: std.ArrayList(u8) = .empty;
 pub var web_auth_prefix: std.ArrayList(u8) = .empty;
-pub fn webAuth(url: []const u8, callback_prefix: []const u8) void {
+pub var web_auth_title: std.ArrayList(u8) = .empty;
+pub var web_auth_look: zui.WebAuthLook = .{};
+pub fn webAuth(url: []const u8, callback_prefix: []const u8, look: zui.WebAuthLook) void {
     web_auth_open = true;
+    web_auth_look = look;
+    web_auth_title.clearRetainingCapacity();
+    web_auth_title.appendSlice(gpa, look.title) catch {};
+    web_auth_look.title = web_auth_title.items;
     web_auth_url.clearRetainingCapacity();
     web_auth_url.appendSlice(gpa, url) catch {};
     web_auth_prefix.clearRetainingCapacity();
     web_auth_prefix.appendSlice(gpa, callback_prefix) catch {};
+}
+/// Our other apps on the "phone" (zui.wufour): the token one of them keeps (a test sets it),
+/// and how many times they were all signed out.
+pub var shared_token: std.ArrayList(u8) = .empty;
+pub var shared_cleared: u32 = 0;
+pub fn sharedAuthGet(a: std.mem.Allocator, _: []const u8) ?[]u8 {
+    if (shared_token.items.len == 0) return null;
+    return a.dupe(u8, shared_token.items) catch null;
+}
+/// Android keeps nothing extra (its provider serves the app's own token): neither does this.
+pub fn sharedAuthSet(_: []const u8) void {}
+pub fn sharedAuthClear(_: []const u8) void {
+    shared_token.clearRetainingCapacity();
+    shared_cleared += 1;
 }
 pub fn transform(id: u32, t: zui.Transform) void {
     if (views.getPtr(id)) |v| v.transform = t;

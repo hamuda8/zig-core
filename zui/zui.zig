@@ -64,6 +64,7 @@ pub const PushKind = runtime.PushKind;
 pub const PushOptions = runtime.PushOptions;
 pub const WebAuth = runtime.WebAuth;
 pub const WebAuthResult = runtime.WebAuthResult;
+pub const WebAuthLook = runtime.WebAuthLook;
 /// Wufour sign-in on the phones: the sign-in address, the token from the callback, keeping it.
 pub const wufour = @import("wufour.zig");
 pub const DeviceEvent = runtime.DeviceEvent;

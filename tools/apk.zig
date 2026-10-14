@@ -24,6 +24,10 @@
 //! `--firebase` reads the app's google-services.json (kept outside the repository) and puts
 //! the values ZuiPush needs (`zui.fcm.*` meta-data) into the merged manifest. Values are never
 //! printed.
+//!
+//! `--wufour-apps com.a,com.b` (zui/wufour_apps.zig) adds the shared Wufour sign-in: the
+//! signature permission com.wufour.permission.SHARED_AUTH (declared and used), the exported
+//! ZuiAuthProvider at `<package>.wufourauth` behind it, and `<queries>` for the other apps.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -54,6 +58,8 @@ const Options = struct {
     deps: std.ArrayList([]const u8) = .empty,
     maven_cache: []const u8 = "",
     firebase: []const u8 = "",
+    /// Our apps sharing one Wufour sign-in, comma-separated (empty: none).
+    wufour_apps: []const u8 = "",
 };
 
 /// An unpacked AAR or a plain JAR.
@@ -119,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
 
     // 1. The manifest: the app's, with the libraries' merged in and the Firebase values.
     var manifest = opts.manifest;
-    if (libraries.items.len > 0 or opts.firebase.len > 0) {
+    if (libraries.items.len > 0 or opts.firebase.len > 0 or opts.wufour_apps.len > 0) {
         manifest = try join(arena, &.{ work, "AndroidManifest.xml" });
         try cwd.writeFile(io, .{ .sub_path = manifest, .data = try mergeManifests(arena, io, opts, libraries.items) });
     }
@@ -417,6 +423,8 @@ fn mergeManifests(arena: std.mem.Allocator, io: Io, opts: Options, libraries: []
         }
     }
 
+    if (opts.wufour_apps.len > 0) try addSharedAuth(arena, app, application, package, opts.wufour_apps);
+
     var out: std.Io.Writer.Allocating = .init(arena);
     try out.writer.writeAll("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     try xml.write(&out.writer, app, 0);
@@ -535,7 +543,7 @@ fn parseArgs(arena: std.mem.Allocator, args: []const [:0]const u8) !Options {
     while (i + 1 < args.len) : (i += 2) {
         const key = args[i];
         const val: []const u8 = args[i + 1];
-        if (eql(key, "--sdk")) o.sdk = val else if (eql(key, "--build-tools")) o.build_tools = val else if (eql(key, "--platform")) o.platform = val else if (eql(key, "--min-sdk")) o.min_sdk = val else if (eql(key, "--jdk")) o.jdk = val else if (eql(key, "--manifest")) o.manifest = val else if (eql(key, "--java")) try o.java.append(arena, val) else if (eql(key, "--keystore")) o.keystore = val else if (eql(key, "--out")) o.out = val else if (eql(key, "--res")) try o.res.append(arena, val) else if (eql(key, "--dep")) try o.deps.append(arena, val) else if (eql(key, "--maven-cache")) o.maven_cache = val else if (eql(key, "--firebase")) o.firebase = val else if (eql(key, "--lib")) {
+        if (eql(key, "--sdk")) o.sdk = val else if (eql(key, "--build-tools")) o.build_tools = val else if (eql(key, "--platform")) o.platform = val else if (eql(key, "--min-sdk")) o.min_sdk = val else if (eql(key, "--jdk")) o.jdk = val else if (eql(key, "--manifest")) o.manifest = val else if (eql(key, "--java")) try o.java.append(arena, val) else if (eql(key, "--keystore")) o.keystore = val else if (eql(key, "--out")) o.out = val else if (eql(key, "--res")) try o.res.append(arena, val) else if (eql(key, "--dep")) try o.deps.append(arena, val) else if (eql(key, "--maven-cache")) o.maven_cache = val else if (eql(key, "--firebase")) o.firebase = val else if (eql(key, "--wufour-apps")) o.wufour_apps = val else if (eql(key, "--lib")) {
             const eq = std.mem.indexOfScalar(u8, val, '=') orelse return error.BadLibArg;
             try o.libs.append(arena, .{ .abi = val[0..eq], .path = val[eq + 1 ..] });
         } else {
@@ -625,4 +633,53 @@ test isJavaResource {
     try std.testing.expect(!isJavaResource("kotlin/collections/collections.kotlin_builtins"));
     try std.testing.expect(!isJavaResource("commonMain/default/linkdata/root_package/0_.knm"));
     try std.testing.expect(!isJavaResource("nonJvmMain/default/manifest"));
+}
+
+fn element(arena: std.mem.Allocator, name: []const u8, attrs: []const [2][]const u8) !*xml.Node {
+    const n = try arena.create(xml.Node);
+    n.* = .{ .name = name };
+    for (attrs) |a| try n.attrs.append(arena, .{ .name = a[0], .value = a[1] });
+    return n;
+}
+
+pub const shared_auth_permission = "com.wufour.permission.SHARED_AUTH";
+
+/// The shared Wufour sign-in between our apps (ZuiAuthProvider; see the top of this file).
+fn addSharedAuth(arena: std.mem.Allocator, app: *xml.Node, application: *xml.Node, package: []const u8, apps: []const u8) !void {
+    try mergeBefore(arena, app, application, try element(arena, "permission", &.{ .{ "android:name", shared_auth_permission }, .{ "android:protectionLevel", "signature" } }));
+    try mergeBefore(arena, app, application, try element(arena, "uses-permission", &.{.{ "android:name", shared_auth_permission }}));
+    const queries = try element(arena, "queries", &.{});
+    var it = std.mem.splitScalar(u8, apps, ',');
+    while (it.next()) |raw| {
+        const p = std.mem.trim(u8, raw, " ");
+        if (p.len == 0 or eql(p, package)) continue;
+        try queries.children.append(arena, try element(arena, "package", &.{.{ "android:name", p }}));
+    }
+    if (queries.children.items.len > 0) try mergeBefore(arena, app, application, queries);
+    try mergeInto(arena, application, try element(arena, "provider", &.{
+        .{ "android:name", "com.wufour.zui.ZuiAuthProvider" },
+        .{ "android:authorities", try std.mem.concat(arena, u8, &.{ package, ".wufourauth" }) },
+        .{ "android:exported", "true" },
+        .{ "android:permission", shared_auth_permission },
+    }));
+}
+
+test "shared Wufour sign-in in the manifest" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const app = try xml.parse(arena,
+        \\<manifest xmlns:android="a" package="com.wufour.turf">
+        \\  <uses-permission android:name="android.permission.INTERNET" />
+        \\  <application android:label="Turf"><activity android:name="A" /></application>
+        \\</manifest>
+    );
+    try addSharedAuth(arena, app, app.child("application").?, "com.wufour.turf", "com.wufour.turf,com.wufour.reseal,com.wufour.maps");
+    const s = try serialize(arena, app);
+    try std.testing.expect(std.mem.indexOf(u8, s, "android:protectionLevel=\"signature\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "<package android:name=\"com.wufour.reseal\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "<package android:name=\"com.wufour.turf\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "android:authorities=\"com.wufour.turf.wufourauth\"") != null);
+    // Before <application>, as Android wants.
+    try std.testing.expect(std.mem.indexOf(u8, s, "<queries>").? < std.mem.indexOf(u8, s, "<application").?);
 }

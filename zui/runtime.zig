@@ -419,6 +419,14 @@ pub const WebAuth = struct {
     /// The address that ends it: a navigation to anything starting with this is not loaded,
     /// and its full address comes back as `.ok`.
     callback_prefix: []const u8,
+    /// The page is one of the app's own: its top bar shows this title and a back arrow (which
+    /// cancels), in the app's colours; it is mirrored for right-to-left languages.
+    title: []const u8 = "",
+    /// The top bar, its title and arrow, and the page behind the spinner while Wufour loads.
+    /// Null: white / near-black (dark mode: the reverse).
+    bar: ?Color = null,
+    ink: ?Color = null,
+    background: ?Color = null,
 };
 
 pub const WebAuthResult = union(enum) {
@@ -427,6 +435,9 @@ pub const WebAuthResult = union(enum) {
     /// The user closed the page (or went Back from its first page).
     cancelled,
 };
+
+/// What a host draws around `fx.webAuth`'s page (colours as 0xAARRGGBB).
+pub const WebAuthLook = struct { title: []const u8 = "", bar: u32 = 0xffffffff, ink: u32 = 0xff1c1c20, background: u32 = 0xffffffff, rtl: bool = false };
 
 /// What `update` may ask of the platform. Each result arrives later as a message.
 pub fn Fx(comptime Msg: type) type {
@@ -1799,7 +1810,10 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
 
         fn fxWebAuth(o: WebAuth, done: *const fn (WebAuthResult) Msg) void {
             web_auth_cb = done;
-            H.webAuth(o.url, o.callback_prefix);
+            const bar = if (o.bar) |c| c.argb() else @as(u32, if (env.dark) 0xff121214 else 0xffffffff);
+            const ink = if (o.ink) |c| c.argb() else (if (env.dark) @as(u32, 0xffececf0) else 0xff1c1c20);
+            const bg = if (o.background) |c| c.argb() else bar;
+            H.webAuth(o.url, o.callback_prefix, .{ .title = o.title, .bar = bar, .ink = ink, .background = bg, .rtl = env.rtl or i18n.isRtl() });
         }
 
         /// The sign-in page ended: at the callback address (only read during this call), or

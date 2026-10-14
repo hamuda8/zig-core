@@ -196,9 +196,15 @@ pub fn openUrl(url: []const u8, new_window: bool) void {
 /// fx.webAuth: the web keeps its cookie flow. The page goes to the sign-in address; the app's
 /// server receives the callback and sets its cookies, and the app comes back on that address
 /// (no answer reaches `done`).
-pub fn webAuth(url: []const u8, _: []const u8) void {
+pub fn webAuth(url: []const u8, _: []const u8, _: zui.WebAuthLook) void {
     js.zui_open_url(url.ptr, url.len, 0);
 }
+/// The web shares the sign-in through Wufour's own session cookie: nothing here.
+pub fn sharedAuthGet(_: std.mem.Allocator, _: []const u8) ?[]u8 {
+    return null;
+}
+pub fn sharedAuthSet(_: []const u8) void {}
+pub fn sharedAuthClear(_: []const u8) void {}
 pub fn post(json: []const u8) void {
     js.zui_post(json.ptr, json.len);
 }

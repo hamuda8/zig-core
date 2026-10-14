@@ -61,7 +61,9 @@ An app is `Msg`, `State`, `init`, `update(state, msg, env, fx)` and `view(state,
   keep awake, recording and playback, barcode scanning (Code 128 and QR, decoded in Zig),
   calls (below), secure keys (`fx.key`: WebCrypto / AndroidKeyStore / Keychain), an in-app
   sign-in page (`fx.webAuth`: a WebView / WKWebView with no browser around it; `zui.wufour`
-  builds Wufour's sign-in address and reads the token from its callback; the web keeps cookies).
+  builds Wufour's sign-in address and reads the token from its callback; the web keeps cookies;
+  one sign-in for all our apps on a phone: zui/wufour_apps.zig, Android ZuiAuthProvider behind a
+  signature permission, iOS a shared Keychain group named by Info.plist `WufourKeychainGroup`).
 - **Also:** `zui.storage` (plain and secure), `zui.widget` (Android widget; iOS through the fixed
   SwiftUI extension in `shells/ios/widget`, opt-in with `ios_widget`), `t("English")`
   translation bundles in Lassan's format with `t("Text|context")` for clashing keys.
