@@ -70,6 +70,18 @@ pub fn read(arena: std.mem.Allocator, archive: []const u8) ![]Entry {
     return entries;
 }
 
+/// The entry's uncompressed bytes (stored entries as they are, deflated ones inflated).
+pub fn inflate(arena: std.mem.Allocator, e: Entry) ![]u8 {
+    if (e.method == 0) return arena.dupe(u8, e.data);
+    if (e.method != 8) return error.UnsupportedCompression;
+    var in: std.Io.Reader = .fixed(e.data);
+    const window = try arena.alloc(u8, std.compress.flate.max_window_len);
+    var d: std.compress.flate.Decompress = .init(&in, .raw, window);
+    const out = try d.reader.allocRemaining(arena, .limited(e.uncompressed_size + 1));
+    if (out.len != e.uncompressed_size or std.hash.Crc32.hash(out) != e.crc32) return error.BadEntry;
+    return out;
+}
+
 /// Writes `entries` as a new archive.
 pub fn write(arena: std.mem.Allocator, entries: []const Entry) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -165,6 +177,21 @@ test "round trip keeps entries and aligns stored data" {
     try std.testing.expectEqual(std.hash.Crc32.hash(so), entries[1].crc32);
     const data_offset = @intFromPtr(entries[1].data.ptr) - @intFromPtr(archive.ptr);
     try std.testing.expectEqual(0, data_offset % 16384);
+}
+
+test "inflate a deflated entry" {
+    // "hello hello hello" deflated (raw), as zip tools write it.
+    const text = "hello hello hello";
+    var out: std.Io.Writer.Allocating = try .initCapacity(std.testing.allocator, 64);
+    defer out.deinit();
+    var buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var c = try std.compress.flate.Compress.init(&out.writer, &buf, .raw, .default);
+    try c.writer.writeAll(text);
+    try c.finish();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const got = try inflate(arena_state.allocator(), .{ .name = "a", .method = 8, .crc32 = std.hash.Crc32.hash(text), .uncompressed_size = text.len, .data = out.written() });
+    try std.testing.expectEqualStrings(text, got);
 }
 
 test padding {
