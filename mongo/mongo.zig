@@ -118,13 +118,32 @@ pub const Client = struct {
     /// Runs `cmd` against the database `db_name` and returns the reply (in `arena`). `cmd` is a document or a
     /// struct literal whose first field is the command name.
     pub fn command(c: *Client, arena: std.mem.Allocator, db_name: []const u8, cmd: anytype) !Doc {
-        const conn = try c.acquire();
-        var healthy = false;
-        defer c.release(conn, healthy);
-        const reply = try conn.run(arena, c.io, db_name, cmd);
-        healthy = true;
+        const got = try c.acquire();
+        const reply = got.conn.run(arena, c.io, db_name, cmd) catch |err| {
+            c.release(got.conn, false);
+            // A connection that sat in the pool may have been closed by the other side (the
+            // database restarted, the network dropped): the others are likely dead too. Drop
+            // them all and try once more on a fresh connection, as MongoDB's drivers retry.
+            if (!got.pooled or err == error.OutOfMemory) return err;
+            c.dropIdle();
+            const conn = try c.connect();
+            var healthy = false;
+            defer c.release(conn, healthy);
+            const again = try conn.run(arena, c.io, db_name, cmd);
+            healthy = true;
+            try c.check(again);
+            return again;
+        };
+        c.release(got.conn, true);
         try c.check(reply);
         return reply;
+    }
+
+    fn dropIdle(c: *Client) void {
+        c.mutex.lockUncancelable(c.io);
+        defer c.mutex.unlock(c.io);
+        for (c.idle.items) |conn| conn.destroy(c.gpa, c.io);
+        c.idle.clearRetainingCapacity();
     }
 
     fn check(c: *Client, reply: Doc) !void {
@@ -146,12 +165,12 @@ pub const Client = struct {
         };
     }
 
-    fn acquire(c: *Client) !*Conn {
+    fn acquire(c: *Client) !struct { conn: *Conn, pooled: bool } {
         c.mutex.lockUncancelable(c.io);
-        const pooled = c.idle.pop();
+        const idle = c.idle.pop();
         c.mutex.unlock(c.io);
-        if (pooled) |conn| return conn;
-        return c.connect();
+        if (idle) |conn| return .{ .conn = conn, .pooled = true };
+        return .{ .conn = try c.connect(), .pooled = false };
     }
 
     fn release(c: *Client, conn: *Conn, healthy: bool) void {
