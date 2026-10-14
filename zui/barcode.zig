@@ -148,10 +148,12 @@ const start_b = 104;
 const start_c = 105;
 const stop_symbol = 106;
 
-/// Rows across the picture, each read left to right and right to left.
+/// Rows across the picture, each read left to right and right to left, twice: from the black
+/// and white picture, and from the row's own light with edges found between pixels (a blurred
+/// or small code, bars under two pixels wide).
 fn findCode128(a: std.mem.Allocator, img: Image, bits: Bits) !?[]const u8 {
     const rows = 25;
-    var runs: std.ArrayList(u32) = .empty;
+    var runs: std.ArrayList(f32) = .empty;
     var k: usize = 0;
     while (k < rows) : (k += 1) {
         // From the middle outwards.
@@ -160,10 +162,10 @@ fn findCode128(a: std.mem.Allocator, img: Image, bits: Bits) !?[]const u8 {
         const y_i = @as(i64, @intCast(img.height / 2)) + sign * @as(i64, @intCast(off * img.height / (rows + 1)));
         if (y_i < 0 or y_i >= img.height) continue;
         const y: usize = @intCast(y_i);
-        // Runs of this row: first light, then dark, light...
+        // Runs of the black and white row: first light, then dark, light...
         runs.clearRetainingCapacity();
         var dark = false;
-        var n: u32 = 0;
+        var n: f32 = 0;
         for (0..bits.w) |x| {
             const d = bits.get(x, y);
             if (d == dark) {
@@ -175,32 +177,107 @@ fn findCode128(a: std.mem.Allocator, img: Image, bits: Bits) !?[]const u8 {
             }
         }
         try runs.append(a, n);
-        if (try readCode128(a, runs.items)) |t| return t;
-        std.mem.reverse(u32, runs.items);
-        // Reversed, the row must still start with a light run.
-        if (runs.items.len % 2 == 0) {
-            if (try readCode128(a, runs.items[0..])) |t| return t;
-        } else {
-            if (try readCode128(a, runs.items)) |t| return t;
-        }
+        if (try readBothWays(a, &runs)) |t| return t;
+        // Slanted lines too near the middle: a long, low code held at an angle.
+        const angles: []const f32 = if (k < 9) &.{ 0, -8, 8, -16, 16 } else &.{0};
+        for (angles) |angle| for ([_]usize{ 16, 32, 64 }) |window| {
+            try edgeRuns(a, img, y, angle, window, &runs);
+            if (try readBothWays(a, &runs)) |t| return t;
+        };
     }
     return null;
 }
 
+/// The runs of row `y` between sub-pixel edges: where the light (rows y-1 to y+1 averaged)
+/// crosses the level half way between its darkest and lightest within `window` pixels, with
+/// some hysteresis against noise.
+fn edgeRuns(a: std.mem.Allocator, img: Image, y: usize, angle: f32, window: usize, runs: *std.ArrayList(f32)) !void {
+    // Along a line through (width / 2, y) at `angle` degrees, a pixel a step, three lines wide.
+    const rad = std.math.degreesToRadians(angle);
+    const dx = @cos(rad);
+    const dy = @sin(rad);
+    const cx = @as(f32, @floatFromInt(img.width)) / 2;
+    const cy = @as(f32, @floatFromInt(y)) + 0.5;
+    const reach = @as(f32, @floatFromInt(img.width + img.height));
+    var samples: std.ArrayList(f32) = .empty;
+    defer samples.deinit(a);
+    var t = -reach;
+    while (t <= reach) : (t += 1) {
+        var s: f32 = 0;
+        var n: f32 = 0;
+        for ([_]f32{ -1, 0, 1 }) |o| {
+            const px = cx + t * dx - o * dy;
+            const py = cy + t * dy + o * dx;
+            if (px < 0.5 or py < 0.5 or px > @as(f32, @floatFromInt(img.width)) - 1.5 or py > @as(f32, @floatFromInt(img.height)) - 1.5) continue;
+            s += bilinear(img, px - 0.5, py - 0.5);
+            n += 1;
+        }
+        if (n == 3) try samples.append(a, s / 3) else if (samples.items.len > 0) break;
+    }
+    const row = samples.items;
+    const w = row.len;
+    runs.clearRetainingCapacity();
+    if (w < 16) return;
+    // Edges must cross a tenth of the row's contrast: noise in the quiet zone does not.
+    var lo_v: f32 = 255;
+    var hi_v: f32 = 0;
+    for (row) |v| {
+        lo_v = @min(lo_v, v);
+        hi_v = @max(hi_v, v);
+    }
+    const hyst = @max(4, (hi_v - lo_v) * 0.05);
+    runs.clearRetainingCapacity();
+    var dark = false;
+    var last_edge: f32 = 0;
+    var cross: f32 = 0;
+    var prev: f32 = 0;
+    const half = window / 2;
+    for (0..w) |x| {
+        const lo = x -| half;
+        const hi = @min(w, x + half);
+        // Half way between the darkest and lightest around: a quiet zone beside the first bars
+        // does not pull the level up as an average would.
+        var lo_w: f32 = 255;
+        var hi_w: f32 = 0;
+        for (row[lo..hi]) |v| {
+            lo_w = @min(lo_w, v);
+            hi_w = @max(hi_w, v);
+        }
+        const s = row[x] - (lo_w + hi_w) / 2;
+        if (x > 0 and (s < 0) != (prev < 0)) cross = @as(f32, @floatFromInt(x - 1)) + prev / (prev - s) + 0.5;
+        prev = s;
+        const h = hyst;
+        if ((!dark and s < -h) or (dark and s > h)) {
+            try runs.append(a, cross - last_edge);
+            last_edge = cross;
+            dark = !dark;
+        }
+    }
+    try runs.append(a, @as(f32, @floatFromInt(w)) - last_edge);
+}
+
+fn readBothWays(a: std.mem.Allocator, runs: *std.ArrayList(f32)) !?[]const u8 {
+    if (try readCode128(a, runs.items)) |t| return t;
+    // Upside down: reversed, and starting with a light run again.
+    std.mem.reverse(f32, runs.items);
+    if (runs.items.len % 2 == 0) try runs.insert(a, 0, 0);
+    return readCode128(a, runs.items);
+}
+
 /// How far `widths` (bars and spaces in pixels) are from a pattern, in modules.
-fn mismatch(widths: []const u32, pattern: []const u8) f32 {
-    var total: u32 = 0;
+fn mismatch(widths: []const f32, pattern: []const u8) f32 {
+    var total: f32 = 0;
     for (widths) |w| total += w;
     var modules: u32 = 0;
     for (pattern) |c| modules += c - '0';
-    const unit = @as(f32, @floatFromInt(total)) / @as(f32, @floatFromInt(modules));
+    const unit = total / @as(f32, @floatFromInt(modules));
     if (unit <= 0) return 99;
     var err: f32 = 0;
-    for (widths, pattern) |w, c| err += @abs(@as(f32, @floatFromInt(w)) / unit - @as(f32, @floatFromInt(c - '0')));
+    for (widths, pattern) |w, c| err += @abs(w / unit - @as(f32, @floatFromInt(c - '0')));
     return err;
 }
 
-fn bestSymbol(widths: []const u32) ?u8 {
+fn bestSymbol(widths: []const f32) ?u8 {
     var best: ?u8 = null;
     var best_err: f32 = 2.2;
     for (code128_patterns[0..106], 0..) |p, v| {
@@ -214,11 +291,11 @@ fn bestSymbol(widths: []const u32) ?u8 {
 }
 
 /// `runs` alternate light, dark, light...: index 1, 3, 5 are bars.
-fn readCode128(a: std.mem.Allocator, runs: []const u32) !?[]const u8 {
+fn readCode128(a: std.mem.Allocator, runs: []const f32) !?[]const u8 {
     var i: usize = 1;
     while (i + 6 < runs.len) : (i += 2) {
         const sym = runs[i .. i + 6];
-        var width: u32 = 0;
+        var width: f32 = 0;
         for (sym) |w| width += w;
         // A start symbol with a quiet zone of several modules before it.
         if (runs[i - 1] * 11 < width * 4) continue;
@@ -232,7 +309,7 @@ fn readCode128(a: std.mem.Allocator, runs: []const u32) !?[]const u8 {
     return null;
 }
 
-fn readSymbols(a: std.mem.Allocator, runs: []const u32, start: u8) !?[]const u8 {
+fn readSymbols(a: std.mem.Allocator, runs: []const f32, start: u8) !?[]const u8 {
     var values: std.ArrayList(u8) = .empty;
     try values.append(a, start);
     var at: usize = 6;
@@ -1476,4 +1553,19 @@ test "QR in a picture: found, turned, tilted, mirrored, large versions" {
     const blank = try a.alloc(u8, 320 * 240);
     for (blank, 0..) |*p, i| p.* = @intCast(100 + i % 97);
     try testing.expect((try decode(testing.allocator, .{ .width = 320, .height = 240, .pixels = blank }, .{})) == null);
+}
+
+fn bilinear(img: Image, x: f32, y: f32) f32 {
+    const x0: usize = @intFromFloat(@floor(x));
+    const y0: usize = @intFromFloat(@floor(y));
+    const fx = x - @floor(x);
+    const fy = y - @floor(y);
+    const p = struct {
+        fn v(im: Image, xx: usize, yy: usize) f32 {
+            return @floatFromInt(im.at(xx, yy));
+        }
+    }.v;
+    const top = p(img, x0, y0) * (1 - fx) + p(img, x0 + 1, y0) * fx;
+    const bottom = p(img, x0, y0 + 1) * (1 - fx) + p(img, x0 + 1, y0 + 1) * fx;
+    return top * (1 - fy) + bottom * fy;
 }
