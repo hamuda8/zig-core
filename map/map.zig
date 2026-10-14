@@ -143,6 +143,9 @@ pub const View = struct {
 pub const Gesture = struct {
     /// A tap at this screen point (no drag, one finger, short).
     tap: ?[2]f64 = null,
+    /// The second tap of a double tap (or double click), here: the map zooms in one level around
+    /// it, as MapLibre's. Both taps are reported in `tap` too.
+    double_tap: ?[2]f64 = null,
     /// A pressable marker was tapped (its key; see `handleMarkers`).
     marker_press: ?u64 = null,
     /// A draggable marker was let go at a new place.
@@ -184,6 +187,8 @@ pub const State = struct {
     can_tilt: bool = true,
     /// Where and when the current single-finger touch began, for taps.
     touch_start: ?struct { x: f64, y: f64, ms: i64, moved: bool, many: bool } = null,
+    /// The last tap, to tell a double tap.
+    last_tap: ?struct { x: f64, y: f64, ms: i64 } = null,
     /// A marker being dragged: its key, where it is now, and where the finger holds it.
     drag: ?struct { key: u64, at: LatLng, dx: f64, dy: f64, x0: f64, y0: f64, moved: bool = false } = null,
 
@@ -356,6 +361,20 @@ pub const State = struct {
                     if (p.kind == .up and !t.moved and !t.many and p.time_ms - t.ms < 500) gesture.tap = .{ x, y };
                     s.touch_start = null;
                 };
+                if (gesture.tap != null) {
+                    const lt = s.last_tap;
+                    if (lt != null and p.time_ms - lt.?.ms < 350 and std.math.hypot(x - lt.?.x, y - lt.?.y) < 30) {
+                        s.last_tap = null;
+                        gesture.double_tap = .{ x, y };
+                        if (s.can_zoom) {
+                            // Where zooming in around the point ends, reached with a short ease.
+                            var target = s.*;
+                            target.animation = null;
+                            target.zoomAround(x, y, @round(s.camera.zoom) + 1);
+                            s.easeTo(.{ .center = target.camera.center, .zoom = target.camera.zoom }, 250);
+                        }
+                    } else s.last_tap = .{ .x = x, .y = y, .ms = p.time_ms };
+                }
                 s.pinch = null;
                 if (was == 2) {
                     // Keep panning with the finger that is left.
@@ -982,6 +1001,28 @@ test "a tap is reported; a drag is not" {
     _ = s.handle(.{ .kind = .down, .id = 1, .x = 100, .y = 200, .time_ms = 1000 });
     _ = s.handle(.{ .kind = .move, .id = 1, .x = 160, .y = 200, .time_ms = 1050 });
     try testing.expect(s.handle(.{ .kind = .up, .id = 1, .x = 160, .y = 200, .time_ms = 1300 }).tap == null);
+}
+
+test "a double tap zooms in one level around the tapped point" {
+    var s: State = .{ .camera = .{ .center = .{ .lat = 33.51, .lng = 36.28 }, .zoom = 15 } };
+    s.setViewport(400, 800);
+    const held = s.view().toMap(100, 200).?;
+    _ = s.handle(.{ .kind = .down, .id = 1, .x = 100, .y = 200, .time_ms = 0 });
+    try testing.expect(s.handle(.{ .kind = .up, .id = 1, .x = 100, .y = 200, .time_ms = 80 }).double_tap == null);
+    _ = s.handle(.{ .kind = .down, .id = 1, .x = 104, .y = 202, .time_ms = 200 });
+    const g = s.handle(.{ .kind = .up, .id = 1, .x = 104, .y = 202, .time_ms = 260 });
+    try testing.expect(g.double_tap != null and g.tap != null);
+    var now: f64 = 0;
+    while (s.step(now)) now += 16;
+    try testing.expectApproxEqAbs(@as(f64, 16), s.camera.zoom, 1e-9);
+    const after = s.view().toScreen(held).?;
+    try testing.expectApproxEqAbs(@as(f64, 100), after[0], 8);
+    try testing.expectApproxEqAbs(@as(f64, 200), after[1], 8);
+    // Two taps far apart in time are two single taps.
+    _ = s.handle(.{ .kind = .down, .id = 1, .x = 100, .y = 200, .time_ms = 2000 });
+    _ = s.handle(.{ .kind = .up, .id = 1, .x = 100, .y = 200, .time_ms = 2050 });
+    _ = s.handle(.{ .kind = .down, .id = 1, .x = 100, .y = 200, .time_ms = 3000 });
+    try testing.expect(s.handle(.{ .kind = .up, .id = 1, .x = 100, .y = 200, .time_ms = 3050 }).double_tap == null);
 }
 
 test "flyTo arrives exactly, whatever the frame rate" {
