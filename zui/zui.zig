@@ -83,6 +83,8 @@ pub const ServerEvent = runtime.ServerEvent;
 pub const sse = @import("sse.zig");
 /// The secure key store (requests through `fx.key`).
 pub const keys = @import("keys.zig");
+/// Tap, double tap, pan, pinch, swipe and wheel from pointer events.
+pub const gesture = @import("gesture.zig");
 pub const Transform = style.Transform;
 pub const ImageFilter = style.ImageFilter;
 pub const Shadow = style.Shadow;
@@ -147,6 +149,7 @@ test {
     _ = color;
     _ = text;
     _ = barcode;
+    _ = gesture;
     _ = png;
     if (platform == .headless) _ = @import("ui_test.zig");
     if (platform == .headless) _ = @import("push_test.zig");
