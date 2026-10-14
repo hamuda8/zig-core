@@ -92,6 +92,7 @@ pub const Gestures = tree.Gestures;
 pub const ScrollEvent = runtime.ScrollEvent;
 pub const ScrollTarget = runtime.ScrollTarget;
 pub const text = @import("text.zig");
+pub const barcode = @import("barcode.zig");
 pub const Path = tree.Path;
 pub const Ui = runtime.Ui;
 pub const key = runtime.key;
@@ -132,6 +133,7 @@ pub fn exportApp(comptime App: type) void {
 test {
     _ = color;
     _ = text;
+    _ = barcode;
     if (platform == .headless) _ = @import("ui_test.zig");
     _ = i18n;
     _ = layout;
