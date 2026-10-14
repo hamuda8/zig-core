@@ -16,6 +16,8 @@ pub const hpack = @import("hpack.zig");
 pub const h2 = @import("h2.zig");
 pub const tls_client = @import("tls_client.zig");
 pub const apns = @import("apns.zig");
+/// FCM and APNs for the phone apps behind one sender (see native.zig).
+pub const native = @import("native.zig");
 
 const P256 = std.crypto.ecc.P256;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -150,6 +152,10 @@ pub fn sendWebPush(client: *std.http.Client, gpa: std.mem.Allocator, v: Vapid, s
         .{ .name = "authorization", .value = auth },
     }, null);
 }
+
+/// A POST with `std.http.Client`; the body of the answer goes into `response` (grown with the
+/// client's allocator) when given.
+pub const postRaw = post;
 
 fn post(client: *std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, response: ?*std.ArrayList(u8)) !std.http.Status {
     var req = try client.request(.POST, try std.Uri.parse(url), .{ .extra_headers = headers, .keep_alive = true, .headers = .{ .accept_encoding = .omit } });
@@ -297,4 +303,5 @@ test {
     _ = hpack;
     _ = h2;
     _ = apns;
+    _ = native;
 }
