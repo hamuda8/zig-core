@@ -94,7 +94,7 @@ fn bindDevice(e: *jni.Env) void {
         .{ "key_sign", "keySign", "(Ljava/lang/String;[B)[B" },
         .{ "key_ecdh", "keyEcdh", "(Ljava/lang/String;[B)[B" },
         .{ "key_delete", "keyDelete", "(Ljava/lang/String;)V" },
-        .{ "input_type", "inputType", "(IIIZ)V" },
+        .{ "input_type", "inputType", "(IIIZI)V" },
         .{ "pick_photo", "pickPhoto", "(ZII)V" },
         .{ "pick_file", "pickFile", "(Ljava/lang/String;)V" },
         .{ "save_file", "saveFile", "(Ljava/lang/String;Ljava/lang/String;[BZ)V" },
@@ -210,7 +210,7 @@ pub fn streamClose(id: u32) void {
     callDevice(device.stream_close, &.{int(id)});
 }
 pub fn inputType(id: u32, t: zui.InputType) void {
-    callDevice(device.input_type, &.{ int(id), int(@intFromEnum(t.keyboard)), int(@intFromEnum(t.return_key)), boolean(t.secure) });
+    callDevice(device.input_type, &.{ int(id), int(@intFromEnum(t.keyboard)), int(@intFromEnum(t.return_key)), boolean(t.secure), int(t.max_length) });
 }
 pub fn pick(kind: zui.PickKind, value: []const u8, min: []const u8, max: []const u8, title: []const u8, options: []const u8, selected: i32) void {
     const f = env.functions;

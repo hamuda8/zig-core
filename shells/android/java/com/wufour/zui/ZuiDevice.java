@@ -157,10 +157,11 @@ final class ZuiDevice {
 
     // ---- Inputs: keyboard, enter key, password ----
 
-    static void inputType(int id, int keyboard, int returnKey, boolean secure) {
+    static void inputType(int id, int keyboard, int returnKey, boolean secure, int maxLength) {
         View v = Zui.views.get(id);
         if (!(v instanceof EditText)) return;
         EditText e = (EditText) v;
+        e.setFilters(maxLength > 0 ? new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(maxLength)} : new android.text.InputFilter[0]);
         boolean area = (e.getInputType() & InputType.TYPE_TEXT_FLAG_MULTI_LINE) != 0;
         int t;
         switch (keyboard) {

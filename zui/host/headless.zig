@@ -144,6 +144,7 @@ pub fn input(id: u32, value: []const u8, placeholder: []const u8, _: zui.Font, _
 }
 pub fn content(_: u32, _: zui.Size) void {}
 pub fn inputType(id: u32, t: zui.InputType) void {
+    // (typed text is cut to `max_length` by the runtime, as a host's field would)
     if (views.getPtr(id)) |v| v.input_type = t;
 }
 /// What the app asked for: a photo (camera or not, its size), a file (what it accepts), and the
@@ -968,7 +969,7 @@ const Form = struct {
         ui.begin(.{ .width = .{ .px = 80 } }, .{});
         ui.input(.{ .placeholder = "Password", .secure = true, .return_key = .go });
         ui.input(.{ .placeholder = "Email", .keyboard = .email });
-        ui.input(.{ .placeholder = "Note", .multiline = true, .value = s.note[0..s.note_len], .on_change = onNote, .style = .{ .line_height = 1 } });
+        ui.input(.{ .placeholder = "Note", .multiline = true, .max_length = 60, .value = s.note[0..s.note_len], .on_change = onNote, .style = .{ .line_height = 1 } });
         ui.begin(.{}, .{ .on_press = .date });
         ui.text(&s.date, .{});
         ui.end();
@@ -993,6 +994,10 @@ test "inputs: password, keyboards, a text area that grows; date, time and option
     try std.testing.expectEqual(@as(f32, 15), D.inputView("Note").?.frame.h);
     try D.typeInto("Note", "one line\nand more text here, and then some more, and more"); // 58 characters, 25 a line
     try std.testing.expectEqual(@as(f32, 45), D.inputView("Note").?.frame.h);
+    // max_length: what is typed past 60 characters is cut.
+    try D.typeInto("Note", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    try std.testing.expectEqual(@as(usize, 60), D.R.appState().note_len);
+    try std.testing.expectEqual(@as(u32, 60), D.inputView("Note").?.input_type.max_length);
 
     try D.press("2026-01-01");
     try std.testing.expectEqual(zui.PickKind.date, picker.?);

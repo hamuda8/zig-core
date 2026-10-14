@@ -55,7 +55,7 @@ const js = struct {
     extern "zui" fn zui_record_stop(id: u32, cancel: u32) void;
     extern "zui" fn zui_play(id: u32, url: [*]const u8, url_len: usize, data: [*]const u8, data_len: usize, mime: [*]const u8, mime_len: usize, video: u32, autoplay: u32, loop: u32) void;
     extern "zui" fn zui_playback(id: u32, op: u32, value: u32) void;
-    extern "zui" fn zui_input_type(id: u32, keyboard: u32, return_key: u32, secure: u32) void;
+    extern "zui" fn zui_input_type(id: u32, keyboard: u32, return_key: u32, secure: u32, max_length: u32) void;
     extern "zui" fn zui_pick(kind: u32, value: [*]const u8, value_len: usize, min: [*]const u8, min_len: usize, max: [*]const u8, max_len: usize, title: [*]const u8, title_len: usize, options: [*]const u8, options_len: usize, selected: i32) void;
     extern "zui" fn zui_pick_photo(camera: u32, max_size: u32, quality: u32) void;
     extern "zui" fn zui_pick_file(accept: [*]const u8, accept_len: usize) void;
@@ -100,7 +100,7 @@ pub fn input(id: u32, value: []const u8, placeholder: []const u8, f: zui.Font, c
     js.zui_input(id, value.ptr, value.len, placeholder.ptr, placeholder.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), color, @backingInt(a));
 }
 pub fn inputType(id: u32, t: zui.InputType) void {
-    js.zui_input_type(id, @backingInt(t.keyboard), @backingInt(t.return_key), @intFromBool(t.secure));
+    js.zui_input_type(id, @backingInt(t.keyboard), @backingInt(t.return_key), @intFromBool(t.secure), t.max_length);
 }
 pub fn pick(kind: zui.PickKind, value: []const u8, min: []const u8, max: []const u8, title: []const u8, options: []const u8, selected: i32) void {
     js.zui_pick(@backingInt(kind), value.ptr, value.len, min.ptr, min.len, max.ptr, max.len, title.ptr, title.len, options.ptr, options.len, selected);

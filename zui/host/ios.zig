@@ -382,8 +382,21 @@ fn textArea(i: u32, value: []const u8, placeholder: []const u8, f: zui.Font, arg
 }
 
 /// Keyboards (tree.Keyboard) and enter keys (tree.ReturnKey) as UIKeyboardType / UIReturnKeyType.
+/// Inputs' `max_length` (UIKit has none: the text is cut as it changes).
+var max_lengths: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+
+/// Cuts a field's or text view's text to its `max_length` (in UTF-16 units, as HTML).
+fn clipField(i: u32, v: id) void {
+    const max = max_lengths.get(i) orelse return;
+    const s = objc.send(v, "text");
+    if (s == null or objc.sendInt(s, "length") <= max) return;
+    const cut = objc.msgSend(*const fn (id, objc.SEL, usize) callconv(.c) id)(s, objc.sel("substringToIndex:"), max);
+    objc.sendVoid1(v, "setText:", cut);
+}
+
 pub fn inputType(i: u32, t: zui.InputType) void {
     const v = view(i);
+    if (t.max_length > 0) max_lengths.put(zui.allocator, i, t.max_length) catch {} else _ = max_lengths.remove(i);
     const keyboards = [_]isize{ 0, 7, 4, 5, 3, 8 }; // default, email, number pad, phone pad, URL, decimal pad
     const returns = [_]isize{ 0, 9, 1, 4, 6, 7 }; // default, done, go, next, search, send
     objc.sendVoidInt(v, "setKeyboardType:", keyboards[@intFromEnum(t.keyboard)]);
@@ -720,6 +733,7 @@ pub fn exportEntry(comptime App: type) void {
 
         fn textViewChanged(_: id, _: objc.SEL, tv: id) callconv(.c) void {
             const i = tagOf(tv);
+            clipField(i, tv);
             const s = objc.send(tv, "text");
             const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(s, objc.sel("UTF8String"));
             const value = if (utf8) |p| std.mem.span(p) else "";
@@ -742,6 +756,7 @@ pub fn exportEntry(comptime App: type) void {
             R.pickDone(value);
         }
         fn textChanged(_: id, _: objc.SEL, field: id) callconv(.c) void {
+            clipField(tagOf(field), field);
             const s = objc.send(field, "text");
             const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(s, objc.sel("UTF8String"));
             R.textEvent(tagOf(field), if (utf8) |p| std.mem.span(p) else "");

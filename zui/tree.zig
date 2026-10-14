@@ -60,6 +60,8 @@ pub const InputType = struct {
     return_key: ReturnKey = .default,
     /// A password: the text is hidden.
     secure: bool = false,
+    /// At most this many characters can be typed (HTML maxlength); 0: no limit.
+    max_length: u32 = 0,
 };
 
 pub const Video = struct {

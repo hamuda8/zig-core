@@ -890,6 +890,8 @@ pub fn Ui(comptime Msg: type) type {
             /// Several lines that wrap; the input grows with its text (up to `style.max_height`,
             /// then it scrolls).
             multiline: bool = false,
+            /// At most this many characters can be typed (HTML maxlength); 0: no limit.
+            max_length: u32 = 0,
         };
 
         /// Memory that lives until this frame's tree is dropped.
@@ -990,7 +992,7 @@ pub fn Ui(comptime Msg: type) type {
                 .key = o.key,
                 .text = o.value,
                 .placeholder = o.placeholder,
-                .input_type = .{ .keyboard = o.keyboard, .return_key = o.return_key, .secure = o.secure and !o.multiline },
+                .input_type = .{ .keyboard = o.keyboard, .return_key = o.return_key, .secure = o.secure and !o.multiline, .max_length = o.max_length },
             }) catch return ui.fail();
             if (o.on_change) |f| ui.changes.append(ui.arena(), .{ .node = i, .value = f }) catch ui.fail();
             if (o.on_focus != null or o.on_blur != null or o.on_submit != null)
@@ -2207,8 +2209,27 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         pub fn textEvent(id: u32, text: []const u8) void {
             if (!started) return;
             for (changes) |b| {
-                if (b.node == id) return dispatch(b.value(text));
+                if (b.node == id) return dispatch(b.value(clipText(id, text)));
             }
+        }
+
+        /// The input's `max_length`, kept here too (hosts limit typing; a paste or a host
+        /// without it still cannot pass it).
+        fn clipText(id: u32, text: []const u8) []const u8 {
+            if (!has_old) return text;
+            for (trees[current].nodes.items) |n| {
+                if (n.host != id) continue;
+                const max = n.input_type.max_length;
+                if (max == 0) return text;
+                var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+                var count: u32 = 0;
+                while (it.nextCodepointSlice()) |_| {
+                    count += 1;
+                    if (count == max) return text[0..it.i];
+                }
+                return text;
+            }
+            return text;
         }
 
         pub fn inputEvent(id: u32, kind: InputEvent) void {

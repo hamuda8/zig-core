@@ -472,8 +472,9 @@ export async function start(wasm, mount = document.body, options = {}) {
         el.style.setProperty('--zui-placeholder', faded(color));
         el.style.textAlign = ALIGN[align];
       },
-      zui_input_type(id, keyboard, returnKey, secure) {
+      zui_input_type(id, keyboard, returnKey, secure, maxLength) {
         const el = views.get(id);
+        if (maxLength > 0) el.maxLength = maxLength; else el.removeAttribute('maxlength');
         if (el.tagName === 'INPUT') el.type = secure ? 'password' : 'text';
         el.inputMode = INPUT_MODE[keyboard] || 'text';
         if (ENTER_HINT[returnKey]) el.enterKeyHint = ENTER_HINT[returnKey]; else el.removeAttribute('enterkeyhint');
