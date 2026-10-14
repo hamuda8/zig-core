@@ -72,7 +72,14 @@ final class ZuiDevice {
             case android.view.KeyEvent.KEYCODE_DPAD_LEFT: code = 5; break;
             case android.view.KeyEvent.KEYCODE_DPAD_RIGHT: code = 6; break;
             case android.view.KeyEvent.KEYCODE_TAB: code = 7; break;
-            default: return false;
+            default:
+                // Letters with Ctrl (or Meta): shortcuts such as Ctrl+B ('A'..'Z').
+                int k = e.getKeyCode();
+                if (k >= android.view.KeyEvent.KEYCODE_A && k <= android.view.KeyEvent.KEYCODE_Z && (e.isCtrlPressed() || e.isMetaPressed())) {
+                    code = 'A' + (k - android.view.KeyEvent.KEYCODE_A);
+                    break;
+                }
+                return false;
         }
         int mods = (e.isShiftPressed() ? 1 : 0) | (e.isCtrlPressed() || e.isMetaPressed() ? 2 : 0) | (e.isAltPressed() ? 4 : 0)
                 | (focus instanceof android.widget.EditText ? 8 : 0);

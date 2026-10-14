@@ -269,6 +269,24 @@ export async function start(wasm, mount = document.body, options = {}) {
     try { fn(ptr, bytes.length); } finally { ex.zui_free(ptr, Math.max(1, bytes.length)); }
   };
   const sendText = (id, s) => withBytes(encoder.encode(s), (p, n) => ex.zui_text_event(id, p, n));
+  // Selections: the app counts in UTF-8 bytes, the field in UTF-16 units.
+  const bytesAt = (s, units) => encoder.encode(s.slice(0, units)).length;
+  const unitsAt = (s, bytes) => {
+    let b = 0, i = 0;
+    while (i < s.length && b < bytes) {
+      const c = s.codePointAt(i);
+      b += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+      i += c >= 0x10000 ? 2 : 1;
+    }
+    return i;
+  };
+  const sendSelection = (id, el) => {
+    if (!ex.zui_select_event || el.selectionStart == null) return;
+    const s = bytesAt(el.value, el.selectionStart), e = bytesAt(el.value, el.selectionEnd);
+    if (el._sel === s + ':' + e) return;
+    el._sel = s + ':' + e;
+    ex.zui_select_event(id, s, e);
+  };
   let watchId = null;
   const sockets = new Map();
   const calls = webCalls(() => ex, () => memory, withBytes, encoder, str);
@@ -309,7 +327,9 @@ export async function start(wasm, mount = document.body, options = {}) {
   // browser does not act on.
   const KEYS = { Escape: 1, Esc: 1, Enter: 2, ArrowUp: 3, Up: 3, ArrowDown: 4, Down: 4, ArrowLeft: 5, Left: 5, ArrowRight: 6, Right: 6, Tab: 7 };
   document.addEventListener('keydown', (e) => {
-    const code = KEYS[e.key];
+    // Letters with Ctrl or Command (shortcuts such as Ctrl+B): 'A'..'Z'.
+    const letter = (e.ctrlKey || e.metaKey) && /^Key[A-Z]$/.test(e.code) ? e.code.charCodeAt(3) : 0;
+    const code = KEYS[e.key] || letter;
     if (!code || e.isComposing || !ex.zui_key_event) return;
     const t = e.target;
     const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
@@ -345,6 +365,8 @@ export async function start(wasm, mount = document.body, options = {}) {
           el.style.outline = 'none';
           el.dir = 'auto';
           el.addEventListener('input', () => sendText(id, el.value));
+          for (const ev of ['select', 'selectionchange', 'keyup', 'pointerup']) el.addEventListener(ev, () => sendSelection(id, el));
+          el._zuiSelect = () => sendSelection(id, el);
           el.addEventListener('focus', () => ex.zui_input_event(id, INPUT_FOCUS));
           el.addEventListener('blur', () => { if (!el._removed) ex.zui_input_event(id, INPUT_BLUR); });
           if (kind === KIND_INPUT) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') ex.zui_input_event(id, INPUT_SUBMIT); });
@@ -768,6 +790,18 @@ export async function start(wasm, mount = document.body, options = {}) {
       },
       zui_focus(id) {
         views.get(id)?.focus();
+      },
+      zui_selection(id, end) {
+        const el = views.get(id);
+        if (!el || el.selectionStart == null) return -1;
+        return bytesAt(el.value, end ? el.selectionEnd : el.selectionStart);
+      },
+      zui_select(id, start, end) {
+        const el = views.get(id);
+        if (!el || el.setSelectionRange == null) return;
+        el.focus();
+        el.setSelectionRange(unitsAt(el.value, start >>> 0), unitsAt(el.value, end >>> 0));
+        el._zuiSelect?.();
       },
       zui_notify(id, tptr, tlen, bptr, blen, urgent) {
         if (!('Notification' in window)) return;

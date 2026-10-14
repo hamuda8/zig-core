@@ -112,6 +112,7 @@ public final class Zui {
     static native void nativeDark(boolean dark);
     static native void nativeEvent(int id, int kind);
     static native void nativeText(int id, String text);
+    static native void nativeSelect(int id, int start, int end);
     static native void nativePointer(int id, int kind, int pointer, float x, float y, long timeMs);
     static native void nativeFrame(long timeNanos);
     static native void nativeFetchDone(int id, int status, byte[] body);
@@ -190,7 +191,16 @@ public final class Zui {
             }
             case INPUT:
             case TEXT_AREA: {
-                EditText e = new EditText(activity);
+                EditText e = new EditText(activity) {
+                    @Override
+                    protected void onSelectionChanged(int start, int end) {
+                        super.onSelectionChanged(start, end);
+                        if (started && getTag() == null) {
+                            String t = getText().toString();
+                            nativeSelect(id, bytes(t, start), bytes(t, end));
+                        }
+                    }
+                };
                 e.setBackground(null);
                 e.setPadding(0, 0, 0, 0);
                 e.setIncludeFontPadding(false);
@@ -838,6 +848,42 @@ public final class Zui {
             activity.startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)));
         } catch (Exception ignored) {
             // nothing on the phone opens it
+        }
+    }
+
+    /** UTF-16 index → UTF-8 byte offset, and back (the app counts bytes). */
+    static int bytes(String s, int units) {
+        units = Math.max(0, Math.min(units, s.length()));
+        return s.substring(0, units).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
+    static int units(String s, int bytes) {
+        int b = 0, i = 0;
+        while (i < s.length() && b < bytes) {
+            int c = s.codePointAt(i);
+            b += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+            i += Character.charCount(c);
+        }
+        return i;
+    }
+
+    static long selection(int id) {
+        View v = views.get(id);
+        if (!(v instanceof EditText)) return -1;
+        EditText e = (EditText) v;
+        String t = e.getText().toString();
+        return ((long) bytes(t, e.getSelectionStart()) << 32) | (bytes(t, e.getSelectionEnd()) & 0xffffffffL);
+    }
+
+    static void select(int id, int start, int end) {
+        View v = views.get(id);
+        if (!(v instanceof EditText)) return;
+        EditText e = (EditText) v;
+        String t = e.getText().toString();
+        focus(id);
+        try {
+            e.setSelection(units(t, start), units(t, end));
+        } catch (IndexOutOfBoundsException ignored) {
         }
     }
 

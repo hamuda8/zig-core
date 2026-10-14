@@ -38,6 +38,8 @@ var methods: struct {
     speak: jni.jmethodID,
     set_link: jni.jmethodID,
     focus: jni.jmethodID,
+    selection: jni.jmethodID,
+    select: jni.jmethodID,
     image_filter: jni.jmethodID,
     copy: jni.jmethodID,
     open_url: jni.jmethodID,
@@ -329,6 +331,8 @@ fn bind(e: *jni.Env) void {
         .{ "speak", "speak", "(Ljava/lang/String;Ljava/lang/String;)V" },
         .{ "set_link", "setLink", "(Ljava/lang/String;)V" },
         .{ "focus", "focus", "(I)V" },
+        .{ "selection", "selection", "(I)J" },
+        .{ "select", "select", "(III)V" },
         .{ "image_filter", "imageFilter", "(I[F)V" },
         .{ "copy", "copy", "(Ljava/lang/String;)V" },
         .{ "open_url", "openUrl", "(Ljava/lang/String;)V" },
@@ -653,6 +657,10 @@ pub fn exportEntry(comptime App: type) void {
             var buf: [4096]u8 = undefined;
             R.textEvent(@intCast(id), javaString(s, &buf));
         }
+        fn selectEvent(e: *jni.Env, _: jni.jclass, id: jni.jint, from: jni.jint, to: jni.jint) callconv(.c) void {
+            bind(e);
+            R.selectEvent(@intCast(id), @intCast(@max(0, from)), @intCast(@max(0, to)));
+        }
     };
     @export(&Entry.start, .{ .name = "Java_com_wufour_zui_Zui_nativeStart" });
     @export(&Entry.resize, .{ .name = "Java_com_wufour_zui_Zui_nativeResize" });
@@ -660,6 +668,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.dark, .{ .name = "Java_com_wufour_zui_Zui_nativeDark" });
     @export(&Entry.event, .{ .name = "Java_com_wufour_zui_Zui_nativeEvent" });
     @export(&Entry.textEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeText" });
+    @export(&Entry.selectEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeSelect" });
     @export(&Entry.pointerEvent, .{ .name = "Java_com_wufour_zui_Zui_nativePointer" });
     @export(&Entry.frame, .{ .name = "Java_com_wufour_zui_Zui_nativeFrame" });
     @export(&Entry.fetchDone, .{ .name = "Java_com_wufour_zui_Zui_nativeFetchDone" });
@@ -805,6 +814,18 @@ pub fn openUrl(url: []const u8, _: bool) void {
 }
 pub fn focus(id: u32) void {
     call(methods.focus, &.{int(id)});
+}
+/// Zui.selection: start << 32 | end in UTF-8 bytes, or -1.
+pub fn selection(id: u32) ?zui.Selection {
+    const args = [_]jni.jvalue{int(id)};
+    const bits = env.functions.CallStaticLongMethodA(env, class, methods.selection, &args);
+    check();
+    if (bits < 0) return null;
+    const u: u64 = @bitCast(bits);
+    return .{ .start = @truncate(u >> 32), .end = @truncate(u) };
+}
+pub fn select(id: u32, s: zui.Selection) void {
+    call(methods.select, &.{ int(id), int(@min(s.start, std.math.maxInt(i32))), int(@min(s.end, std.math.maxInt(i32))) });
 }
 pub fn requestFrame() void {
     call(methods.request_frame, &.{});

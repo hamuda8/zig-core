@@ -508,6 +508,7 @@ pub fn exportEntry(comptime App: type) void {
                 .{ "documentPicker:didPickDocumentsAtURLs:", @ptrCast(&documentsPicked), "v@:@@" },
                 .{ "documentPickerWasCancelled:", @ptrCast(&documentsCancelled), "v@:@" },
                 .{ "textViewDidChange:", @ptrCast(&textViewChanged), "v@:@" },
+                .{ "textViewDidChangeSelection:", @ptrCast(&textViewSelection), "v@:@" },
                 .{ "textViewDidBeginEditing:", @ptrCast(&inputBegan), "v@:@" },
                 .{ "textViewDidEndEditing:", @ptrCast(&inputEnded), "v@:@" },
                 .{ "pickerDone:", @ptrCast(&pickerDone), "v@:@" },
@@ -547,8 +548,14 @@ pub fn exportEntry(comptime App: type) void {
             if (key_commands != null) return key_commands;
             const make = objc.msgSend(*const fn (id, objc.SEL, id, isize, objc.SEL) callconv(.c) id);
             const inputs = [_]id{ UIKeyInputEscape, UIKeyInputUpArrow, UIKeyInputDownArrow, UIKeyInputLeftArrow, UIKeyInputRightArrow };
-            var cmds: [inputs.len]id = undefined;
+            // Shortcuts: Command with B, I, U, K, F; Command+Shift with X, M, P, F (the system
+            // keeps Command C, V, X, A, Z...).
+            const command: isize = 1 << 20;
+            const shift: isize = 1 << 17;
+            const letters = [_]struct { [*:0]const u8, isize }{ .{ "b", command }, .{ "i", command }, .{ "u", command }, .{ "k", command }, .{ "f", command }, .{ "x", command | shift }, .{ "m", command | shift }, .{ "p", command | shift }, .{ "f", command | shift } };
+            var cmds: [inputs.len + letters.len]id = undefined;
             for (inputs, 0..) |in, k| cmds[k] = make(objc.class("UIKeyCommand"), objc.sel("keyCommandWithInput:modifierFlags:action:"), in, 0, objc.sel("zuiKey:"));
+            for (letters, 0..) |l, k| cmds[inputs.len + k] = make(objc.class("UIKeyCommand"), objc.sel("keyCommandWithInput:modifierFlags:action:"), objc.nsString(std.mem.span(l[0])), l[1], objc.sel("zuiKey:"));
             const array = objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id);
             key_commands = objc.send(array(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &cmds, cmds.len), "retain");
             return key_commands;
@@ -562,6 +569,13 @@ pub fn exportEntry(comptime App: type) void {
                 _ = R.keyEvent(.{ .key = k[1] });
                 return;
             };
+            // A letter with Command (a shortcut).
+            const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(typed, objc.sel("UTF8String"));
+            const letter = if (utf8) |p| std.mem.span(p) else "";
+            if (letter.len == 1 and letter[0] >= 'a' and letter[0] <= 'z') {
+                const flags = objc.sendInt(cmd, "modifierFlags");
+                _ = R.keyEvent(.{ .key = .letter, .letter = letter[0], .ctrl = true, .shift = flags & (1 << 17) != 0, .in_input = true });
+            }
         }
 
         /// The edge swipe (UIScreenEdgePanGestureRecognizer), once the finger lifts.
@@ -735,6 +749,12 @@ pub fn exportEntry(comptime App: type) void {
             if (wantsPointers(i)) return sendPointers(self, touches, .cancel);
             if (!isPressable(i)) return objc.sendSuper2(self, "ZuiView", "touchesCancelled:withEvent:", touches, ev);
             R.event(i, .press_out);
+        }
+
+        fn textViewSelection(_: id, _: objc.SEL, tv: id) callconv(.c) void {
+            const i = tagOf(tv);
+            const sel = selection(i) orelse return;
+            R.selectEvent(i, sel.start, sel.end);
         }
 
         fn textViewChanged(_: id, _: objc.SEL, tv: id) callconv(.c) void {
@@ -1154,6 +1174,73 @@ pub fn setLink(_: []const u8) void {}
 
 pub fn focus(i: u32) void {
     _ = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) bool)(view(i), objc.sel("becomeFirstResponder"));
+}
+
+/// A field's text as UTF-8 (valid until the next autorelease drain).
+fn fieldText(v: id) []const u8 {
+    const s = objc.send(v, "text");
+    if (s == null) return "";
+    const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(s, objc.sel("UTF8String"));
+    return if (utf8) |p| std.mem.span(p) else "";
+}
+
+/// UTF-16 units → UTF-8 bytes of `s`, and back.
+fn bytesAtUnits(s: []const u8, units: usize) u32 {
+    var it = std.unicode.Utf8View.initUnchecked(s).iterator();
+    var u: usize = 0;
+    var b: usize = 0;
+    while (u < units) {
+        const cp = it.nextCodepointSlice() orelse break;
+        const c = std.unicode.utf8Decode(cp) catch 0;
+        u += if (c >= 0x10000) 2 else 1;
+        b += cp.len;
+    }
+    return @intCast(b);
+}
+
+fn unitsAtBytes(s: []const u8, bytes: usize) usize {
+    return utf16Len(s[0..@min(bytes, s.len)]);
+}
+
+fn isTextView(v: id) bool {
+    return objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) bool)(v, objc.sel("isKindOfClass:"), objc.class("UITextView"));
+}
+
+fn selectedUnits(v: id) ?NSRange {
+    if (isTextView(v)) return objc.msgSend(*const fn (id, objc.SEL) callconv(.c) NSRange)(v, objc.sel("selectedRange"));
+    const range = objc.send(v, "selectedTextRange");
+    if (range == null) return null;
+    const begin = objc.send(v, "beginningOfDocument");
+    const offset = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) isize);
+    const from = offset(v, objc.sel("offsetFromPosition:toPosition:"), begin, objc.send(range, "start"));
+    const to = offset(v, objc.sel("offsetFromPosition:toPosition:"), begin, objc.send(range, "end"));
+    return .{ .location = @intCast(@max(0, from)), .length = @intCast(@max(0, to - from)) };
+}
+
+pub fn selection(i: u32) ?zui.Selection {
+    const v = view(i);
+    const r = selectedUnits(v) orelse return null;
+    const s = fieldText(v);
+    return .{ .start = bytesAtUnits(s, r.location), .end = bytesAtUnits(s, r.location + r.length) };
+}
+
+pub fn select(i: u32, sel: zui.Selection) void {
+    const v = view(i);
+    focus(i);
+    const s = fieldText(v);
+    const from = unitsAtBytes(s, sel.start);
+    const to = unitsAtBytes(s, sel.end);
+    if (isTextView(v)) {
+        objc.msgSend(*const fn (id, objc.SEL, NSRange) callconv(.c) void)(v, objc.sel("setSelectedRange:"), .{ .location = from, .length = to -| from });
+        return;
+    }
+    const begin = objc.send(v, "beginningOfDocument");
+    const pos = objc.msgSend(*const fn (id, objc.SEL, id, isize) callconv(.c) id);
+    const a = pos(v, objc.sel("positionFromPosition:offset:"), begin, @intCast(from));
+    const b = pos(v, objc.sel("positionFromPosition:offset:"), begin, @intCast(to));
+    if (a == null or b == null) return;
+    const range = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) id)(v, objc.sel("textRangeFromPosition:toPosition:"), a, b);
+    objc.sendVoid1(v, "setSelectedTextRange:", range);
 }
 
 test transformMatrix {

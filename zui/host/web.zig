@@ -31,6 +31,8 @@ const js = struct {
     extern "zui" fn zui_speak(text: [*]const u8, text_len: usize, lang: [*]const u8, lang_len: usize) void;
     extern "zui" fn zui_set_link(ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_focus(id: u32) void;
+    extern "zui" fn zui_selection(id: u32, end: u32) i32;
+    extern "zui" fn zui_select(id: u32, start: u32, end: u32) void;
     extern "zui" fn zui_image_filter(id: u32, saturate: f32, contrast: f32, brightness: f32) void;
     extern "zui" fn zui_post(ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_copy(ptr: [*]const u8, len: usize) void;
@@ -172,6 +174,15 @@ pub fn imageFilter(id: u32, f: zui.ImageFilter) void {
 }
 pub fn focus(id: u32) void {
     js.zui_focus(id);
+}
+pub fn selection(id: u32) ?zui.Selection {
+    const s = js.zui_selection(id, 0);
+    const e = js.zui_selection(id, 1);
+    if (s < 0 or e < 0) return null;
+    return .{ .start = @intCast(s), .end = @intCast(e) };
+}
+pub fn select(id: u32, s: zui.Selection) void {
+    js.zui_select(id, s.start, s.end);
 }
 pub fn notify(n: zui.Notification) void {
     js.zui_notify(n.id, n.title.ptr, n.title.len, n.body.ptr, n.body.len, @intFromBool(n.urgent));
@@ -323,6 +334,9 @@ pub fn exportEntry(comptime App: type) void {
         fn textEvent(id: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
             R.textEvent(id, ptr[0..len]);
         }
+        fn selectEvent(id: u32, from: u32, to: u32) callconv(.c) void {
+            R.selectEvent(id, from, to);
+        }
         fn pointerEvent(id: u32, kind: u32, pid: u32, x: f32, y: f32, wheel: f32, time_ms: f64) callconv(.c) void {
             R.pointerEvent(id, .{ .kind = std.enums.fromInt(zui.Pointer.Kind, kind) orelse return, .id = pid, .x = x, .y = y, .wheel = wheel, .time_ms = @intFromFloat(time_ms) });
         }
@@ -447,6 +461,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.linkEvent, .{ .name = "zui_link_event" });
     @export(&Entry.deviceEvent, .{ .name = "zui_device_event" });
     @export(&Entry.keyEvent, .{ .name = "zui_key_event" });
+    @export(&Entry.selectEvent, .{ .name = "zui_select_event" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });
     @export(&Entry.free, .{ .name = "zui_free" });
     exportStyle(R);

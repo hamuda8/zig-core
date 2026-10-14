@@ -291,6 +291,15 @@ pub fn setLink(s: []const u8) void {
 pub fn focus(id: u32) void {
     focused = id;
 }
+/// The selection in each input (as the user or the app set it).
+pub var selections: std.AutoHashMapUnmanaged(u32, zui.Selection) = .empty;
+pub fn selection(id: u32) ?zui.Selection {
+    return selections.get(id) orelse .{ .start = 0, .end = 0 };
+}
+pub fn select(id: u32, s: zui.Selection) void {
+    focused = id;
+    selections.put(gpa, id, s) catch {};
+}
 /// Every message the app posted, one per line.
 pub fn post(json: []const u8) void {
     posted.appendSlice(gpa, json) catch {};
@@ -480,6 +489,7 @@ pub fn Driver(comptime App: type) type {
                 v.placeholder.deinit(gpa);
             }
             views.clearRetainingCapacity();
+            selections.clearRetainingCapacity();
             for (fetches.items) |f| {
                 gpa.free(f.url);
                 gpa.free(f.body);
@@ -714,6 +724,18 @@ pub fn Driver(comptime App: type) type {
         }
 
         /// Types `s` into the input whose placeholder is `placeholder`.
+        /// The user selects bytes [start, end) of the input with this placeholder.
+        pub fn selectIn(placeholder: []const u8, from: u32, to: u32) !void {
+            var it = views.iterator();
+            while (it.next()) |e| {
+                if ((e.value_ptr.kind == .input or e.value_ptr.kind == .text_area) and std.mem.eql(u8, e.value_ptr.placeholder.items, placeholder)) {
+                    selections.put(gpa, e.key_ptr.*, .{ .start = from, .end = to }) catch {};
+                    return R.selectEvent(e.key_ptr.*, from, to);
+                }
+            }
+            return error.NoSuchInput;
+        }
+
         pub fn typeInto(placeholder: []const u8, s: []const u8) !void {
             var it = views.iterator();
             while (it.next()) |e| {
@@ -1400,4 +1422,62 @@ test "webAuth: Wufour's sign-in in the app, the token from the callback, or canc
     try std.testing.expectError(error.NotTheCallback, D.finishWebAuth("https://elsewhere.example.com/?token=x"));
     try D.finishWebAuth("https://app.example.com/auth/callback?next=%2F&token=eyJ.abc.def");
     try std.testing.expectEqualStrings("eyJ.abc.def", D.R.appState().token[0..D.R.appState().token_len]);
+}
+
+const Formatting = struct {
+    pub const Msg = union(enum) { typed: []const u8, sel: zui.Selection, bold };
+    pub const State = struct { text: [64]u8 = undefined, len: usize = 0, sel: zui.Selection = .{ .start = 0, .end = 0 } };
+    pub fn init() State {
+        return .{};
+    }
+    fn onText(t: []const u8) Msg {
+        return .{ .typed = t };
+    }
+    fn onSel(s: zui.Selection) Msg {
+        return .{ .sel = s };
+    }
+    pub fn keyEvent(e: zui.KeyEvent) ?Msg {
+        return if (e.key == .letter and e.letter == 'b' and e.ctrl) .bold else null;
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .typed => |t| {
+                @memcpy(s.text[0..t.len], t);
+                s.len = t.len;
+            },
+            .sel => |x| s.sel = x,
+            .bold => {
+                // Wrap the selection in ** and keep it selected inside them.
+                const sel = fx.selection(zui.key("f")) orelse return;
+                var out: [64]u8 = undefined;
+                const t = s.text[0..s.len];
+                const r = std.fmt.bufPrint(&out, "{s}**{s}**{s}", .{ t[0..sel.start], t[sel.start..sel.end], t[sel.end..] }) catch return;
+                @memcpy(s.text[0..r.len], r);
+                s.len = r.len;
+                fx.selectText(zui.key("f"), .{ .start = sel.start + 2, .end = sel.end + 2 });
+            },
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{});
+        ui.input(.{ .key = zui.key("f"), .value = s.text[0..s.len], .placeholder = "Message", .on_change = onText, .on_select = onSel });
+        ui.end();
+    }
+};
+
+test "text selection and Ctrl+letter shortcuts: wrap the selection in ** and keep it selected" {
+    const D = Driver(Formatting);
+    D.start(300, 200);
+    defer D.reset();
+    try D.typeInto("Message", "make it bold");
+    try D.selectIn("Message", 8, 12);
+    try std.testing.expectEqual(@as(u32, 8), D.R.appState().sel.start);
+    try std.testing.expect(D.key(zui.KeyEvent.of('B', 2).?));
+    try std.testing.expectEqualStrings("make it **bold**", D.R.appState().text[0..D.R.appState().len]);
+    var it = selections.valueIterator();
+    const sel = it.next().?.*;
+    try std.testing.expectEqual(@as(u32, 10), sel.start);
+    try std.testing.expectEqual(@as(u32, 14), sel.end);
+    // A plain letter without Ctrl is not a key event.
+    try std.testing.expect(!D.key(.{ .key = .letter, .letter = 'b' }));
 }

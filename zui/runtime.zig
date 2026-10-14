@@ -71,16 +71,25 @@ pub const KeyEvent = struct {
     alt: bool = false,
     /// A text field has the keyboard.
     in_input: bool = false,
+    /// `.letter`: which ('a' to 'z'). Letters reach the app only with Ctrl or Command held
+    /// (shortcuts such as Ctrl+B); iOS offers Command with B, I, U, K and F, and Command+Shift with
+    /// X, M, P and F (the others stay the system's: copy, paste, undo...).
+    letter: u8 = 0,
 
-    pub const Key = enum(u8) { escape = 1, enter = 2, up = 3, down = 4, left = 5, right = 6, tab = 7 };
+    pub const Key = enum(u8) { escape = 1, enter = 2, up = 3, down = 4, left = 5, right = 6, tab = 7, letter = 8 };
 
     /// As hosts send it: the key's code, and modifiers as bits (shift 1, ctrl 2, alt 4, in a
     /// text field 8).
     pub fn of(code: u32, mods: u32) ?KeyEvent {
+        if (code >= 'A' and code <= 'Z') return .{ .key = .letter, .letter = @intCast(code + 32), .shift = mods & 1 != 0, .ctrl = mods & 2 != 0, .alt = mods & 4 != 0, .in_input = mods & 8 != 0 };
         const k = std.enums.fromInt(Key, @as(u8, @intCast(@min(code, 255)))) orelse return null;
         return .{ .key = k, .shift = mods & 1 != 0, .ctrl = mods & 2 != 0, .alt = mods & 4 != 0, .in_input = mods & 8 != 0 };
     }
 };
+
+/// Where the cursor is in a text field, or what is selected there: byte offsets into its text
+/// (start == end: just the cursor).
+pub const Selection = struct { start: u32, end: u32 };
 
 pub const Method = enum { GET, POST, PUT, PATCH, DELETE };
 
@@ -454,6 +463,8 @@ pub fn Fx(comptime Msg: type) type {
             set_link: *const fn ([]const u8) void,
             reduce_motion: *const fn (bool) void,
             focus: *const fn (u64) void,
+            selection: *const fn (u64) ?Selection,
+            select_text: *const fn (u64, Selection) void,
             scroll_to: *const fn (u64, ScrollTarget, bool) void,
             scan_barcode: *const fn (Scan, *const fn (ScanEvent) Msg) u32,
             stop_scan: *const fn (u32) void,
@@ -627,6 +638,18 @@ pub fn Fx(comptime Msg: type) type {
         /// Puts the cursor in the input with this key (after the next draw).
         pub fn focus(fx: Self, input_key: u64) void {
             fx.vt.focus(input_key);
+        }
+
+        /// The cursor or the selection in the text field with `input_key` now (null when it is not
+        /// on screen, or the platform cannot tell).
+        pub fn selection(fx: Self, input_key: u64) ?Selection {
+            return fx.vt.selection(input_key);
+        }
+
+        /// Puts the cursor (start == end) or a selection into the text field, which gets the
+        /// keyboard; after this update's text is on screen (so a changed text can be selected).
+        pub fn selectText(fx: Self, input_key: u64, s: Selection) void {
+            fx.vt.select_text(input_key, s);
         }
 
         /// A JSON message to the page that embeds this one (web: postMessage to the parent).
@@ -969,6 +992,8 @@ pub fn Ui(comptime Msg: type) type {
             /// The keyboard's enter / search key (not in a multi-line input, where enter is a
             /// new line).
             on_submit: ?Msg = null,
+            /// The cursor moved or the selection changed (a format bar over a selection).
+            on_select: ?*const fn (Selection) Msg = null,
             style: st.Style = .{},
             /// A password: the text is hidden.
             secure: bool = false,
@@ -1084,8 +1109,8 @@ pub fn Ui(comptime Msg: type) type {
                 .input_type = .{ .keyboard = o.keyboard, .return_key = o.return_key, .secure = o.secure and !o.multiline, .max_length = o.max_length },
             }) catch return ui.fail();
             if (o.on_change) |f| ui.changes.append(ui.arena(), .{ .node = i, .value = f }) catch ui.fail();
-            if (o.on_focus != null or o.on_blur != null or o.on_submit != null)
-                ui.inputs.append(ui.arena(), .{ .node = i, .value = .{ .focus = o.on_focus, .blur = o.on_blur, .submit = o.on_submit } }) catch ui.fail();
+            if (o.on_focus != null or o.on_blur != null or o.on_submit != null or o.on_select != null)
+                ui.inputs.append(ui.arena(), .{ .node = i, .value = .{ .focus = o.on_focus, .blur = o.on_blur, .submit = o.on_submit, .select = o.on_select } }) catch ui.fail();
         }
 
         /// A stream's moving picture (from `fx.openMedia` or a peer's `.track`), sized by `style`.
@@ -1234,7 +1259,7 @@ fn Binding(comptime T: type) type {
 }
 
 fn InputHandlers(comptime Msg: type) type {
-    return struct { focus: ?Msg, blur: ?Msg, submit: ?Msg };
+    return struct { focus: ?Msg, blur: ?Msg, submit: ?Msg, select: ?*const fn (Selection) Msg = null };
 }
 
 fn PointerHandler(comptime Msg: type) type {
@@ -1580,6 +1605,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .set_link = fxSetLink,
             .reduce_motion = fxReduceMotion,
             .focus = fxFocus,
+            .selection = fxSelection,
+            .select_text = fxSelectText,
             .scroll_to = fxScrollTo,
             .scan_barcode = fxScanBarcode,
             .stop_scan = fxStopScan,
@@ -2190,6 +2217,36 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             focus_key = k;
         }
 
+        var select_key: ?u64 = null;
+        var select_range: Selection = .{ .start = 0, .end = 0 };
+
+        fn fxSelectText(k: u64, s: Selection) void {
+            select_key = k;
+            select_range = s;
+        }
+
+        fn inputHost(k: u64) ?u32 {
+            if (!has_old) return null;
+            for (trees[current].nodes.items) |n| if (n.key == k and (n.kind == .input or n.kind == .text_area)) return n.host;
+            return null;
+        }
+
+        fn fxSelection(k: u64) ?Selection {
+            if (!@hasDecl(H, "selection")) return null;
+            const host = inputHost(k) orelse return null;
+            return H.selection(host);
+        }
+
+        /// The cursor moved or the selection changed in an input.
+        pub fn selectEvent(id: u32, from: u32, to: u32) void {
+            if (!started) return;
+            for (inputs) |b| {
+                if (b.node != id) continue;
+                if (b.value.select) |f| dispatch(f(.{ .start = @min(from, to), .end = @max(from, to) }));
+                return;
+            }
+        }
+
         /// `lang` is the system language ("ar", "en-US", ...); the app starts in it when it has a
         /// bundle for it, otherwise in English.
         pub fn start(allocator: std.mem.Allocator, e: Env, lang: []const u8) void {
@@ -2550,6 +2607,10 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             if (focus_key) |k| {
                 focus_key = null;
                 for (tree.nodes.items) |n| if (n.key == k and (n.kind == .input or n.kind == .text_area)) H.focus(n.host);
+            }
+            if (select_key) |k| {
+                select_key = null;
+                if (@hasDecl(H, "select")) for (tree.nodes.items) |n| if (n.key == k and (n.kind == .input or n.kind == .text_area)) H.select(n.host, select_range);
             }
             frame_msg = ui.frame_msg;
             if (frame_msg != null) H.requestFrame();
