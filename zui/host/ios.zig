@@ -1857,6 +1857,7 @@ extern "UIKit" fn UIGraphicsBeginImageContextWithOptions(size: objc.CGSize, is_o
 extern "UIKit" fn UIGraphicsGetImageFromCurrentImageContext() id;
 extern "UIKit" fn UIGraphicsEndImageContext() void;
 extern "UIKit" fn UIImageJPEGRepresentation(image: id, quality: CGFloat) id;
+extern "UIKit" fn UIImagePNGRepresentation(image: id) id;
 extern "Foundation" fn NSTemporaryDirectory() id;
 
 var photo_max: u32 = 1600;
@@ -1911,11 +1912,14 @@ fn photoPicked(_: id, _: objc.SEL, picker: id, info: id) callconv(.c) void {
     const k = @min(1.0, @as(CGFloat, @floatFromInt(photo_max)) / @max(size.w, size.h));
     const w = @max(1, @round(size.w * k));
     const h = @max(1, @round(size.h * k));
-    UIGraphicsBeginImageContextWithOptions(.{ .w = w, .h = h }, true, 1);
+    // Quality 0: PNG, with its transparency.
+    const png = photo_quality == 0;
+    UIGraphicsBeginImageContextWithOptions(.{ .w = w, .h = h }, !png, 1);
     objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(img, objc.sel("drawInRect:"), .{ .w = w, .h = h });
     const scaled = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     if (scaled == null) return;
+    if (png) return rt.file(dataBytes(UIImagePNGRepresentation(scaled)), "photo.png", "image/png", @intFromFloat(w), @intFromFloat(h));
     const jpeg = UIImageJPEGRepresentation(scaled, @as(CGFloat, @floatFromInt(photo_quality)) / 100);
     rt.file(dataBytes(jpeg), "photo.jpg", "image/jpeg", @intFromFloat(w), @intFromFloat(h));
 }

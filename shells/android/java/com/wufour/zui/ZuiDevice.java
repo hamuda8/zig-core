@@ -448,8 +448,11 @@ final class ZuiDevice {
         m.postRotate(rotate);
         android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
         java.io.ByteArrayOutputStream jpeg = new java.io.ByteArrayOutputStream();
-        out.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, jpeg);
-        fileDone(jpeg.toByteArray(), name, "image/jpeg", out.getWidth(), out.getHeight());
+        // Quality 0: PNG (transparency kept).
+        boolean png = quality == 0;
+        out.compress(png ? android.graphics.Bitmap.CompressFormat.PNG : android.graphics.Bitmap.CompressFormat.JPEG, png ? 100 : quality, jpeg);
+        if (png && name.endsWith(".jpg")) name = name.substring(0, name.length() - 4) + ".png";
+        fileDone(jpeg.toByteArray(), name, png ? "image/png" : "image/jpeg", out.getWidth(), out.getHeight());
     }
 
     /** Into Downloads (Android 10+: MediaStore, no permission; older: the app's own Downloads

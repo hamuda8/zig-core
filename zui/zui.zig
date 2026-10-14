@@ -98,6 +98,8 @@ pub const ScanEvent = runtime.ScanEvent;
 pub const ScrollTarget = runtime.ScrollTarget;
 pub const text = @import("text.zig");
 pub const barcode = @import("barcode.zig");
+/// PNG pictures: read, scale, place in a square (app icons), write.
+pub const png = @import("png.zig");
 pub const Path = tree.Path;
 pub const Ui = runtime.Ui;
 pub const key = runtime.key;
@@ -139,6 +141,7 @@ test {
     _ = color;
     _ = text;
     _ = barcode;
+    _ = png;
     if (platform == .headless) _ = @import("ui_test.zig");
     if (platform == .headless) _ = @import("push_test.zig");
     _ = i18n;

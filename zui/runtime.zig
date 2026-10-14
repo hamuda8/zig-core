@@ -314,7 +314,7 @@ pub const OptionPick = struct {
     selected: ?u32 = null,
 };
 
-/// A photo from the camera or the gallery (`fx.pickPhoto`), as JPEG.
+/// A photo from the camera or the gallery (`fx.pickPhoto`), as JPEG or PNG.
 pub const PhotoPick = struct {
     /// Take one with the camera (else choose one from the gallery). Where there is no camera
     /// (a desktop browser) the browser asks for a file.
@@ -323,6 +323,8 @@ pub const PhotoPick = struct {
     max_size: u32 = 1600,
     /// JPEG quality, 1 to 100.
     quality: u8 = 85,
+    /// PNG keeps transparency (a logo); JPEG is smaller (a photo).
+    format: enum { jpeg, png } = .jpeg,
 };
 
 pub const FilePick = struct {
@@ -1699,7 +1701,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
 
         fn fxPickPhoto(o: PhotoPick, done: *const fn (File) Msg) void {
             file_cb = done;
-            H.pickPhoto(o.camera, @max(16, o.max_size), @max(1, @min(100, o.quality)));
+            // Quality 0 asks the host for PNG.
+            H.pickPhoto(o.camera, @max(16, o.max_size), if (o.format == .png) 0 else @max(1, @min(100, o.quality)));
         }
 
         fn fxPickFile(o: FilePick, done: *const fn (File) Msg) void {

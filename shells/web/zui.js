@@ -141,7 +141,8 @@ export async function start(wasm, mount = document.body, options = {}) {
     g.imageSmoothingQuality = 'high';
     g.drawImage(bitmap, 0, 0, w, h);
     bitmap.close?.();
-    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', quality / 100));
+    // Quality 0: PNG (transparency kept).
+    const blob = await new Promise((r) => (quality === 0 ? canvas.toBlob(r, 'image/png') : canvas.toBlob(r, 'image/jpeg', quality / 100)));
     return { data: new Uint8Array(await blob.arrayBuffer()), w, h };
   };
 
@@ -518,8 +519,9 @@ export async function start(wasm, mount = document.body, options = {}) {
       zui_pick_photo(camera, max, quality) {
         chooseFile('image/*', !!camera, (f) => {
           toJpeg(f, max, quality).then(({ data, w, h }) => {
-            const name = (f.name || 'photo').replace(/\.[^.]*$/, '') + '.jpg';
-            fileDone(data, name, 'image/jpeg', w, h);
+            const png = quality === 0;
+            const name = (f.name || 'photo').replace(/\.[^.]*$/, '') + (png ? '.png' : '.jpg');
+            fileDone(data, name, png ? 'image/png' : 'image/jpeg', w, h);
           }, (e) => console.error('zui: photo', e));
         });
       },
