@@ -101,6 +101,7 @@ public final class ZuiActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
         if (ZuiDevice.permissionResult(code, results)) return;
+        if (ZuiScanner.permissionResult(code, results)) return;
         if (code == ZuiMedia.PERMISSION_REQUEST) {
             ZuiMedia.permissionResult(permissions, results);
             return;

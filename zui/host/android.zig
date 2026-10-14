@@ -592,6 +592,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.linkEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeLink" });
     @export(&Entry.deviceEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeDevice" });
     exportStyle(R);
+    exportScanner(R);
 }
 
 extern "log" fn __android_log_write(priority: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
@@ -779,6 +780,7 @@ pub fn sendSocket(id: u32, message: []const u8) void {
 }
 /// A video view shows a stream: the camera's preview, or a remote decoder's output.
 pub fn video(id: u32, v: zui.Video) void {
+    if (scannerShown(id, v.stream)) return;
     call(methods.video, &.{ int(id), int(v.stream), boolean(v.mirror), boolean(v.cover) });
 }
 
@@ -1078,3 +1080,84 @@ pub const KeyHw = struct {
         callDevice(device.key_delete, &.{object(ja)});
     }
 };
+
+// ---- Barcode scanners (ZuiScanner.java): Camera2 frames decoded by zui.barcode on the camera
+// thread ----
+
+var scanner_class: jni.jclass = null;
+var scanner_m: struct { open: jni.jmethodID, close: jni.jmethodID, attach: jni.jmethodID } = undefined;
+var scanner_ids: std.AutoHashMapUnmanaged(u32, void) = .empty;
+
+fn scannerBind() void {
+    if (scanner_class != null) return;
+    const f = env.functions;
+    const local = f.FindClass(env, "com/wufour/zui/ZuiScanner");
+    scanner_class = f.NewGlobalRef(env, local);
+    f.DeleteLocalRef(env, local);
+    scanner_m = .{
+        .open = f.GetStaticMethodID(env, scanner_class, "open", "(IIZ)V"),
+        .close = f.GetStaticMethodID(env, scanner_class, "close", "(I)V"),
+        .attach = f.GetStaticMethodID(env, scanner_class, "attach", "(II)V"),
+    };
+}
+
+fn callScanner(method: jni.jmethodID, args: []const jni.jvalue) void {
+    env.functions.CallStaticVoidMethodA(env, scanner_class, method, args.ptr);
+    check();
+}
+
+pub fn scanOpen(id: u32, formats: zui.barcode.Formats, back: bool) void {
+    scannerBind();
+    scanner_ids.put(zui.allocator, id, {}) catch {};
+    callScanner(scanner_m.open, &.{ int(id), int(@as(u8, @bitCast(formats))), boolean(back) });
+}
+
+pub fn scanClose(id: u32) void {
+    scannerBind();
+    _ = scanner_ids.remove(id);
+    callScanner(scanner_m.close, &.{int(id)});
+}
+
+/// A video view showing a scanner gets its camera picture.
+fn scannerShown(view_id: u32, stream: u32) bool {
+    if (!scanner_ids.contains(stream)) return false;
+    callScanner(scanner_m.attach, &.{ int(view_id), int(stream) });
+    return true;
+}
+
+fn exportScanner(comptime R: type) void {
+    const Entry = struct {
+        /// On the camera thread: only its own JNI environment, and zui.barcode, are used.
+        fn decode(e: *jni.Env, _: jni.jclass, y: jni.jobject, w: jni.jint, h: jni.jint, formats: jni.jint) callconv(.c) jni.jstring {
+            const f = e.functions;
+            const n: usize = @intCast(f.GetArrayLength(e, y));
+            const width: usize = @intCast(w);
+            const height: usize = @intCast(h);
+            if (n < width * height or width == 0) return null;
+            const px = zui.allocator.alloc(u8, n) catch return null;
+            defer zui.allocator.free(px);
+            f.GetByteArrayRegion(e, y, 0, @intCast(n), px.ptr);
+            const r = (zui.barcode.decode(zui.allocator, .{ .width = width, .height = height, .pixels = px }, @bitCast(@as(u8, @truncate(@as(u32, @bitCast(formats)))))) catch return null) orelse return null;
+            defer zui.allocator.free(r.text);
+            const out = std.fmt.allocPrintSentinel(zui.allocator, "{d}\t{s}", .{ @intFromEnum(r.format), r.text }, 0) catch return null;
+            defer zui.allocator.free(out);
+            return f.NewStringUTF(e, out.ptr);
+        }
+        fn scan(e: *jni.Env, _: jni.jclass, id: jni.jint, kind: jni.jint, format: jni.jint, jtext: jni.jstring) callconv(.c) void {
+            bind(e);
+            const sid: u32 = @bitCast(id);
+            const k = std.enums.fromInt(zui.ScanEvent.Kind, @as(u8, @intCast(kind))) orelse return;
+            const f = e.functions;
+            const units: usize = if (jtext != null) @intCast(f.GetStringLength(e, jtext)) else 0;
+            const buf = zui.allocator.alloc(u8, units * 3 + 1) catch return;
+            defer zui.allocator.free(buf);
+            const t = if (jtext != null) javaStringLong(jtext, buf) else "";
+            if (k == .failed) _ = scanner_ids.remove(sid);
+            if (k == .found) {
+                R.scanFound(sid, std.enums.fromInt(zui.barcode.Format, @as(u8, @intCast(format))) orelse return, t);
+            } else R.scanState(sid, k, t);
+        }
+    };
+    @export(&Entry.decode, .{ .name = "Java_com_wufour_zui_ZuiScanner_nativeDecode" });
+    @export(&Entry.scan, .{ .name = "Java_com_wufour_zui_ZuiScanner_nativeScan" });
+}

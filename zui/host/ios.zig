@@ -30,6 +30,7 @@ var calls_enabled = false;
 
 /// A video view shows a stream: the camera preview, or a remote picture.
 pub fn video(i: u32, v: zui.Video) void {
+    if (scannerVideo(i, v.stream)) return;
     if (Messages.bindView(i, view(i), v)) return;
     if (calls_enabled) Media.bindView(i, view(i), v);
 }
@@ -2190,6 +2191,7 @@ fn styleInit(comptime R: type) void {
         }
     };
     style_rt = .{ .span = Cb.span, .scroll = Cb.scroll };
+    scanInit(R);
     objc.defineClass("ZuiLabel", "UILabel", &.{}, &.{
         .{ "touchesBegan:withEvent:", @ptrCast(&labelBegan), "v@:@@" },
         .{ "touchesEnded:withEvent:", @ptrCast(&labelEnded), "v@:@@" },
@@ -2459,6 +2461,10 @@ fn alphaWork() void {
 }
 
 fn styleFrame(i: u32, r: zui.Rect) bool {
+    if (scan.view == i) {
+        frames.items[i] = r;
+        scanPreviewFrame(i);
+    }
     defer if (decors.contains(i)) applyDecor(i, r);
     const tr = transitions.get(i) orelse return false;
     if (i >= frames.items.len or frames.items[i].w <= 0 and frames.items[i].h <= 0) return false;
@@ -2784,4 +2790,199 @@ fn decorText(v: id, e: DecorEntry, r: zui.Rect) void {
     } else {
         objc.msgSend(*const fn (id, objc.SEL, f32) callconv(.c) void)(layer, objc.sel("setShadowOpacity:"), 0);
     }
+}
+
+// ---- Barcode scanners: AVCaptureSession into an AVCaptureVideoDataOutput, five frames a second
+// turned upright and decoded by zui.barcode on the capture queue; an AVCaptureVideoPreviewLayer
+// in the ui.video that shows the scanner ----
+
+extern "AVFoundation" var AVMediaTypeVideo: id;
+extern "AVFoundation" var AVCaptureSessionPreset1280x720: id;
+extern "AVFoundation" var AVLayerVideoGravityResizeAspectFill: id;
+extern "CoreVideo" var kCVPixelBufferPixelFormatTypeKey: id;
+extern "CoreMedia" fn CMSampleBufferGetImageBuffer(buffer: ?*anyopaque) ?*anyopaque;
+extern "CoreVideo" fn CVPixelBufferLockBaseAddress(pb: ?*anyopaque, flags: u64) i32;
+extern "CoreVideo" fn CVPixelBufferUnlockBaseAddress(pb: ?*anyopaque, flags: u64) i32;
+extern "CoreVideo" fn CVPixelBufferGetBaseAddressOfPlane(pb: ?*anyopaque, plane: usize) ?[*]const u8;
+extern "CoreVideo" fn CVPixelBufferGetWidthOfPlane(pb: ?*anyopaque, plane: usize) usize;
+extern "CoreVideo" fn CVPixelBufferGetHeightOfPlane(pb: ?*anyopaque, plane: usize) usize;
+extern "CoreVideo" fn CVPixelBufferGetBytesPerRowOfPlane(pb: ?*anyopaque, plane: usize) usize;
+extern "c" fn dispatch_queue_create(label: [*:0]const u8, attr: ?*anyopaque) Queue;
+
+var scan_rt: struct {
+    found: *const fn (u32, zui.barcode.Format, []const u8) void,
+    state: *const fn (u32, zui.ScanEvent.Kind, []const u8) void,
+} = undefined;
+
+fn scanInit(comptime R: type) void {
+    const Cb = struct {
+        fn found(i: u32, f: zui.barcode.Format, t: []const u8) void {
+            R.scanFound(i, f, t);
+        }
+        fn state(i: u32, k: zui.ScanEvent.Kind, t: []const u8) void {
+            R.scanState(i, k, t);
+        }
+    };
+    scan_rt = .{ .found = Cb.found, .state = Cb.state };
+    objc.defineClass("ZuiScanDelegate", "NSObject", &.{"AVCaptureVideoDataOutputSampleBufferDelegate"}, &.{
+        .{ "captureOutput:didOutputSampleBuffer:fromConnection:", @ptrCast(&scanFrame), "v@:@^v@" },
+    });
+}
+
+/// One scanner at a time (a new one replaces the last).
+var scan: struct {
+    id: u32 = 0,
+    formats: zui.barcode.Formats = .{},
+    back: bool = true,
+    session: id = null,
+    delegate: id = null,
+    queue: Queue = null,
+    preview: id = null,
+    view: u32 = 0,
+    /// Read on the capture queue.
+    last_ms: std.atomic.Value(i64) = .init(0),
+} = .{};
+
+const ScanResult = struct { id: u32, kind: zui.ScanEvent.Kind, format: zui.barcode.Format = .qr, text: []u8 = &.{} };
+
+fn scanDeliver(ctx: ?*anyopaque) callconv(.c) void {
+    const r: *ScanResult = @ptrCast(@alignCast(ctx));
+    defer {
+        zui.allocator.free(r.text);
+        zui.allocator.destroy(r);
+    }
+    if (r.id != scan.id) return;
+    if (r.kind == .found) scan_rt.found(r.id, r.format, r.text) else scan_rt.state(r.id, r.kind, r.text);
+    if (r.kind == .failed) scanStop();
+}
+
+fn scanPost(i: u32, kind: zui.ScanEvent.Kind, format: zui.barcode.Format, what: []const u8) void {
+    const r = zui.allocator.create(ScanResult) catch return;
+    r.* = .{ .id = i, .kind = kind, .format = format, .text = zui.allocator.dupe(u8, what) catch &.{} };
+    dispatch_async_f(@ptrCast(&_dispatch_main_q), r, scanDeliver);
+}
+
+const AccessBlock = extern struct { header: objc.BlockHeader };
+const access_descriptor: objc.BlockDescriptor = .{ .size = @sizeOf(AccessBlock) };
+fn accessAnswered(_: *const AccessBlock, granted: bool) callconv(.c) void {
+    // On some queue: back to the main one.
+    dispatch_async_f(@ptrCast(&_dispatch_main_q), @ptrFromInt(@as(usize, @intFromBool(granted)) + 1), accessOnMain);
+}
+fn accessOnMain(ctx: ?*anyopaque) callconv(.c) void {
+    if (scan.id == 0) return;
+    if (@intFromPtr(ctx) == 2) scanStart() else scanPost(scan.id, .failed, .qr, "denied");
+}
+const access_block: AccessBlock = .{ .header = .{ .isa = &objc._NSConcreteGlobalBlock, .invoke = @ptrCast(&accessAnswered), .descriptor = &access_descriptor } };
+
+pub fn scanOpen(i: u32, formats: zui.barcode.Formats, back: bool) void {
+    if (scan.id != 0) scanStop();
+    scan.id = i;
+    scan.formats = formats;
+    scan.back = back;
+    // AVAuthorizationStatus: 0 not determined, 1 restricted, 2 denied, 3 authorized.
+    const status = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) isize)(objc.class("AVCaptureDevice"), objc.sel("authorizationStatusForMediaType:"), AVMediaTypeVideo);
+    switch (status) {
+        3 => scanStart(),
+        0 => objc.msgSend(*const fn (id, objc.SEL, id, *const AccessBlock) callconv(.c) void)(objc.class("AVCaptureDevice"), objc.sel("requestAccessForMediaType:completionHandler:"), AVMediaTypeVideo, &access_block),
+        else => scanPost(i, .failed, .qr, "denied"),
+    }
+}
+
+fn scanStart() void {
+    const i = scan.id;
+    // AVCaptureDevicePosition: 1 back, 2 front.
+    const device = objc.msgSend(*const fn (id, objc.SEL, id, id, isize) callconv(.c) id)(objc.class("AVCaptureDevice"), objc.sel("defaultDeviceWithDeviceType:mediaType:position:"), objc.nsString("AVCaptureDeviceTypeBuiltInWideAngleCamera"), AVMediaTypeVideo, if (scan.back) 1 else 2);
+    if (device == null) return scanPost(i, .failed, .qr, "unavailable");
+    const device_input = objc.msgSend(*const fn (id, objc.SEL, id, ?*id) callconv(.c) id)(objc.class("AVCaptureDeviceInput"), objc.sel("deviceInputWithDevice:error:"), device, null);
+    if (device_input == null) return scanPost(i, .failed, .qr, "unavailable");
+    const session = objc.new("AVCaptureSession");
+    const can = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) bool);
+    if (can(session, objc.sel("canSetSessionPreset:"), AVCaptureSessionPreset1280x720)) objc.sendVoid1(session, "setSessionPreset:", AVCaptureSessionPreset1280x720);
+    if (!can(session, objc.sel("canAddInput:"), device_input)) return scanPost(i, .failed, .qr, "unavailable");
+    objc.sendVoid1(session, "addInput:", device_input);
+    const output = objc.new("AVCaptureVideoDataOutput");
+    defer objc.release(output);
+    // Full-range 4:2:0, luminance first: '420f'.
+    const format = objc.msgSend(*const fn (id, objc.SEL, u32) callconv(.c) id)(objc.class("NSNumber"), objc.sel("numberWithUnsignedInt:"), 0x34323066);
+    var keys = [_]id{kCVPixelBufferPixelFormatTypeKey};
+    var values = [_]id{format};
+    objc.sendVoid1(output, "setVideoSettings:", nsDict(&keys, &values));
+    objc.sendVoidBool(output, "setAlwaysDiscardsLateVideoFrames:", true);
+    if (scan.delegate == null) scan.delegate = objc.new("ZuiScanDelegate");
+    if (scan.queue == null) scan.queue = dispatch_queue_create("zui.scanner", null);
+    objc.msgSend(*const fn (id, objc.SEL, id, Queue) callconv(.c) void)(output, objc.sel("setSampleBufferDelegate:queue:"), scan.delegate, scan.queue);
+    if (!can(session, objc.sel("canAddOutput:"), output)) return scanPost(i, .failed, .qr, "unavailable");
+    objc.sendVoid1(session, "addOutput:", output);
+    scan.session = session;
+    objc.sendVoid(session, "startRunning");
+    if (scan.view != 0) scanPreview(scan.view);
+    scanPost(i, .started, .qr, "");
+}
+
+fn scanStop() void {
+    if (scan.session != null) {
+        objc.sendVoid(scan.session, "stopRunning");
+        objc.release(scan.session);
+        scan.session = null;
+    }
+    if (scan.preview != null) {
+        objc.sendVoid(scan.preview, "removeFromSuperlayer");
+        objc.release(scan.preview);
+        scan.preview = null;
+    }
+    scan.id = 0;
+    scan.view = 0;
+}
+
+pub fn scanClose(i: u32) void {
+    if (scan.id == i) scanStop();
+}
+
+/// A video view showing the scanner gets the camera's preview layer.
+fn scannerVideo(i: u32, stream: u32) bool {
+    if (stream == 0 or stream != scan.id) return false;
+    scan.view = i;
+    if (scan.session != null) scanPreview(i);
+    return true;
+}
+
+fn scanPreview(i: u32) void {
+    if (scan.preview == null) {
+        scan.preview = objc.send(objc.send1(objc.class("AVCaptureVideoPreviewLayer"), "layerWithSession:", scan.session), "retain");
+        objc.sendVoid1(scan.preview, "setVideoGravity:", AVLayerVideoGravityResizeAspectFill);
+    }
+    objc.sendVoid1(objc.send(view(i), "layer"), "addSublayer:", scan.preview);
+    scanPreviewFrame(i);
+}
+
+fn scanPreviewFrame(i: u32) void {
+    if (scan.preview == null or scan.view != i or i >= frames.items.len) return;
+    const r = frames.items[i];
+    objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(scan.preview, objc.sel("setFrame:"), .{ .w = r.w, .h = r.h });
+}
+
+/// On the capture queue: every 200 ms, the luminance turned upright (the sensor lies on its side
+/// in a phone held upright) and decoded.
+fn scanFrame(_: id, _: objc.SEL, _: id, sample: ?*anyopaque, _: id) callconv(.c) void {
+    const now_ms = clock.now();
+    if (now_ms - scan.last_ms.load(.monotonic) < 200) return;
+    scan.last_ms.store(now_ms, .monotonic);
+    const i = scan.id;
+    const formats = scan.formats;
+    const pb = CMSampleBufferGetImageBuffer(sample) orelse return;
+    if (CVPixelBufferLockBaseAddress(pb, 1) != 0) return;
+    defer _ = CVPixelBufferUnlockBaseAddress(pb, 1);
+    const base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) orelse return;
+    const sw = CVPixelBufferGetWidthOfPlane(pb, 0);
+    const sh = CVPixelBufferGetHeightOfPlane(pb, 0);
+    const stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+    const px = zui.allocator.alloc(u8, sw * sh) catch return;
+    defer zui.allocator.free(px);
+    // Turned a quarter clockwise: the picture as the preview shows it.
+    for (0..sh) |y| for (0..sw) |x| {
+        px[x * sh + (sh - 1 - y)] = base[y * stride + x];
+    };
+    const r = (zui.barcode.decode(zui.allocator, .{ .width = sh, .height = sw, .pixels = px }, formats) catch return) orelse return;
+    defer zui.allocator.free(r.text);
+    scanPost(i, .found, r.format, r.text);
 }
