@@ -68,6 +68,16 @@ pub fn scrollTo(id: u32, offset: f32, animated: bool) void {
     v.scrolled_to = offset;
     v.scroll_animated = animated;
 }
+/// Barcode scanners the app opened, and whether they look with the back camera.
+pub var scan_open: u32 = 0;
+pub var scan_back = false;
+pub fn scanOpen(id: u32, _: zui.barcode.Formats, back: bool) void {
+    scan_open = id;
+    scan_back = back;
+}
+pub fn scanClose(id: u32) void {
+    if (scan_open == id) scan_open = 0;
+}
 pub var haptics: u32 = 0;
 pub fn haptic() void {
     haptics += 1;
@@ -431,6 +441,7 @@ pub fn Driver(comptime App: type) type {
             file_accept = null;
             stream_conn = 0;
             haptics = 0;
+            scan_open = 0;
         }
 
         /// Back (Android's button, the iOS swipe). Returns whether the app took it.
@@ -603,6 +614,14 @@ pub fn Driver(comptime App: type) type {
             var it = views.iterator();
             while (it.next()) |e| if (e.value_ptr.kind == .scroll or e.value_ptr.kind == .scroll_x) return e.key_ptr.*;
             return 0;
+        }
+
+        /// The open scanner's camera starts, and sees `img`.
+        pub fn scanStarted() void {
+            R.scanState(scan_open, .started, "");
+        }
+        pub fn scanFrame(img: zui.barcode.Image) void {
+            R.scanFrame(scan_open, img);
         }
 
         /// The user scrolled view `id` to `offset`.

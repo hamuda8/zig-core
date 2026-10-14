@@ -22,6 +22,7 @@ const i18n = @import("i18n.zig");
 const Color = @import("color.zig").Color;
 const icon_mod = @import("icon.zig");
 const text_mod = @import("text.zig");
+const barcode = @import("barcode.zig");
 const calls = @import("calls.zig");
 const sse = @import("sse.zig");
 const keys = @import("keys.zig");
@@ -357,6 +358,8 @@ pub fn Fx(comptime Msg: type) type {
             set_link: *const fn ([]const u8) void,
             focus: *const fn (u64) void,
             scroll_to: *const fn (u64, ScrollTarget, bool) void,
+            scan_barcode: *const fn (Scan, *const fn (ScanEvent) Msg) u32,
+            stop_scan: *const fn (u32) void,
             post: *const fn ([]const u8) void,
             open_socket: *const fn ([]const u8, *const fn (SocketEvent) Msg) u32,
             send_socket: *const fn (u32, []const u8) void,
@@ -497,6 +500,17 @@ pub fn Fx(comptime Msg: type) type {
         /// Keeps the screen on while `on` (a courier's navigation, a scanner).
         pub fn keepAwake(fx: Self, on: bool) void {
             fx.vt.keep_awake(on);
+        }
+
+        /// Looks for barcodes with the camera (Code 128, QR): `.started` once it runs, `.found` with
+        /// each code read (the same code again only after 1.5 s), `.failed` (denied, no camera,
+        /// unsupported). `ui.video(id, ...)` shows what the camera sees. Returns its id.
+        pub fn scanBarcode(fx: Self, o: Scan, on: *const fn (ScanEvent) Msg) u32 {
+            return fx.vt.scan_barcode(o, on);
+        }
+
+        pub fn stopScan(fx: Self, scanner: u32) void {
+            fx.vt.stop_scan(scanner);
         }
 
         /// Scrolls the scroll view with key `scroll_key` (`beginScrollWith`) to `target`, after the
@@ -677,6 +691,24 @@ pub const ScrollEvent = struct {
 };
 
 /// Where `fx.scrollTo` goes.
+/// What `fx.scanBarcode` looks for.
+pub const Scan = struct {
+    formats: barcode.Formats = .{},
+    back_camera: bool = true,
+};
+
+/// What a barcode scanner saw. `text` and `data` are only valid during `update`.
+pub const ScanEvent = struct {
+    kind: Kind,
+    scanner: u32,
+    format: barcode.Format = .qr,
+    text: []const u8 = "",
+    /// `.failed`: "denied", "unavailable" or "unsupported".
+    data: []const u8 = "",
+
+    pub const Kind = enum(u8) { started = 1, found = 2, failed = 3 };
+};
+
 pub const ScrollTarget = union(enum) {
     start,
     end,
@@ -1155,6 +1187,73 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         var scroll_handlers: []const Binding(*const fn (ScrollEvent) Msg) = &.{};
         var scroll_requests: std.ArrayList(struct { key: u64, target: ScrollTarget, animated: bool }) = .empty;
 
+        // ---- Barcode scanners: the host runs the camera and hands over frames (decoded here
+        // with zui.barcode) or codes it read itself ----
+        const Scanner = struct {
+            on: *const fn (ScanEvent) Msg,
+            formats: barcode.Formats,
+            last: [256]u8 = undefined,
+            last_len: usize = 0,
+            last_ms: i64 = 0,
+        };
+        var scanners: std.AutoHashMapUnmanaged(u32, Scanner) = .empty;
+
+        fn fxScanBarcode(o: Scan, on: *const fn (ScanEvent) Msg) u32 {
+            const id = newId();
+            if (!@hasDecl(H, "scanOpen")) {
+                fxAfter(0, on(.{ .kind = .failed, .scanner = id, .data = "unsupported" }));
+                return id;
+            }
+            scanners.put(gpa, id, .{ .on = on, .formats = o.formats }) catch return 0;
+            H.scanOpen(id, o.formats, o.back_camera);
+            return id;
+        }
+
+        fn fxStopScan(id: u32) void {
+            if (scanners.remove(id) and @hasDecl(H, "scanClose")) H.scanClose(id);
+        }
+
+        /// Whether `id` is a scanner (hosts show its camera in `ui.video`).
+        pub fn isScanner(id: u32) bool {
+            return scanners.contains(id);
+        }
+
+        /// The formats scanner `id` looks for.
+        pub fn scanFormats(id: u32) barcode.Formats {
+            return if (scanners.get(id)) |s| s.formats else .{};
+        }
+
+        /// A camera frame (its luminance) for scanner `id`, decoded here.
+        pub fn scanFrame(id: u32, img: barcode.Image) void {
+            const s = scanners.get(id) orelse return;
+            const r = (barcode.decode(gpa, img, s.formats) catch return) orelse return;
+            defer gpa.free(r.text);
+            scanFound(id, r.format, r.text);
+        }
+
+        /// A code the host read itself (or `scanFrame` found).
+        pub fn scanFound(id: u32, format: barcode.Format, text: []const u8) void {
+            const s = scanners.getPtr(id) orelse return;
+            if (!started) return;
+            const now_ms = H.now();
+            // The same code held in front of the camera is one scan.
+            if (std.mem.eql(u8, s.last[0..s.last_len], text) and now_ms - s.last_ms < 1500) {
+                s.last_ms = now_ms;
+                return;
+            }
+            s.last_len = @min(text.len, s.last.len);
+            @memcpy(s.last[0..s.last_len], text[0..s.last_len]);
+            s.last_ms = now_ms;
+            dispatch(s.on(.{ .kind = .found, .scanner = id, .format = format, .text = text }));
+        }
+
+        /// The camera runs (`.started`), or could not (`.failed`, with why).
+        pub fn scanState(id: u32, kind: ScanEvent.Kind, why: []const u8) void {
+            const s = scanners.get(id) orelse return;
+            if (kind == .failed) _ = scanners.remove(id);
+            if (started) dispatch(s.on(.{ .kind = kind, .scanner = id, .data = why }));
+        }
+
         fn fxScrollTo(k: u64, target: ScrollTarget, animated: bool) void {
             scroll_requests.append(gpa, .{ .key = k, .target = target, .animated = animated }) catch {};
             // Done after the next draw; ask for one if nothing else will.
@@ -1326,6 +1425,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .set_link = fxSetLink,
             .focus = fxFocus,
             .scroll_to = fxScrollTo,
+            .scan_barcode = fxScanBarcode,
+            .stop_scan = fxStopScan,
             .post = fxPost,
             .open_socket = fxOpenSocket,
             .send_socket = fxSendSocket,

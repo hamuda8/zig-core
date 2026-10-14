@@ -212,3 +212,75 @@ test "scroll views: start at the end, keep their place, report, scroll to" {
     D.R.dispatch(.{ .go = .{ .child = zui.key(@as(u64, @bitCast(@as(i64, -2)))) } });
     try testing.expectEqual(@as(?f32, 30), headless.views.get(list).?.scrolled_to);
 }
+
+const ScanApp = struct {
+    pub const Msg = union(enum) { start, stop, scan: zui.ScanEvent };
+    pub const State = struct {
+        scanner: u32 = 0,
+        running: bool = false,
+        found: [64]u8 = undefined,
+        found_len: usize = 0,
+        format: ?zui.barcode.Format = null,
+        count: u32 = 0,
+    };
+    pub fn init() State {
+        return .{};
+    }
+    fn onScan(e: zui.ScanEvent) Msg {
+        return .{ .scan = e };
+    }
+    pub fn update(s: *State, m: Msg, _: zui.Env, fx: zui.Fx(Msg)) void {
+        switch (m) {
+            .start => s.scanner = fx.scanBarcode(.{}, onScan),
+            .stop => fx.stopScan(s.scanner),
+            .scan => |e| switch (e.kind) {
+                .started => s.running = true,
+                .found => {
+                    s.found_len = @min(e.text.len, s.found.len);
+                    @memcpy(s.found[0..s.found_len], e.text[0..s.found_len]);
+                    s.format = e.format;
+                    s.count += 1;
+                },
+                .failed => s.running = false,
+            },
+        }
+    }
+    pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{});
+        if (s.scanner != 0) ui.video(s.scanner, .{}, .{ .width = .{ .px = 200 }, .height = .{ .px = 200 } }, 0);
+        ui.end();
+    }
+};
+
+test "a barcode scanner: the camera starts, a frame with a QR code is read once" {
+    const S = headless.Driver(ScanApp);
+    S.start(300, 400);
+    defer S.reset();
+    S.R.dispatch(.start);
+    try testing.expect(headless.scan_open != 0);
+    try testing.expect(headless.scan_back);
+    S.scanStarted();
+    try testing.expect(S.R.appState().running);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const q = try zui.barcode.encodeQr(a, "TRF-2026-00417", .M, 1, 2);
+    const scale = 4;
+    const side = (q.size + 8) * scale;
+    const px = try a.alloc(u8, side * side);
+    for (0..side) |y| for (0..side) |x| {
+        const mx = @as(i64, @intCast(x / scale)) - 4;
+        const my = @as(i64, @intCast(y / scale)) - 4;
+        const dark = mx >= 0 and my >= 0 and mx < q.size and my < q.size and q.modules[@as(usize, @intCast(my)) * q.size + @as(usize, @intCast(mx))];
+        px[y * side + x] = if (dark) 30 else 220;
+    };
+    const img: zui.barcode.Image = .{ .width = side, .height = side, .pixels = px };
+    S.scanFrame(img);
+    S.scanFrame(img); // the same code again at once: not news
+    try testing.expectEqualStrings("TRF-2026-00417", S.R.appState().found[0..S.R.appState().found_len]);
+    try testing.expectEqual(@as(?zui.barcode.Format, .qr), S.R.appState().format);
+    try testing.expectEqual(@as(u32, 1), S.R.appState().count);
+    S.R.dispatch(.stop);
+    try testing.expectEqual(@as(u32, 0), headless.scan_open);
+}
