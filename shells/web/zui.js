@@ -667,9 +667,9 @@ export async function start(wasm, mount = document.body, options = {}) {
           init.headers['content-type'] = str(cptr, clen);
         }
         fetch(url, init)
-          .then(async (res) => ({ status: res.status, body: new Uint8Array(await res.arrayBuffer()) }))
-          .catch(() => ({ status: 0, body: new Uint8Array(0) }))
-          .then(({ status, body }) => withBytes(body, (p, n) => ex.zui_fetch_done(id, status, p, n)));
+          .then(async (res) => ({ status: res.status, body: new Uint8Array(await res.arrayBuffer()), headers: [...res.headers].map(([k, v]) => `${k}: ${v}\n`).join('') }))
+          .catch(() => ({ status: 0, body: new Uint8Array(0), headers: '' }))
+          .then(({ status, body, headers }) => withBytes(body, (p, n) => withBytes(encoder.encode(headers), (hp, hn) => ex.zui_fetch_done_headers(id, status, p, n, hp, hn))));
       },
       zui_storage_get(kptr, klen, outLen) {
         let v = null;

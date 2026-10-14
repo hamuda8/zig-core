@@ -102,9 +102,22 @@ pub const Response = struct {
     status: u16,
     body: []const u8,
     tag: u32 = 0,
+    /// The response's headers, one "name: value\n" line each, names in lower case (the web;
+    /// the phones give "" for now).
+    headers: []const u8 = "",
 
     pub fn ok(r: Response) bool {
         return r.status >= 200 and r.status < 300;
+    }
+
+    /// A header's value (the name in any case), or null.
+    pub fn header(r: Response, name: []const u8) ?[]const u8 {
+        var it = std.mem.splitScalar(u8, r.headers, '\n');
+        while (it.next()) |line| {
+            const at = std.mem.indexOf(u8, line, ": ") orelse continue;
+            if (std.ascii.eqlIgnoreCase(line[0..at], name)) return line[at + 2 ..];
+        }
+        return null;
     }
 };
 
@@ -2273,8 +2286,13 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
 
         /// A request finished (status 0: no connection). `body` is only read during this call.
         pub fn fetchDone(id: u32, status: u16, body: []const u8) void {
+            fetchDoneWithHeaders(id, status, body, "");
+        }
+
+        /// As `fetchDone`, with the response's headers ("name: value\n" lines).
+        pub fn fetchDoneWithHeaders(id: u32, status: u16, body: []const u8, headers: []const u8) void {
             const f = (fetches.fetchRemove(id) orelse return).value;
-            if (started) dispatch(f.done(.{ .status = status, .body = body, .tag = f.tag }));
+            if (started) dispatch(f.done(.{ .status = status, .body = body, .tag = f.tag, .headers = headers }));
         }
 
         pub fn timerDone(id: u32) void {
@@ -2455,4 +2473,10 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             has_old = true;
         }
     };
+}
+
+test "a response's headers" {
+    const r: Response = .{ .status = 200, .body = "", .headers = "content-type: application/json\nx-turf-offline: 1\n" };
+    try std.testing.expectEqualStrings("1", r.header("X-Turf-Offline").?);
+    try std.testing.expect(r.header("etag") == null);
 }

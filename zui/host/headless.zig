@@ -490,6 +490,11 @@ pub fn Driver(comptime App: type) type {
 
         /// Answers the oldest pending request whose URL contains `part`. Returns false if none.
         pub fn respond(part: []const u8, status: u16, body: []const u8) bool {
+            return respondWithHeaders(part, status, body, "");
+        }
+
+        /// As `respond`, with response headers ("name: value\n" lines).
+        pub fn respondWithHeaders(part: []const u8, status: u16, body: []const u8, headers: []const u8) bool {
             for (fetches.items, 0..) |f, i| {
                 if (std.mem.indexOf(u8, f.url, part) == null) continue;
                 const done = fetches.orderedRemove(i);
@@ -497,7 +502,7 @@ pub fn Driver(comptime App: type) type {
                     gpa.free(done.url);
                     gpa.free(done.body);
                 }
-                R.fetchDone(done.id, status, body);
+                R.fetchDoneWithHeaders(done.id, status, body, headers);
                 return true;
             }
             return false;

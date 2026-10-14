@@ -319,6 +319,9 @@ pub fn exportEntry(comptime App: type) void {
         fn fetchDone(id: u32, status: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
             R.fetchDone(id, @intCast(@min(status, 999)), ptr[0..len]);
         }
+        fn fetchDoneHeaders(id: u32, status: u32, ptr: [*]const u8, len: usize, hptr: [*]const u8, hlen: usize) callconv(.c) void {
+            R.fetchDoneWithHeaders(id, @intCast(@min(status, 999)), ptr[0..len], hptr[0..hlen]);
+        }
         fn timerDone(id: u32) callconv(.c) void {
             R.timerDone(id);
         }
@@ -408,6 +411,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.pointerEvent, .{ .name = "zui_pointer" });
     @export(&Entry.frame, .{ .name = "zui_frame" });
     @export(&Entry.fetchDone, .{ .name = "zui_fetch_done" });
+    @export(&Entry.fetchDoneHeaders, .{ .name = "zui_fetch_done_headers" });
     @export(&Entry.timerDone, .{ .name = "zui_timer_done" });
     @export(&Entry.locationFix, .{ .name = "zui_location_fix" });
     @export(&Entry.locationError, .{ .name = "zui_location_error" });
