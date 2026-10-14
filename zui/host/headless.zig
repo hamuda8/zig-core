@@ -187,6 +187,18 @@ pub fn pick(kind: zui.PickKind, value: []const u8, _: []const u8, _: []const u8,
     picker_options.appendSlice(gpa, options) catch {};
     picker_selected = selected;
 }
+/// The in-app sign-in page the app opened (fx.webAuth), if it is still open: its address and
+/// callback prefix. A test ends it with `Driver.finishWebAuth`.
+pub var web_auth_open = false;
+pub var web_auth_url: std.ArrayList(u8) = .empty;
+pub var web_auth_prefix: std.ArrayList(u8) = .empty;
+pub fn webAuth(url: []const u8, callback_prefix: []const u8) void {
+    web_auth_open = true;
+    web_auth_url.clearRetainingCapacity();
+    web_auth_url.appendSlice(gpa, url) catch {};
+    web_auth_prefix.clearRetainingCapacity();
+    web_auth_prefix.appendSlice(gpa, callback_prefix) catch {};
+}
 pub fn transform(id: u32, t: zui.Transform) void {
     if (views.getPtr(id)) |v| v.transform = t;
 }
@@ -460,6 +472,7 @@ pub fn Driver(comptime App: type) type {
             beeps = 0;
             awake = false;
             picker = null;
+            web_auth_open = false;
             photo_asked = null;
             file_accept = null;
             stream_conn = 0;
@@ -556,6 +569,15 @@ pub fn Driver(comptime App: type) type {
             if (picker == null) return error.NoPicker;
             picker = null;
             R.pickDone(value);
+        }
+
+        /// The open sign-in page (fx.webAuth) ends: it reached `callback_url` (which must start
+        /// with its callback prefix), or the user closed it (null).
+        pub fn finishWebAuth(callback_url: ?[]const u8) !void {
+            if (!web_auth_open) return error.NoWebAuth;
+            if (callback_url) |u| if (!std.mem.startsWith(u8, u, web_auth_prefix.items)) return error.NotTheCallback;
+            web_auth_open = false;
+            R.webAuthDone(callback_url);
         }
 
         /// The input or text area whose placeholder is `placeholder`.
@@ -1296,4 +1318,53 @@ test "secure keys through fx.key: answers arrive as messages" {
     try std.testing.expectEqual(@as(usize, 0), D.R.appState().len); // not during the update
     D.runTimers();
     try std.testing.expectEqualStrings("ok:65;ok:64;missing:0;", D.R.appState().log[0..D.R.appState().len]);
+}
+
+// fx.webAuth with zui.wufour: the in-app sign-in page, its callback, cancelling.
+const SignInApp = struct {
+    pub const Msg = union(enum) { sign_in, done: zui.WebAuthResult };
+    pub const State = struct { token: [64]u8 = undefined, token_len: usize = 0, cancelled: u32 = 0 };
+    pub fn init() State {
+        return .{};
+    }
+    fn onDone(r: zui.WebAuthResult) Msg {
+        return .{ .done = r };
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .sign_in => zui.wufour.signIn(Msg, fx, .{ .auth_host = "https://www.wreseal.com", .callback = "https://app.example.com/auth/callback?next=%2F" }, onDone),
+            .done => |r| switch (r) {
+                .cancelled => s.cancelled += 1,
+                .ok => {
+                    var buf: [256]u8 = undefined;
+                    var fba = std.heap.FixedBufferAllocator.init(&buf);
+                    const tok = zui.wufour.tokenOfResult(fba.allocator(), r) orelse return;
+                    s.token_len = @min(tok.len, s.token.len);
+                    @memcpy(s.token[0..s.token_len], tok[0..s.token_len]);
+                },
+            },
+        }
+    }
+    pub fn view(_: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{ .on_press = .sign_in });
+        ui.text("Sign in with Wufour", .{});
+        ui.end();
+    }
+};
+
+test "webAuth: Wufour's sign-in in the app, the token from the callback, or cancelled" {
+    const D = Driver(SignInApp);
+    D.start(200, 400);
+    defer D.reset();
+    try D.press("Sign in with Wufour");
+    try std.testing.expect(web_auth_open);
+    try std.testing.expectEqualStrings("https://www.wreseal.com/auth?returnTo=https%3A%2F%2Fapp.example.com%2Fauth%2Fcallback%3Fnext%3D%252F", web_auth_url.items);
+    try std.testing.expectEqualStrings("https://app.example.com/auth/callback", web_auth_prefix.items);
+    try D.finishWebAuth(null);
+    try std.testing.expectEqual(@as(u32, 1), D.R.appState().cancelled);
+    try std.testing.expectError(error.NoWebAuth, D.finishWebAuth(null));
+    try D.press("Sign in with Wufour");
+    try std.testing.expectError(error.NotTheCallback, D.finishWebAuth("https://elsewhere.example.com/?token=x"));
+    try D.finishWebAuth("https://app.example.com/auth/callback?next=%2F&token=eyJ.abc.def");
+    try std.testing.expectEqualStrings("eyJ.abc.def", D.R.appState().token[0..D.R.appState().token_len]);
 }

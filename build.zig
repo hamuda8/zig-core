@@ -162,7 +162,7 @@ pub const AppOptions = struct {
 };
 
 /// The fixed Android shim (shells/android/java/com/wufour/zui). Listed so the APK rebuilds when one changes.
-const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java", "ZuiStyle.java", "ZuiScanner.java", "ZuiPushHost.java" };
+const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java", "ZuiStyle.java", "ZuiScanner.java", "ZuiPushHost.java", "ZuiWebAuth.java" };
 /// zui's Android resources (the widget), listed for the same reason.
 const android_res = [_][]const u8{ "layout/zui_widget.xml", "xml/zui_widget_info.xml", "drawable/zui_widget_bg.xml" };
 
@@ -359,7 +359,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 "sh",     "-c",
                 \\set -e
                 \\mkdir -p "$3"
-                \\frameworks="-framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework PushKit -framework CallKit -framework VideoToolbox -framework AudioToolbox -framework CoreMedia -framework CoreVideo -framework Foundation -lobjc"
+                \\frameworks="-framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework PushKit -framework CallKit -framework VideoToolbox -framework AudioToolbox -framework CoreMedia -framework CoreVideo -framework WebKit -framework Foundation -lobjc"
                 \\cp "$2" "$3/Info.plist"
                 \\if [ "$4" = "none" ]; then
                 \\  xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 "$1" $frameworks -Wl,-U,_zui_widget_reload -o "$3/App"

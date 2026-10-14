@@ -59,7 +59,9 @@ An app is `Msg`, `State`, `init`, `update(state, msg, env, fx)` and `view(state,
   location), notifications, the system call screen (`ringCall`, `startCall`, `endCall`), push,
   pickers (date, time, option, photo, file), save/share files, clipboard, speech, vibrate,
   keep awake, recording and playback, barcode scanning (Code 128 and QR, decoded in Zig),
-  calls (below), secure keys (`fx.key`: WebCrypto / AndroidKeyStore / Keychain).
+  calls (below), secure keys (`fx.key`: WebCrypto / AndroidKeyStore / Keychain), an in-app
+  sign-in page (`fx.webAuth`: a WebView / WKWebView with no browser around it; `zui.wufour`
+  builds Wufour's sign-in address and reads the token from its callback; the web keeps cookies).
 - **Also:** `zui.storage` (plain and secure), `zui.widget` (Android widget; iOS through the fixed
   SwiftUI extension in `shells/ios/widget`, opt-in with `ios_widget`), `t("English")`
   translation bundles in Lassan's format with `t("Text|context")` for clashing keys.

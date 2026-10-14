@@ -395,6 +395,22 @@ pub const ServerEvent = struct {
     pub const Kind = enum(u8) { open = 1, message = 2, failed = 3, closed = 4 };
 };
 
+/// `fx.webAuth`: a sign-in page shown inside the app (Wufour's, `zui.wufour`).
+pub const WebAuth = struct {
+    /// The page to open.
+    url: []const u8,
+    /// The address that ends it: a navigation to anything starting with this is not loaded,
+    /// and its full address comes back as `.ok`.
+    callback_prefix: []const u8,
+};
+
+pub const WebAuthResult = union(enum) {
+    /// The callback address, with its query (e.g. `...?token=...`). Only valid during `update`.
+    ok: []const u8,
+    /// The user closed the page (or went Back from its first page).
+    cancelled,
+};
+
 /// What `update` may ask of the platform. Each result arrives later as a message.
 pub fn Fx(comptime Msg: type) type {
     return struct {
@@ -451,6 +467,7 @@ pub fn Fx(comptime Msg: type) type {
             close_events: *const fn (u32) void,
             key: *const fn (keys.Request, *const fn (keys.Result) Msg) u32,
             register_push: *const fn (PushOptions) void,
+            web_auth: *const fn (WebAuth, *const fn (WebAuthResult) Msg) void,
         };
 
         /// An HTTP request; `done` turns the response into a message. Relative URLs are
@@ -717,6 +734,18 @@ pub fn Fx(comptime Msg: type) type {
         /// app's `pushToken`.
         pub fn registerPush(fx: Self, o: PushOptions) void {
             fx.vt.register_push(o);
+        }
+
+        /// Opens a sign-in page inside the app, with no address bar or other browser around it
+        /// (Android: a full-screen WebView over the app; iOS: a WKWebView presented over it),
+        /// with JavaScript, storage and cookies, so the site's own session is remembered. When
+        /// the page goes to an address starting with `o.callback_prefix`, that address is not
+        /// loaded: `done` gets it as `.ok` and the page closes. Closing it gives `.cancelled`.
+        /// One at a time: a new one replaces the last (which then answers nothing).
+        /// The web navigates this page to `o.url` and never calls `done`: the app's server
+        /// receives the callback, sets its cookies as before, and the app starts again.
+        pub fn webAuth(fx: Self, o: WebAuth, done: *const fn (WebAuthResult) Msg) void {
+            fx.vt.web_auth(o, done);
         }
 
         /// Puts `text` on the clipboard.
@@ -1552,6 +1581,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .close_events = fxCloseEvents,
             .key = fxKey,
             .register_push = fxRegisterPush,
+            .web_auth = fxWebAuth,
         };
 
         // ---- Secure keys: the web's WebCrypto answers later (H.keyRequest); elsewhere zui's
@@ -1732,6 +1762,22 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             const cb = file_cb orelse return;
             file_cb = null;
             if (started) dispatch(cb(.{ .data = data, .name = name, .mime = mime, .width = width, .height = height }));
+        }
+
+        // ---- In-app sign-in pages (fx.webAuth): one at a time ----
+        var web_auth_cb: ?*const fn (WebAuthResult) Msg = null;
+
+        fn fxWebAuth(o: WebAuth, done: *const fn (WebAuthResult) Msg) void {
+            web_auth_cb = done;
+            H.webAuth(o.url, o.callback_prefix);
+        }
+
+        /// The sign-in page ended: at the callback address (only read during this call), or
+        /// null when the user closed it.
+        pub fn webAuthDone(url: ?[]const u8) void {
+            const cb = web_auth_cb orelse return;
+            web_auth_cb = null;
+            if (started) dispatch(cb(if (url) |u| .{ .ok = u } else .cancelled));
         }
 
         // ---- Pickers: one at a time; a new one replaces the callback of the last ----

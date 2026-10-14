@@ -102,6 +102,24 @@ fn bindDevice(e: *jni.Env) void {
         .{ "stream_close", "streamClose", "(I)V" },
         .{ "pick", "pick", "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V" },
     }) |m| @field(device, m[0]) = f.GetStaticMethodID(e, device_class, m[1], m[2]);
+    const wa = f.FindClass(e, "com/wufour/zui/ZuiWebAuth");
+    web_auth_class = f.NewGlobalRef(e, wa);
+    f.DeleteLocalRef(e, wa);
+    web_auth_open = f.GetStaticMethodID(e, web_auth_class, "open", "(Ljava/lang/String;Ljava/lang/String;)V");
+}
+
+/// ZuiWebAuth.java: fx.webAuth's full-screen WebView over the app.
+var web_auth_class: jni.jclass = null;
+var web_auth_open: jni.jmethodID = null;
+
+pub fn webAuth(url: []const u8, callback_prefix: []const u8) void {
+    const f = env.functions;
+    const ju = newString(url);
+    defer f.DeleteLocalRef(env, ju);
+    const jp = newString(callback_prefix);
+    defer f.DeleteLocalRef(env, jp);
+    f.CallStaticVoidMethodA(env, web_auth_class, web_auth_open, &[_]jni.jvalue{ object(ju), object(jp) });
+    check();
 }
 
 fn callDevice(method: jni.jmethodID, args: []const jni.jvalue) void {
@@ -546,6 +564,14 @@ pub fn exportEntry(comptime App: type) void {
             var buf: [64]u8 = undefined;
             R.pickDone(javaString(value, &buf));
         }
+        fn webAuthDone(e: *jni.Env, _: jni.jclass, url: jni.jstring) callconv(.c) void {
+            bind(e);
+            if (url == null) return R.webAuthDone(null);
+            const units: usize = @intCast(e.functions.GetStringLength(e, url));
+            const buf = zui.allocator.alloc(u8, units * 3 + 1) catch return R.webAuthDone(null);
+            defer zui.allocator.free(buf);
+            R.webAuthDone(javaStringLong(url, buf));
+        }
         fn back(e: *jni.Env, _: jni.jclass) callconv(.c) jni.jboolean {
             bind(e);
             return @intFromBool(R.back());
@@ -610,6 +636,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.recordEvent, .{ .name = "Java_com_wufour_zui_ZuiRecorder_nativeRecordEvent" });
     @export(&Entry.playEvent, .{ .name = "Java_com_wufour_zui_ZuiPlayer_nativePlayEvent" });
     @export(&Entry.pickDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativePickDone" });
+    @export(&Entry.webAuthDone, .{ .name = "Java_com_wufour_zui_ZuiWebAuth_nativeWebAuthDone" });
     @export(&Entry.fileDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeFileDone" });
     @export(&Entry.streamStatus, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeStreamStatus" });
     @export(&Entry.streamData, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeStreamData" });

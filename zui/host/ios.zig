@@ -71,6 +71,7 @@ var rt: struct {
     stream_status: *const fn (u32, u16) void,
     stream_data: *const fn (u32, []const u8) void,
     stream_end: *const fn (u32) void,
+    web_auth: *const fn (?[]const u8) void,
 } = undefined;
 /// NSStringDrawingUsesLineFragmentOrigin
 const uses_line_fragment_origin: isize = 1;
@@ -441,7 +442,7 @@ pub fn exportEntry(comptime App: type) void {
         var started = false;
 
         fn main(argc: c_int, argv: [*]?[*:0]u8) callconv(.c) c_int {
-            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent, .pick = pickDone, .file = fileDone, .stream_status = streamStatus, .stream_data = streamData, .stream_end = streamEnd };
+            rt = .{ .fetch_done = fetchDone, .timer_done = timerDone, .location = locationEvent, .socket = socketEvent, .call = callEvent, .device = deviceEvent, .pick = pickDone, .file = fileDone, .stream_status = streamStatus, .stream_data = streamData, .stream_end = streamEnd, .web_auth = webAuthDone };
             Messages.init(&R.recordEvent, &R.playEvent);
             if (@hasDecl(App, "rtc")) {
                 Media.defineClasses();
@@ -468,6 +469,9 @@ pub fn exportEntry(comptime App: type) void {
                 .{ "URLSession:dataTask:didReceiveResponse:completionHandler:", @ptrCast(&streamResponse), "v@:@@@@?" },
                 .{ "URLSession:dataTask:didReceiveData:", @ptrCast(&streamReceived), "v@:@@@" },
                 .{ "URLSession:task:didCompleteWithError:", @ptrCast(&streamCompleted), "v@:@@@" },
+            });
+            objc.defineClass("ZuiWebAuthDelegate", "NSObject", &.{"WKNavigationDelegate"}, &.{
+                .{ "webView:decidePolicyForNavigationAction:decisionHandler:", @ptrCast(&webAuthDecide), "v@:@@@?" },
             });
             objc.defineClass("ZuiLocation", "NSObject", &.{"CLLocationManagerDelegate"}, &.{
                 .{ "locationManager:didUpdateLocations:", @ptrCast(&locationUpdated), "v@:@@" },
@@ -507,6 +511,7 @@ pub fn exportEntry(comptime App: type) void {
                 .{ "textViewDidEndEditing:", @ptrCast(&inputEnded), "v@:@" },
                 .{ "pickerDone:", @ptrCast(&pickerDone), "v@:@" },
                 .{ "pickerCancel:", @ptrCast(&pickerCancel), "v@:@" },
+                .{ "webAuthCancel:", @ptrCast(&webAuthCancel), "v@:@" },
                 .{ "changed:", @ptrCast(&textChanged), "v@:@" },
                 .{ "began:", @ptrCast(&inputBegan), "v@:@" },
                 .{ "ended:", @ptrCast(&inputEnded), "v@:@" },
@@ -754,6 +759,9 @@ pub fn exportEntry(comptime App: type) void {
         }
         fn pickDone(value: []const u8) void {
             R.pickDone(value);
+        }
+        fn webAuthDone(url: ?[]const u8) void {
+            R.webAuthDone(url);
         }
         fn textChanged(_: id, _: objc.SEL, field: id) callconv(.c) void {
             clipField(tagOf(field), field);
@@ -1848,6 +1856,81 @@ fn pickOption(title: []const u8, options: []const u8, selected: i32) void {
         objc.msgSend(*const fn (id, objc.SEL, objc.CGRect) callconv(.c) void)(popover, objc.sel("setSourceRect:"), .{ .x = last_touch.x, .y = last_touch.y, .w = 1, .h = 1 });
     }
     present(sheet);
+}
+
+// ---- fx.webAuth: a WKWebView presented over the app, with only a Cancel button ----
+
+/// The navigation controller presented (null when none is open), its web view, the callback
+/// prefix (allocator-owned) and the delegate that watches the navigations.
+var web_auth_nav: id = null;
+var web_auth_web: id = null;
+var web_auth_prefix: []u8 = &.{};
+var web_auth_delegate: id = null;
+
+pub fn webAuth(url: []const u8, callback_prefix: []const u8) void {
+    if (root_controller == null) return rt.web_auth(null);
+    // A page still open is replaced without an answer (zui already forgot its callback).
+    if (web_auth_nav != null) closeWebAuth();
+    zui.allocator.free(web_auth_prefix);
+    web_auth_prefix = zui.allocator.dupe(u8, callback_prefix) catch &.{};
+    if (web_auth_delegate == null) web_auth_delegate = objc.new("ZuiWebAuthDelegate");
+
+    // The default configuration keeps cookies and storage (the site's session) across launches.
+    const config = objc.new("WKWebViewConfiguration");
+    defer objc.release(config);
+    const make = objc.msgSend(*const fn (id, objc.SEL, objc.CGRect, id) callconv(.c) id);
+    const web = make(objc.send(objc.class("WKWebView"), "alloc"), objc.sel("initWithFrame:configuration:"), .{}, config);
+    if (web == null) return rt.web_auth(null);
+    objc.sendVoid1(web, "setNavigationDelegate:", web_auth_delegate);
+
+    const vc = objc.new("UIViewController");
+    objc.sendVoid1(vc, "setView:", web);
+    const cancel = barButton(1, "webAuthCancel:");
+    defer objc.release(cancel);
+    objc.sendVoid1(objc.send(vc, "navigationItem"), "setLeftBarButtonItem:", cancel);
+    const nav = objc.send1(objc.send(objc.class("UINavigationController"), "alloc"), "initWithRootViewController:", vc);
+    objc.release(vc);
+    objc.sendVoidInt(nav, "setModalPresentationStyle:", 0); // UIModalPresentationFullScreen
+    objc.sendVoidBool(nav, "setModalInPresentation:", true);
+    web_auth_nav = nav;
+    web_auth_web = web;
+
+    const s = objc.nsString(url);
+    defer objc.release(s);
+    const u = objc.send1(objc.class("NSURL"), "URLWithString:", s);
+    if (u != null) _ = objc.send1(web, "loadRequest:", objc.send1(objc.class("NSURLRequest"), "requestWithURL:", u));
+    present(nav);
+}
+
+fn closeWebAuth() void {
+    if (web_auth_nav == null) return;
+    objc.sendVoid1(web_auth_web, "setNavigationDelegate:", null);
+    objc.sendVoid(web_auth_web, "stopLoading");
+    objc.msgSend(*const fn (id, objc.SEL, bool, ?*anyopaque) callconv(.c) void)(web_auth_nav, objc.sel("dismissViewControllerAnimated:completion:"), true, null);
+    objc.release(web_auth_web);
+    objc.release(web_auth_nav);
+    web_auth_web = null;
+    web_auth_nav = null;
+}
+
+fn webAuthCancel(_: id, _: objc.SEL, _: id) callconv(.c) void {
+    if (web_auth_nav == null) return;
+    closeWebAuth();
+    rt.web_auth(null);
+}
+
+/// WKNavigationDelegate: the callback address is not loaded; it ends the sign-in.
+fn webAuthDecide(_: id, _: objc.SEL, _: id, action: id, handler: *objc.BlockHeader) callconv(.c) void {
+    const decide: *const fn (*objc.BlockHeader, isize) callconv(.c) void = @ptrCast(@alignCast(handler.invoke));
+    const url = stringOf(objc.send(objc.send(objc.send(action, "request"), "URL"), "absoluteString"));
+    if (web_auth_nav == null or web_auth_prefix.len == 0 or !std.mem.startsWith(u8, url, web_auth_prefix)) {
+        return decide(handler, 1); // WKNavigationActionPolicyAllow
+    }
+    decide(handler, 0); // WKNavigationActionPolicyCancel
+    const copy_ = zui.allocator.dupe(u8, url) catch return;
+    defer zui.allocator.free(copy_);
+    closeWebAuth();
+    rt.web_auth(copy_);
 }
 
 // ---- Photos and files: UIImagePickerController, UIDocumentPickerViewController, the share sheet ----

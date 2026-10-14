@@ -62,6 +62,10 @@ pub const Call = runtime.Call;
 pub const CallEvent = runtime.CallEvent;
 pub const PushKind = runtime.PushKind;
 pub const PushOptions = runtime.PushOptions;
+pub const WebAuth = runtime.WebAuth;
+pub const WebAuthResult = runtime.WebAuthResult;
+/// Wufour sign-in on the phones: the sign-in address, the token from the callback, keeping it.
+pub const wufour = @import("wufour.zig");
 pub const DeviceEvent = runtime.DeviceEvent;
 pub const KeyEvent = runtime.KeyEvent;
 pub const DatePick = runtime.DatePick;
@@ -153,6 +157,7 @@ test {
     _ = calls;
     _ = sse;
     _ = keys;
+    _ = wufour;
 }
 
 /// Wall-clock time: milliseconds since 1970-01-01 UTC.
