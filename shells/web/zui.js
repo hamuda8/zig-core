@@ -66,7 +66,7 @@ export async function start(wasm, mount = document.body, options = {}) {
   const sheet = document.createElement('style');
   sheet.textContent = 'input::placeholder,textarea::placeholder{color:var(--zui-placeholder);opacity:1}' +
     // Borders are drawn over the box, not around its content: children stay where zui put them.
-    '.zui-b::before{content:"";position:absolute;inset:0;box-sizing:border-box;border-style:solid;border-width:var(--zui-bw);border-color:var(--zui-bc);border-radius:inherit;pointer-events:none}' +
+    '.zui-b::before{content:"";position:absolute;inset:0;box-sizing:border-box;border-style:var(--zui-bs,solid);border-width:var(--zui-bw);border-color:var(--zui-bc);border-radius:inherit;pointer-events:none}' +
     '.zui-sel,.zui-sel *{user-select:text;-webkit-user-select:text;cursor:text}';
   document.head.appendChild(sheet);
   const views = new Map([[0, root]]);
@@ -1307,10 +1307,11 @@ function webCalls(getEx, getMemory, withBytes, encoder, str) {
 
 // Borders are drawn over the box (a ::before), as Android and iOS draw them, so children stay
 // where zui put them; inputs, pictures and scroll views keep real ones.
-function setBorders(el, widths, colors) {
+function setBorders(el, widths, colors, dashed) {
+  const style = dashed ? 'dashed' : 'solid';
   if (el._realBorder) {
     const sides = ['Top', 'Right', 'Bottom', 'Left'];
-    for (let k = 0; k < 4; k++) el.style['border' + sides[k]] = widths[k] > 0 ? `${widths[k]}px solid ${css(colors[k])}` : '0';
+    for (let k = 0; k < 4; k++) el.style['border' + sides[k]] = widths[k] > 0 ? `${widths[k]}px ${style} ${css(colors[k])}` : '0';
     return;
   }
   if (!(widths[0] > 0 || widths[1] > 0 || widths[2] > 0 || widths[3] > 0)) {
@@ -1324,6 +1325,7 @@ function setBorders(el, widths, colors) {
   el.classList.add('zui-b');
   el.style.setProperty('--zui-bw', widths.map((w) => w + 'px').join(' '));
   el.style.setProperty('--zui-bc', colors.map(css).join(' '));
+  if (dashed) el.style.setProperty('--zui-bs', 'dashed'); else el.style.removeProperty('--zui-bs');
 }
 
 // Styling and interaction: decorations (per-corner radii, per-side borders, a shadow, a
@@ -1368,9 +1370,9 @@ function webStyle(views, getEx, getMemory, str, decoder, measurer) {
     zui_decor(id, ptr) {
       const el = views.get(id), s = el.style;
       const mem = getMemory().buffer;
-      const f = new Float32Array(mem, ptr >>> 0, 30), u = new Uint32Array(mem, ptr >>> 0, 30);
+      const f = new Float32Array(mem, ptr >>> 0, 31), u = new Uint32Array(mem, ptr >>> 0, 31);
       s.borderRadius = `${f[0]}px ${f[1]}px ${f[2]}px ${f[3]}px`;
-      setBorders(el, [f[4], f[5], f[6], f[7]], [u[8], u[9], u[10], u[11]]);
+      setBorders(el, [f[4], f[5], f[6], f[7]], [u[8], u[9], u[10], u[11]], u[30] !== 0);
       s.boxShadow = u[12] >>> 24 ? `${f[13]}px ${f[14]}px ${f[15]}px ${css(u[12])}` : '';
       const n = u[17];
       if (n > 0) {

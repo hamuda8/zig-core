@@ -250,6 +250,7 @@ final class ZuiStyle {
         float[] radii = new float[4], widths = new float[4], shadow = new float[3], stopsAt;
         int[] colors = new int[4], stopColors;
         float angle;
+        boolean dashed;
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         final Path path = new Path(), inner = new Path(), side = new Path();
 
@@ -344,7 +345,23 @@ final class ZuiStyle {
                     canvas.clipPath(path);
                     if (!inner.isEmpty()) canvas.clipOutPath(inner);
                     paint.setColor(colors[s]);
-                    canvas.drawRect(r, paint);
+                    if (dashed) {
+                        // The side's dashes: the box's outline drawn as a dashed line of this
+                        // side's width along the middle of the border (dashes of 3 widths, as
+                        // browsers draw thin dashed borders), cut to the side.
+                        float sw = widths[s] * density;
+                        RectF mid = new RectF(r.left + sw / 2, r.top + sw / 2, r.right - sw / 2, r.bottom - sw / 2);
+                        Path line = new Path();
+                        line.addRoundRect(mid, corner8(r, radii, sw / 2, sw / 2, sw / 2, sw / 2), Path.Direction.CW);
+                        paint.setStyle(Paint.Style.STROKE);
+                        paint.setStrokeWidth(sw);
+                        paint.setPathEffect(new android.graphics.DashPathEffect(new float[] {3 * sw, 3 * sw}, 0));
+                        canvas.drawPath(line, paint);
+                        paint.setPathEffect(null);
+                        paint.setStyle(Paint.Style.FILL);
+                    } else {
+                        canvas.drawRect(r, paint);
+                    }
                     canvas.restore();
                 }
             }
@@ -380,6 +397,7 @@ final class ZuiStyle {
         System.arraycopy(f, 4, d.widths, 0, 4);
         System.arraycopy(f, 8, d.shadow, 0, 3);
         d.angle = f[11];
+        d.dashed = f[12] != 0;
         System.arraycopy(c, 0, d.colors, 0, 4);
         d.shadowColor = c[4];
         int n = c.length - 5;
@@ -387,7 +405,7 @@ final class ZuiStyle {
             d.stopColors = new int[n];
             d.stopsAt = new float[n];
             System.arraycopy(c, 5, d.stopColors, 0, n);
-            System.arraycopy(f, 12, d.stopsAt, 0, n);
+            System.arraycopy(f, 13, d.stopsAt, 0, n);
         }
         v.setBackground(d);
         // A shadow draws outside the view: the parents let it.

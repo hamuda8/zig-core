@@ -2666,6 +2666,25 @@ fn shapeLayer(path_: CGPath, fill: u32) id {
     return l;
 }
 
+/// A dashed border side: the box's outline along the middle of the border, dashes of 3 widths
+/// (as browsers draw thin dashed borders); the caller cuts it to the side.
+fn dashedLine(w: CGFloat, h: CGFloat, radii: [4]CGFloat, width: CGFloat, argb: u32) id {
+    const half = width / 2;
+    var rr: [4]CGFloat = undefined;
+    for (radii, 0..) |r0, k| rr[k] = @max(0, r0 - half);
+    const p = roundedPath(half, half, @max(0, w - width), @max(0, h - width), rr);
+    defer CGPathRelease(p);
+    const l = shapeLayer(p, 0);
+    const set_ptr = objc.msgSend(*const fn (id, objc.SEL, ?*anyopaque) callconv(.c) void);
+    set_ptr(l, objc.sel("setStrokeColor:"), @ptrCast(objc.send(color(argb), "CGColor")));
+    objc.sendVoidFloat(l, "setLineWidth:", width);
+    const num = objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) id);
+    var dash = [2]id{ num(objc.class("NSNumber"), objc.sel("numberWithDouble:"), 3 * width), num(objc.class("NSNumber"), objc.sel("numberWithDouble:"), 3 * width) };
+    const array = objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id);
+    objc.sendVoid1(l, "setLineDashPattern:", array(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &dash, 2));
+    return l;
+}
+
 fn applyDecor(i: u32, r: zui.Rect) void {
     const e = decors.getPtr(i) orelse return;
     const d = e.decor;
@@ -2755,9 +2774,9 @@ fn applyDecor(i: u32, r: zui.Rect) void {
         const inner_c = [4][2]CGFloat{ .{ l, t }, .{ w - rw, t }, .{ w - rw, h - bt }, .{ l, h - bt } };
         for (0..4) |s| {
             if (bw[s] <= 0 or d.border_colors[s] >> 24 == 0) continue;
-            const side = shapeLayer(ring, d.border_colors[s]);
+            const side = if (d.dashed) dashedLine(w, h, radii, bw[s], d.border_colors[s]) else shapeLayer(ring, d.border_colors[s]);
             defer objc.release(side);
-            objc.sendVoid1(side, "setFillRule:", kCAFillRuleEvenOdd);
+            if (!d.dashed) objc.sendVoid1(side, "setFillRule:", kCAFillRuleEvenOdd);
             const q = CGPathCreateMutable();
             defer CGPathRelease(q);
             // Side s runs from corner s to corner s+1: its outer corners pushed far out along

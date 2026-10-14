@@ -119,6 +119,8 @@ pub const Style = struct {
     gradient: ?Gradient = null,
     /// Per-side borders (logical sides); replaces `border_width` and `border_color`.
     borders: ?Borders = null,
+    /// The borders drawn in dashes (CSS `border-style: dashed`).
+    border_dashed: bool = false,
     /// Per-corner radii (logical corners); replaces `radius`.
     corners: ?Corners = null,
     /// While the mouse is over the view (desktop web), like `pressed_background`.
@@ -329,6 +331,7 @@ pub const Box = struct {
             d.border_widths = @splat(s.border_width);
             d.border_colors = @splat(b.border_color);
         }
+        d.dashed = s.border_dashed;
         if (s.shadow) |sh| {
             d.shadow_color = sh.color.argb();
             d.shadow = .{ sh.x, sh.y, sh.blur };
@@ -346,7 +349,7 @@ pub const Box = struct {
 
     /// One background, one radius, one border: what every host draws the simple way.
     pub fn isSimple(b: Box) bool {
-        return b.decor.shadow_color >> 24 == 0 and b.decor.gradient_count == 0 and b.decor.uniformCorners() and b.decor.uniformBorder();
+        return b.decor.shadow_color >> 24 == 0 and b.decor.gradient_count == 0 and !b.decor.dashed and b.decor.uniformCorners() and b.decor.uniformBorder();
     }
 };
 
@@ -365,6 +368,8 @@ pub const Decor = struct {
     gradient_count: u8 = 0,
     gradient_colors: [Gradient.max_stops]u32 = @splat(0),
     gradient_at: [Gradient.max_stops]f32 = @splat(0),
+    /// The borders in dashes.
+    dashed: bool = false,
 
     pub fn uniformCorners(d: Decor) bool {
         return d.radii[0] == d.radii[1] and d.radii[1] == d.radii[2] and d.radii[2] == d.radii[3];
@@ -471,3 +476,9 @@ pub const Rect = struct {
         return a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h;
     }
 };
+
+test "a dashed border is drawn as a decoration" {
+    const b = Box.of(.{ .border_width = 1, .border_color = Color.hex("#112233"), .border_dashed = true }, .{});
+    try std.testing.expect(b.decor.dashed and !b.isSimple());
+    try std.testing.expect(Box.of(.{ .border_width = 1 }, .{}).isSimple());
+}

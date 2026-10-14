@@ -457,7 +457,7 @@ const js_style = struct {
     extern "zui" fn zui_label(id: u32, ptr: [*]const u8, len: usize) void;
 };
 
-/// A box's decoration as the shim reads it: 30 words.
+/// A box's decoration as the shim reads it: 31 words.
 const Wire = extern struct {
     radii: [4]f32,
     widths: [4]f32,
@@ -468,6 +468,7 @@ const Wire = extern struct {
     count: u32,
     stop_colors: [6]u32,
     stop_at: [6]f32,
+    dashed: u32,
 
     fn of(d: zui.Decor) Wire {
         return .{
@@ -480,6 +481,7 @@ const Wire = extern struct {
             .count = d.gradient_count,
             .stop_colors = d.gradient_colors,
             .stop_at = d.gradient_at,
+            .dashed = @intFromBool(d.dashed),
         };
     }
 };
