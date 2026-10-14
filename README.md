@@ -57,3 +57,33 @@ and `.client_imports = &.{.{ .name = "reseal_rtc", .module = ... }}` in `addApp`
 web host's JSON, so phones and browsers call each other. The app's Android manifest needs
 `INTERNET`, `CAMERA`, `RECORD_AUDIO` and `MODIFY_AUDIO_SETTINGS`; its iOS Info.plist needs
 `NSCameraUsageDescription` and `NSMicrophoneUsageDescription`.
+
+## Push notifications
+
+`fx.registerPush(.{ .web_key = vapid_public_key })` after sign-in; tokens arrive at the app's
+`pub fn pushToken(token: []const u8, kind: zui.PushKind) ?Msg` (`.fcm` Android, `.apns` and
+`.voip` iOS, `.web`: the Web Push subscription's JSON) and pushes at
+`pub fn pushMessage(json: []const u8) ?Msg` (the data map / payload as JSON). The update a
+push returns runs before `pushMessage` returns, so a VoIP push can ring CallKit (`fx.ringCall`)
+in time.
+
+When the app is not running, a high-priority FCM data message or a VoIP push starts it
+without a screen (`Runtime.startHeadless`): `init` runs, the push is handled (notify, ring,
+fetch), nothing is drawn; `boot` and the first frame come when the user opens it, with that
+state. A force-stopped Android app gets no pushes until it is opened again (Android's rule).
+
+- Android: `addApp(.android_push = .{ .google_services = "../secrets/<app>-google-services.json" })`
+  (kept outside the repository; `-Dgoogle-services=` overrides; missing: built without push)
+  adds `com.google.firebase:firebase-messaging` (the one third-party library, through
+  `ZuiPush.java`) and its dependencies, resolved without Gradle by `tools/maven.zig` into
+  `%LOCALAPPDATA%/zig-core/maven` (`-Dmaven-cache=`). Firebase is initialised by hand from the
+  json's project id, app id, API key and sender id. The manifest declares
+  `com.wufour.zui.ZuiPush` with the `com.google.firebase.MESSAGING_EVENT` filter.
+  `addApp(.android_deps = &.{"group:artifact:version"})` takes other Maven artifacts the same way.
+- iOS: the push entitlement (`aps-environment`), `UIBackgroundModes` `voip` and
+  `remote-notification`; links PushKit and UserNotifications.
+- Web: the app's `sw.js` shows pushes (`push` event); it may post `{type:'zui-push', data}`
+  to the page.
+- Servers: `push.native.Sender` (FCM HTTP v1 and APNs) from `FCM_SERVICE_ACCOUNT_FILE`,
+  `APNS_KEY_FILE`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_SANDBOX`; urgent
+  messages are high-priority data messages, others carry a notification the system shows.
