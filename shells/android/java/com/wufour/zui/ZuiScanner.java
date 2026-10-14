@@ -141,11 +141,13 @@ final class ZuiScanner {
 
                 @Override
                 public void onError(CameraDevice camera, int error) {
+                    android.util.Log.e("zui", "scanner: camera error " + error);
                     camera.close();
                     post(s.id, 3, 0, "unavailable");
                 }
             }, handler);
         } catch (Exception e) {
+            android.util.Log.e("zui", "scanner: " + e);
             post(s.id, 3, 0, e instanceof SecurityException ? "denied" : "unavailable");
         }
     }
@@ -173,16 +175,19 @@ final class ZuiScanner {
                             post(s.id, 1, 0, "");
                         }
                     } catch (Exception e) {
+                        android.util.Log.e("zui", "scanner: " + e);
                         post(s.id, 3, 0, "unavailable");
                     }
                 }
 
                 @Override
                 public void onConfigureFailed(CameraCaptureSession session) {
+                    android.util.Log.e("zui", "scanner: session not configured");
                     post(s.id, 3, 0, "unavailable");
                 }
             }, handler);
         } catch (Exception e) {
+            android.util.Log.e("zui", "scanner: " + e);
             post(s.id, 3, 0, "unavailable");
         }
     }
