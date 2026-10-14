@@ -345,7 +345,10 @@ pub fn controlPlayback(_: u32, c: zui.PlaybackControl) void {
     playback_controls.append(gpa, c) catch {};
 }
 pub var ringing: std.ArrayList(u8) = .empty;
+pub var ringing_label: std.ArrayList(u8) = .empty;
 pub fn ringCall(c: zui.Call) void {
+    ringing_label.clearRetainingCapacity();
+    ringing_label.appendSlice(gpa, c.label) catch {};
     ringing.clearRetainingCapacity();
     ringing.appendSlice(gpa, c.id) catch {};
 }

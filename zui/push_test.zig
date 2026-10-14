@@ -46,7 +46,7 @@ const PushApp = struct {
                 s.token_kind = t.kind;
                 s.token_len = t.len;
             },
-            .call => |id| fx.ringCall(.{ .id = std.mem.trimEnd(u8, &id, " "), .name = "Hala" }),
+            .call => |id| fx.ringCall(.{ .id = std.mem.trimEnd(u8, &id, " "), .name = "Hala", .label = "مكالمة صوتية" }),
         }
     }
     pub fn view(s: *const State, ui: *zui.Ui(Msg)) void {
@@ -64,6 +64,7 @@ test "push: a call push wakes the app without a screen; the screen comes later w
     try testing.expect(!D.R.appState().booted);
     D.R.pushMessage("{\"type\":\"call\",\"callId\":\"c42\",\"title\":\"Hala\"}");
     try testing.expectEqualStrings("c42", headless.ringing.items);
+    try testing.expectEqualStrings("مكالمة صوتية", headless.ringing_label.items);
     try testing.expectEqual(@as(u32, 0), D.R.appState().rendered);
     try testing.expectEqual(@as(usize, 0), headless.views.count());
 

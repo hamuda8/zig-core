@@ -277,8 +277,8 @@ fn bind(e: *jni.Env) void {
         .{ "open_socket", "openSocket", "(ILjava/lang/String;)V" },
         .{ "background_location", "backgroundLocation", "(ZLjava/lang/String;Ljava/lang/String;)V" },
         .{ "widget_update", "widgetUpdate", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V" },
-        .{ "ring_call", "ringCall", "(Ljava/lang/String;Ljava/lang/String;Z)V" },
-        .{ "start_call", "startCall", "(Ljava/lang/String;Ljava/lang/String;Z)V" },
+        .{ "ring_call", "ringCall", "(Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;)V" },
+        .{ "start_call", "startCall", "(Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;)V" },
         .{ "call_connected", "callConnected", "(Ljava/lang/String;)V" },
         .{ "end_call", "endCall", "(Ljava/lang/String;)V" },
         .{ "notify", "notify", "(ILjava/lang/String;Ljava/lang/String;Z)V" },
@@ -807,7 +807,9 @@ fn callWith(m: jni.jmethodID, c: zui.Call) void {
     defer env.functions.DeleteLocalRef(env, ji);
     const jn = newString(c.name);
     defer env.functions.DeleteLocalRef(env, jn);
-    call(m, &.{ object(ji), object(jn), boolean(c.video) });
+    const jl = newString(c.label);
+    defer env.functions.DeleteLocalRef(env, jl);
+    call(m, &.{ object(ji), object(jn), boolean(c.video), object(jl) });
 }
 pub fn callConnected(id: []const u8) void {
     const ji = newString(id);

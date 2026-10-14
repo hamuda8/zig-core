@@ -776,11 +776,13 @@ public final class Zui {
         ZuiMedia.video(id, stream, mirror, cover);
     }
 
-    static void ringCall(String id, String name, boolean video) {
+    static void ringCall(String id, String name, boolean video, String label) {
+        ZuiCallService.label(id, label);
         ZuiCallService.ring(ctx(), id, name, video);
     }
 
-    static void startCall(String id, String name, boolean video) {
+    static void startCall(String id, String name, boolean video, String label) {
+        ZuiCallService.label(id, label);
         ZuiCallService.outgoing(ctx(), id, name, video);
     }
 

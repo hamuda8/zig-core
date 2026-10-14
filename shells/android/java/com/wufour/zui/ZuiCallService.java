@@ -42,6 +42,13 @@ public final class ZuiCallService extends ConnectionService {
     static final String CHANNEL = "zui_calls";
     static final int ANSWER = 1, DECLINE = 2, END = 3;
     static final HashMap<String, Call> calls = new HashMap<>();
+    /** The app's words for each call's kind (zui.Call.label), by call id. */
+    static final HashMap<String, String> labels = new HashMap<>();
+
+    static void label(String id, String label) {
+        if (label != null && !label.isEmpty()) labels.put(id, label);
+        else labels.remove(id);
+    }
 
     static final class Call extends Connection {
         final Context context;
@@ -97,6 +104,7 @@ public final class ZuiCallService extends ConnectionService {
             if (ended) return;
             ended = true;
             calls.remove(id);
+            labels.remove(id);
             cancelRinging(context, id);
             setDisconnected(cause);
             destroy();
@@ -260,7 +268,7 @@ public final class ZuiCallService extends ConnectionService {
         Notification.Builder b = new Notification.Builder(c, CHANNEL)
                 .setSmallIcon(c.getApplicationInfo().icon != 0 ? c.getApplicationInfo().icon : android.R.drawable.sym_call_incoming)
                 .setContentTitle(name)
-                .setContentText(video ? "Video call" : "Voice call")
+                .setContentText(labels.containsKey(id) ? labels.get(id) : video ? "Video call" : "Voice call")
                 .setCategory(Notification.CATEGORY_CALL)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setOngoing(true)

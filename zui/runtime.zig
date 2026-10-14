@@ -288,6 +288,10 @@ pub const Call = struct {
     /// Who is calling, or being called.
     name: []const u8,
     video: bool = false,
+    /// What kind of call, in the app's language ("Voice call", "مكالمة فيديو"), under the name
+    /// on Android's ringing notification. Empty: "Voice call" / "Video call". iOS's CallKit
+    /// names the kind itself, in the phone's language.
+    label: []const u8 = "",
 };
 
 /// What the user did on the system's call screen. The app receives these through
