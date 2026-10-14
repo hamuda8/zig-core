@@ -359,7 +359,7 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 "sh",     "-c",
                 \\set -e
                 \\mkdir -p "$3"
-                \\frameworks="-framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework CallKit -framework VideoToolbox -framework AudioToolbox -framework CoreMedia -framework CoreVideo -framework Foundation -lobjc"
+                \\frameworks="-framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework PushKit -framework CallKit -framework VideoToolbox -framework AudioToolbox -framework CoreMedia -framework CoreVideo -framework Foundation -lobjc"
                 \\cp "$2" "$3/Info.plist"
                 \\if [ "$4" = "none" ]; then
                 \\  xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 "$1" $frameworks -Wl,-U,_zui_widget_reload -o "$3/App"

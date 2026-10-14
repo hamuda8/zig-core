@@ -37,6 +37,16 @@ pub fn video(i: u32, v: zui.Video) void {
 
 /// Voice and video messages: recording and playback (AVAudioRecorder, AVCaptureMovieFileOutput,
 /// AVPlayer). A video view showing a recorder or a player is handled there.
+/// Push: APNs and PushKit (ios_push.zig).
+const Push = @import("ios_push.zig");
+
+/// fx.registerPush: the alert permission (the notification center asks once), then APNs and
+/// PushKit; tokens come back through the app's pushToken.
+pub fn registerPush(_: zui.PushOptions) void {
+    _ = notificationCenter();
+    Push.register();
+}
+
 const Messages = @import("../media/ios_messages.zig");
 pub const startRecording = Messages.startRecording;
 pub const stopRecording = Messages.stopRecording;
@@ -420,8 +430,10 @@ pub fn exportEntry(comptime App: type) void {
                 Media.setPump(&R.callsPump);
                 calls_enabled = true;
             }
+            Push.init(.{ .token = pushToken, .message = pushMessage, .wake = pushWake });
             objc.defineClass("ZuiNotifications", "NSObject", &.{"UNUserNotificationCenterDelegate"}, &.{
                 .{ "userNotificationCenter:willPresentNotification:withCompletionHandler:", @ptrCast(&willPresent), "v@:@@@?" },
+                Push.response_method,
             });
             objc.defineClass("ZuiCalls", "NSObject", &.{"CXProviderDelegate"}, &.{
                 .{ "providerDidReset:", @ptrCast(&providerReset), "v@:@" },
@@ -444,7 +456,7 @@ pub fn exportEntry(comptime App: type) void {
                 .{ "locationManager:didFailWithError:", @ptrCast(&locationFailed), "v@:@@" },
                 .{ "locationManagerDidChangeAuthorization:", @ptrCast(&locationAuthorization), "v@:@" },
             });
-            objc.defineClass("ZuiAppDelegate", "UIResponder", &.{"UIApplicationDelegate"}, &.{});
+            objc.defineClass("ZuiAppDelegate", "UIResponder", &.{"UIApplicationDelegate"}, &Push.app_delegate_methods);
             objc.defineClass("ZuiSceneDelegate", "UIResponder", &.{"UIWindowSceneDelegate"}, &.{
                 .{ "scene:willConnectToSession:options:", @ptrCast(&sceneWillConnect), "v@:@@@" },
             });
@@ -583,6 +595,19 @@ pub fn exportEntry(comptime App: type) void {
         }
         fn callEvent(kind: zui.CallEvent.Kind, call_id: []const u8) void {
             R.callEvent(kind, call_id);
+        }
+        fn pushToken(token: []const u8, kind: zui.PushKind) void {
+            R.pushToken(token, kind);
+        }
+        fn pushMessage(json: []const u8) void {
+            R.pushMessage(json);
+        }
+        /// A push before the screen (PushKit launched the app for a call): the app without it.
+        fn pushWake() void {
+            if (started) return;
+            const langs = objc.send(objc.class("NSLocale"), "preferredLanguages");
+            const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(objc.send(langs, "firstObject"), objc.sel("UTF8String"));
+            R.startHeadless(zui.allocator, if (utf8) |p| std.mem.span(p) else "en");
         }
 
         fn wantsPointers(i: u32) bool {

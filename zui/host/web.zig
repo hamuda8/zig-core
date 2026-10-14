@@ -36,6 +36,7 @@ const js = struct {
     extern "zui" fn zui_copy(ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_notify(id: u32, title: [*]const u8, title_len: usize, body: [*]const u8, body_len: usize, urgent: u32) void;
     extern "zui" fn zui_cancel_notify(id: u32) void;
+    extern "zui" fn zui_register_push(key: [*]const u8, key_len: usize) void;
     extern "zui" fn zui_open_url(ptr: [*]const u8, len: usize, new_window: u32) void;
     extern "zui" fn zui_socket_open(id: u32, ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_socket_send(id: u32, ptr: [*]const u8, len: usize) void;
@@ -177,6 +178,10 @@ pub fn notify(n: zui.Notification) void {
 }
 pub fn cancelNotify(id: u32) void {
     js.zui_cancel_notify(id);
+}
+/// fx.registerPush: a Web Push subscription by the page's service worker (zui.js).
+pub fn registerPush(o: zui.PushOptions) void {
+    js.zui_register_push(o.web_key.ptr, o.web_key.len);
 }
 /// A web page has no home-screen widget.
 pub fn widgetUpdate(_: []const u8, _: []const u8, _: []const u8, _: []const u8) void {}
@@ -347,6 +352,12 @@ pub fn exportEntry(comptime App: type) void {
         fn hostMessage(ptr: [*]const u8, len: usize) callconv(.c) void {
             R.hostMessage(ptr[0..len]);
         }
+        fn pushToken(ptr: [*]const u8, len: usize, kind: u32) callconv(.c) void {
+            R.pushToken(ptr[0..len], std.enums.fromInt(zui.PushKind, @as(u8, @intCast(kind))) orelse return);
+        }
+        fn pushMessage(ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.pushMessage(ptr[0..len]);
+        }
         fn inputEvent(id: u32, kind: u32) callconv(.c) void {
             R.inputEvent(id, std.enums.fromInt(zui.InputEvent, kind) orelse return);
         }
@@ -400,6 +411,8 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.inputEvent, .{ .name = "zui_input_event" });
     @export(&Entry.socketEvent, .{ .name = "zui_socket_event" });
     @export(&Entry.hostMessage, .{ .name = "zui_host_message" });
+    @export(&Entry.pushToken, .{ .name = "zui_push_token" });
+    @export(&Entry.pushMessage, .{ .name = "zui_push_message" });
     @export(&Entry.mediaEvent, .{ .name = "zui_media_event" });
     @export(&Entry.peerEvent, .{ .name = "zui_peer_event" });
     @export(&Entry.recordEvent, .{ .name = "zui_record_event" });

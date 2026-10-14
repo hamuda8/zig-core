@@ -275,6 +275,7 @@ export async function start(wasm, mount = document.body, options = {}) {
   const scan = webScan(() => ex, () => memory, withBytes, encoder, calls.streams);
   const recordings = webMedia(() => ex, () => memory, withBytes, encoder, str, calls.streams);
   const notes = new Map();
+  let pushListening = false;
 
   // Navigation: fx.setLink replaces the address, fx.pushLink adds a history entry. While the app
   // handles Back (ui.onBack) one more entry with the same address sits on top, so the browser's
@@ -764,6 +765,41 @@ export async function start(wasm, mount = document.body, options = {}) {
           n.onclick = () => { window.focus(); n.close(); };
           notes.set(id, n);
         });
+      },
+      // fx.registerPush: the page's service worker subscribes to Web Push with the server's
+      // VAPID key; the subscription's JSON is the token (kind 4, web). The app's own sw.js shows
+      // the pushes; one it posts to the page as {type:'zui-push', data} reaches pushMessage.
+      zui_register_push(kptr, klen) {
+        const key = str(kptr, klen);
+        if (!key || !('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+        const bytes = (b64) => {
+          const s = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (b64.length % 4)) % 4));
+          return Uint8Array.from(s, (c) => c.charCodeAt(0));
+        };
+        const subscribe = async () => {
+          const reg = await navigator.serviceWorker.ready;
+          let sub = await reg.pushManager.getSubscription();
+          const want = bytes(key);
+          if (sub && sub.options && sub.options.applicationServerKey) {
+            const have = new Uint8Array(sub.options.applicationServerKey);
+            if (have.length !== want.length || have.some((v, i) => v !== want[i])) { await sub.unsubscribe(); sub = null; }
+          }
+          if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: want });
+          withBytes(encoder.encode(JSON.stringify(sub)), (p, n) => ex.zui_push_token(p, n, 4));
+        };
+        const go = () => subscribe().catch((e) => console.warn('zui push:', e));
+        if (Notification.permission === 'granted') go();
+        else if (Notification.permission !== 'denied') {
+          // Browsers want a click before asking: the next one.
+          const ask = () => Notification.requestPermission().then((p) => { if (p === 'granted') go(); });
+          addEventListener('pointerdown', ask, { once: true });
+        }
+        if (!pushListening) {
+          pushListening = true;
+          navigator.serviceWorker.addEventListener('message', (e) => {
+            if (e.data && e.data.type === 'zui-push') withBytes(encoder.encode(JSON.stringify(e.data.data ?? {})), (p, n) => ex.zui_push_message(p, n));
+          });
+        }
       },
       zui_cancel_notify(id) {
         notes.get(id)?.close();
