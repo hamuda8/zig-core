@@ -63,6 +63,7 @@ pub const CallEvent = runtime.CallEvent;
 pub const PushKind = runtime.PushKind;
 pub const PushOptions = runtime.PushOptions;
 pub const DeviceEvent = runtime.DeviceEvent;
+pub const KeyEvent = runtime.KeyEvent;
 pub const DatePick = runtime.DatePick;
 pub const TimePick = runtime.TimePick;
 pub const OptionPick = runtime.OptionPick;

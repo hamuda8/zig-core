@@ -60,6 +60,28 @@ pub const Env = struct {
 /// env.visible change with them too).
 pub const DeviceEvent = enum(u8) { online = 1, offline = 2, visible = 3, hidden = 4 };
 
+/// A key pressed on a keyboard (the web, and hardware keyboards on phones). The app's
+/// `pub fn keyEvent(e: zui.KeyEvent) ?Msg` hears these; returning a message takes the key (the
+/// browser or the text field does not act on it as well), null leaves it to them.
+pub const KeyEvent = struct {
+    key: Key,
+    shift: bool = false,
+    /// Control, or Command on Apple keyboards.
+    ctrl: bool = false,
+    alt: bool = false,
+    /// A text field has the keyboard.
+    in_input: bool = false,
+
+    pub const Key = enum(u8) { escape = 1, enter = 2, up = 3, down = 4, left = 5, right = 6, tab = 7 };
+
+    /// As hosts send it: the key's code, and modifiers as bits (shift 1, ctrl 2, alt 4, in a
+    /// text field 8).
+    pub fn of(code: u32, mods: u32) ?KeyEvent {
+        const k = std.enums.fromInt(Key, @as(u8, @intCast(@min(code, 255)))) orelse return null;
+        return .{ .key = k, .shift = mods & 1 != 0, .ctrl = mods & 2 != 0, .alt = mods & 4 != 0, .in_input = mods & 8 != 0 };
+    }
+};
+
 pub const Method = enum { GET, POST, PUT, PATCH, DELETE };
 
 pub const Request = struct {
@@ -1805,6 +1827,18 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
                 if (App.deviceEvent(kind)) |m| return dispatch(m);
             }
             render();
+        }
+
+        /// A key from the keyboard; true when the app took it (the host then stops it).
+        pub fn keyEvent(e: KeyEvent) bool {
+            if (!started) return false;
+            if (@hasDecl(App, "keyEvent")) {
+                if (App.keyEvent(e)) |m| {
+                    dispatch(m);
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// The host is told when Back starts or stops being the app's (Android registers its

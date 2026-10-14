@@ -304,6 +304,17 @@ export async function start(wasm, mount = document.body, options = {}) {
   // for again when it shows.
   let wakeWanted = false, wakeLock = null, audio = null;
   const requestWake = () => navigator.wakeLock?.request('screen').then((l) => { if (wakeWanted) wakeLock = l; else l.release(); }, () => {});
+  // Escape, Enter, the arrows and Tab go to the app first (zui.KeyEvent); what it takes, the
+  // browser does not act on.
+  const KEYS = { Escape: 1, Esc: 1, Enter: 2, ArrowUp: 3, Up: 3, ArrowDown: 4, Down: 4, ArrowLeft: 5, Left: 5, ArrowRight: 6, Right: 6, Tab: 7 };
+  document.addEventListener('keydown', (e) => {
+    const code = KEYS[e.key];
+    if (!code || e.isComposing || !ex.zui_key_event) return;
+    const t = e.target;
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    const mods = (e.shiftKey ? 1 : 0) | (e.ctrlKey || e.metaKey ? 2 : 0) | (e.altKey ? 4 : 0) | (typing ? 8 : 0);
+    if (ex.zui_key_event(code, mods)) e.preventDefault();
+  });
   const onOnline = () => ex.zui_device_event(1);
   const onOffline = () => ex.zui_device_event(2);
   const onVisibility = () => {

@@ -474,6 +474,11 @@ pub fn Driver(comptime App: type) type {
             R.deviceEvent(e);
         }
 
+        /// A key from a keyboard; returns whether the app took it.
+        pub fn key(e: zui.KeyEvent) bool {
+            return R.keyEvent(e);
+        }
+
         /// Answers the oldest pending request whose URL contains `part`. Returns false if none.
         pub fn respond(part: []const u8, status: u16, body: []const u8) bool {
             for (fetches.items, 0..) |f, i| {
@@ -822,6 +827,10 @@ const Nav = struct {
     pub fn deviceEvent(e: zui.DeviceEvent) ?Msg {
         return .{ .device = e };
     }
+    /// Escape closes the sheet; other keys stay the platform's.
+    pub fn keyEvent(e: zui.KeyEvent) ?Msg {
+        return if (e.key == .escape) .close_sheet else null;
+    }
     fn setPage(s: *State, l: []const u8) void {
         s.page_len = @min(l.len, s.page.len);
         @memcpy(s.page[0..s.page_len], l[0..s.page_len]);
@@ -889,6 +898,18 @@ test "links: pushLink makes history, Back walks it, the app's onBack comes first
     try std.testing.expect(!back_history);
     D.openLink("/deep");
     try std.testing.expect(D.findText("/deep") != 0);
+}
+
+test "keys: the app takes Escape, leaves the others" {
+    const D = Driver(Nav);
+    D.start(200, 400);
+    defer D.reset();
+    try D.press("Sheet");
+    try std.testing.expect(D.key(.{ .key = .escape }));
+    try std.testing.expect(!D.R.appState().sheet);
+    try std.testing.expect(!D.key(.{ .key = .down, .in_input = true }));
+    try std.testing.expectEqual(zui.KeyEvent{ .key = .up, .shift = true, .in_input = true }, zui.KeyEvent.of(3, 9).?);
+    try std.testing.expect(zui.KeyEvent.of(99, 0) == null);
 }
 
 test "device events, the wall clock" {

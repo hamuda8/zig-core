@@ -550,6 +550,11 @@ pub fn exportEntry(comptime App: type) void {
             bind(e);
             return @intFromBool(R.back());
         }
+        fn keyEvent(e: *jni.Env, _: jni.jclass, code: jni.jint, mods: jni.jint) callconv(.c) jni.jboolean {
+            bind(e);
+            const k = zui.KeyEvent.of(@intCast(@max(0, code)), @intCast(@max(0, mods))) orelse return 0;
+            return @intFromBool(R.keyEvent(k));
+        }
         fn linkEvent(e: *jni.Env, _: jni.jclass, link: jni.jstring) callconv(.c) void {
             bind(e);
             var buf: [2048]u8 = undefined;
@@ -601,6 +606,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.callEvent, .{ .name = "Java_com_wufour_zui_Zui_nativeCall" });
     @export(&Entry.callsPump, .{ .name = "Java_com_wufour_zui_Zui_nativeCallsPump" });
     @export(&Entry.back, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeBack" });
+    @export(&Entry.keyEvent, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativeKey" });
     @export(&Entry.recordEvent, .{ .name = "Java_com_wufour_zui_ZuiRecorder_nativeRecordEvent" });
     @export(&Entry.playEvent, .{ .name = "Java_com_wufour_zui_ZuiPlayer_nativePlayEvent" });
     @export(&Entry.pickDone, .{ .name = "Java_com_wufour_zui_ZuiDevice_nativePickDone" });

@@ -16,6 +16,11 @@ extern "UIKit" var NSParagraphStyleAttributeName: id;
 extern "UIKit" var NSBaselineOffsetAttributeName: id;
 extern "UIKit" var UIApplicationWillEnterForegroundNotification: id;
 extern "UIKit" var UIApplicationDidEnterBackgroundNotification: id;
+extern "UIKit" var UIKeyInputEscape: id;
+extern "UIKit" var UIKeyInputUpArrow: id;
+extern "UIKit" var UIKeyInputDownArrow: id;
+extern "UIKit" var UIKeyInputLeftArrow: id;
+extern "UIKit" var UIKeyInputRightArrow: id;
 
 /// UIControlEventEditingChanged, ...DidBegin, ...DidEnd, ...DidEndOnExit (return key).
 const editing_changed: usize = 1 << 17;
@@ -460,6 +465,12 @@ pub fn exportEntry(comptime App: type) void {
             objc.defineClass("ZuiSceneDelegate", "UIResponder", &.{"UIWindowSceneDelegate"}, &.{
                 .{ "scene:willConnectToSession:options:", @ptrCast(&sceneWillConnect), "v@:@@@" },
             });
+            // The root controller hears hardware keyboards: Escape and the arrows go to the app
+            // (zui.KeyEvent); a text field keeps its own arrows.
+            objc.defineClass("ZuiController", "UIViewController", &.{}, &.{
+                .{ "keyCommands", @ptrCast(&keyCommands), "@@:" },
+                .{ "zuiKey:", @ptrCast(&keyCommand), "v@:@" },
+            });
             objc.defineClass("ZuiRootView", "UIView", &.{}, &.{
                 .{ "layoutSubviews", @ptrCast(&rootLayout), "v@:" },
                 .{ "traitCollectionDidChange:", @ptrCast(&rootTraits), "v@:@" },
@@ -500,7 +511,7 @@ pub fn exportEntry(comptime App: type) void {
             target = objc.new("ZuiTarget");
             window = objc.send1(objc.send(objc.class("UIWindow"), "alloc"), "initWithWindowScene:", scene);
             root = objc.new("ZuiRootView");
-            const controller = objc.new("UIViewController");
+            const controller = objc.new("ZuiController");
             root_controller = controller;
             objc.sendVoid1(controller, "setView:", root);
             objc.sendVoid1(window, "setRootViewController:", controller);
@@ -509,6 +520,29 @@ pub fn exportEntry(comptime App: type) void {
             const observe = objc.msgSend(*const fn (id, objc.SEL, id, objc.SEL, id, id) callconv(.c) void);
             observe(center, objc.sel("addObserver:selector:name:object:"), target, objc.sel("appVisible:"), UIApplicationWillEnterForegroundNotification, null);
             observe(center, objc.sel("addObserver:selector:name:object:"), target, objc.sel("appHidden:"), UIApplicationDidEnterBackgroundNotification, null);
+        }
+
+        var key_commands: id = null;
+
+        fn keyCommands(_: id, _: objc.SEL) callconv(.c) id {
+            if (key_commands != null) return key_commands;
+            const make = objc.msgSend(*const fn (id, objc.SEL, id, isize, objc.SEL) callconv(.c) id);
+            const inputs = [_]id{ UIKeyInputEscape, UIKeyInputUpArrow, UIKeyInputDownArrow, UIKeyInputLeftArrow, UIKeyInputRightArrow };
+            var cmds: [inputs.len]id = undefined;
+            for (inputs, 0..) |in, k| cmds[k] = make(objc.class("UIKeyCommand"), objc.sel("keyCommandWithInput:modifierFlags:action:"), in, 0, objc.sel("zuiKey:"));
+            const array = objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id);
+            key_commands = objc.send(array(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &cmds, cmds.len), "retain");
+            return key_commands;
+        }
+
+        fn keyCommand(_: id, _: objc.SEL, cmd: id) callconv(.c) void {
+            const typed = objc.send(cmd, "input");
+            const eq = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) bool);
+            const keys_ = [_]struct { id, zui.KeyEvent.Key }{ .{ UIKeyInputEscape, .escape }, .{ UIKeyInputUpArrow, .up }, .{ UIKeyInputDownArrow, .down }, .{ UIKeyInputLeftArrow, .left }, .{ UIKeyInputRightArrow, .right } };
+            for (keys_) |k| if (eq(typed, objc.sel("isEqualToString:"), k[0])) {
+                _ = R.keyEvent(.{ .key = k[1] });
+                return;
+            };
         }
 
         /// The edge swipe (UIScreenEdgePanGestureRecognizer), once the finger lifts.

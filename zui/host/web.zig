@@ -385,6 +385,9 @@ pub fn exportEntry(comptime App: type) void {
         fn linkEvent(ptr: [*]const u8, len: usize) callconv(.c) void {
             R.linkEvent(ptr[0..len]);
         }
+        fn keyEvent(code: u32, mods: u32) callconv(.c) u32 {
+            return @intFromBool(R.keyEvent(zui.KeyEvent.of(code, mods) orelse return 0));
+        }
         fn deviceEvent(kind: u32) callconv(.c) void {
             R.deviceEvent(std.enums.fromInt(zui.DeviceEvent, kind) orelse return);
         }
@@ -426,6 +429,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.streamEnd, .{ .name = "zui_stream_end" });
     @export(&Entry.linkEvent, .{ .name = "zui_link_event" });
     @export(&Entry.deviceEvent, .{ .name = "zui_device_event" });
+    @export(&Entry.keyEvent, .{ .name = "zui_key_event" });
     @export(&Entry.alloc, .{ .name = "zui_alloc" });
     @export(&Entry.free, .{ .name = "zui_free" });
     exportStyle(R);

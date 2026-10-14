@@ -59,6 +59,12 @@ public final class ZuiActivity extends Activity {
         setContentView(root);
     }
 
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent e) {
+        if (ZuiDevice.key(e, getCurrentFocus())) return true;
+        return super.dispatchKeyEvent(e);
+    }
+
     /** An urgent notification (dispatch alarm, call) opens the app over the lock screen. */
     void showOverLockScreen(android.content.Intent intent) {
         if (intent == null || !intent.getBooleanExtra("zui_alert", false)) return;

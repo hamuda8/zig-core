@@ -32,6 +32,8 @@ final class ZuiDevice {
     // Implemented in Zig (libapp.so).
     /** Back: whether the app took it (its own handler, or a link to go back to). */
     static native boolean nativeBack();
+    /** A hardware keyboard's key (zui.KeyEvent codes and modifier bits): whether the app took it. */
+    static native boolean nativeKey(int code, int mods);
     /** The app was opened again with a new address (a deep link). */
     static native void nativeLink(String link);
     static native void nativeDevice(int kind);
@@ -54,6 +56,27 @@ final class ZuiDevice {
      *  Android 13+ callback. False: the activity does its default. */
     static boolean back() {
         return Zui.started && nativeBack();
+    }
+
+    // ---- Hardware keyboards ----
+
+    /** Escape, Enter, the arrows and Tab go to the app first (zui.KeyEvent); false: as usual. */
+    static boolean key(android.view.KeyEvent e, android.view.View focus) {
+        if (!Zui.started || e.getAction() != android.view.KeyEvent.ACTION_DOWN) return false;
+        int code;
+        switch (e.getKeyCode()) {
+            case android.view.KeyEvent.KEYCODE_ESCAPE: code = 1; break;
+            case android.view.KeyEvent.KEYCODE_ENTER: case android.view.KeyEvent.KEYCODE_NUMPAD_ENTER: code = 2; break;
+            case android.view.KeyEvent.KEYCODE_DPAD_UP: code = 3; break;
+            case android.view.KeyEvent.KEYCODE_DPAD_DOWN: code = 4; break;
+            case android.view.KeyEvent.KEYCODE_DPAD_LEFT: code = 5; break;
+            case android.view.KeyEvent.KEYCODE_DPAD_RIGHT: code = 6; break;
+            case android.view.KeyEvent.KEYCODE_TAB: code = 7; break;
+            default: return false;
+        }
+        int mods = (e.isShiftPressed() ? 1 : 0) | (e.isCtrlPressed() || e.isMetaPressed() ? 2 : 0) | (e.isAltPressed() ? 4 : 0)
+                | (focus instanceof android.widget.EditText ? 8 : 0);
+        return nativeKey(code, mods);
     }
 
     /** Android 13+: the callback is registered only while the app handles Back, so the system
