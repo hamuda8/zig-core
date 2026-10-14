@@ -1093,6 +1093,40 @@ fn converterInput(_: ?*anyopaque, packets: *u32, data: *AudioBufferList, descs: 
     return 0;
 }
 
+/// Opus packets → interleaved 16-bit PCM at 48 kHz (WebM voice messages from browsers, which
+/// AVPlayer cannot play). Caller frees.
+pub fn decodeOpus(packets: []const []const u8, channels: u32) ?[]i16 {
+    const ch = @max(1, @min(channels, 2));
+    const src: AudioStreamBasicDescription = .{ .sample_rate = 48000, .format_id = fourcc("opus"), .frames_per_packet = 960, .channels_per_frame = ch };
+    const dst: AudioStreamBasicDescription = .{
+        .sample_rate = 48000,
+        .format_id = fourcc("lpcm"),
+        .format_flags = 4 | 8, // signed integer, packed
+        .bytes_per_packet = 2 * ch,
+        .frames_per_packet = 1,
+        .bytes_per_frame = 2 * ch,
+        .channels_per_frame = ch,
+        .bits_per_channel = 16,
+    };
+    var conv: ?*anyopaque = null;
+    if (AudioConverterNew(&src, &dst, &conv) != 0) return null;
+    const c = conv orelse return null;
+    defer _ = AudioConverterDispose(c);
+    var out: std.ArrayList(i16) = .empty;
+    var pcm: [5760 * 2]i16 = undefined;
+    for (packets) |pkt| {
+        var in: ConvInput = .{ .data = pkt, .is_packet = true };
+        var list: AudioBufferList = .{ .count = 1, .buffers = .{.{ .channels = ch, .size = @intCast(pcm.len * 2), .data = &pcm }} };
+        var frames: u32 = @intCast(pcm.len / ch);
+        _ = AudioConverterFillComplexBuffer(c, converterInput, &in, &frames, &list, null);
+        out.appendSlice(gpa, pcm[0..@min(frames * ch, pcm.len)]) catch {
+            out.deinit(gpa);
+            return null;
+        };
+    }
+    return out.toOwnedSlice(gpa) catch null;
+}
+
 fn startWorker() void {
     mutex.lock();
     defer mutex.unlock();

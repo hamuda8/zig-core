@@ -86,6 +86,8 @@ pub const sse = @import("sse.zig");
 pub const keys = @import("keys.zig");
 /// Tap, double tap, pan, pinch, swipe and wheel from pointer events.
 pub const gesture = @import("gesture.zig");
+/// The Opus packets of a WebM voice message (for iOS, which cannot play WebM).
+pub const webm = @import("webm.zig");
 pub const Transform = style.Transform;
 pub const ImageFilter = style.ImageFilter;
 pub const Shadow = style.Shadow;
@@ -151,6 +153,7 @@ test {
     _ = text;
     _ = barcode;
     _ = gesture;
+    _ = webm;
     _ = png;
     if (platform == .headless) _ = @import("ui_test.zig");
     if (platform == .headless) _ = @import("push_test.zig");

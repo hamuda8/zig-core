@@ -409,12 +409,33 @@ fn extension(mime: []const u8) []const u8 {
     return if (std.mem.startsWith(u8, mime, "video")) "mp4" else "m4a";
 }
 
+/// A browser's WebM voice message (Opus) as WAV, which AVPlayer plays: demuxed here
+/// (zui.webm), the Opus decoded by AudioConverter.
+fn webmToWav(data: []const u8) ?[]u8 {
+    var a = zui.webm.demux(gpa, data) catch return null;
+    defer a.deinit(gpa);
+    if (!std.mem.eql(u8, a.codec, "A_OPUS")) return null;
+    const ch: u32 = @max(1, @min(a.channels, 2));
+    const pcm = @import("ios.zig").decodeOpus(a.packets.items, ch) orelse return null;
+    defer gpa.free(pcm);
+    const skip = @min(pcm.len, @as(usize, a.pre_skip) * ch);
+    return zui.webm.wav(gpa, pcm[skip..], @intCast(ch), 48000) catch null;
+}
+
 pub fn play(player_id: u32, p: zui.Playback) void {
     audioSession();
     var path: ?[:0]u8 = null;
-    const url = if (p.data.len > 0) blk: {
-        path = tempPath(extension(p.mime)) orelse return on_play(player_id, .failed, 0, 0, "unavailable");
-        if (!writeFile(path.?[0..path.?.len], p.data)) {
+    var data = p.data;
+    var mime = p.mime;
+    const converted: ?[]u8 = if (data.len > 4 and std.mem.readInt(u32, data[0..4], .big) == 0x1A45DFA3) webmToWav(data) else null;
+    defer if (converted) |c| gpa.free(c);
+    if (converted) |c| {
+        data = c;
+        mime = "audio/wav";
+    }
+    const url = if (data.len > 0) blk: {
+        path = tempPath(extension(mime)) orelse return on_play(player_id, .failed, 0, 0, "unavailable");
+        if (!writeFile(path.?[0..path.?.len], data)) {
             gpa.free(path.?);
             return on_play(player_id, .failed, 0, 0, "unavailable");
         }
