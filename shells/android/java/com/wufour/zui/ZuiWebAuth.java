@@ -119,7 +119,7 @@ final class ZuiWebAuth {
         LinearLayout root = new LinearLayout(a);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(background);
-        root.setLayoutDirection(rtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
+        root.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
 
         // The app's top bar: the back arrow and the title, nothing of a browser.
         LinearLayout barView = new LinearLayout(a);
@@ -132,9 +132,11 @@ final class ZuiWebAuth {
         TypedValue tv = new TypedValue();
         if (a.getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)) back.setBackgroundResource(tv.resourceId);
         back.setOnClickListener(v -> close(null));
+        // Placed by hand (left/right), not by layout direction: apps without
+        // android:supportsRtl get no right-to-left layout from Android.
         LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams((int) (48 * d), (int) (48 * d));
-        bp.setMarginStart((int) (4 * d));
-        barView.addView(back, bp);
+        if (rtl) bp.rightMargin = (int) (4 * d);
+        else bp.leftMargin = (int) (4 * d);
         TextView t = new TextView(a);
         t.setText(title);
         t.setTextColor(ink);
@@ -142,11 +144,18 @@ final class ZuiWebAuth {
         t.setTypeface(android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD));
         t.setSingleLine(true);
         t.setEllipsize(TextUtils.TruncateAt.END);
-        t.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START);
+        t.setTextDirection(rtl ? View.TEXT_DIRECTION_RTL : View.TEXT_DIRECTION_LTR);
+        t.setGravity((rtl ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-        tp.setMarginStart((int) (12 * d));
-        tp.setMarginEnd((int) (16 * d));
-        barView.addView(t, tp);
+        tp.leftMargin = (int) ((rtl ? 16 : 12) * d);
+        tp.rightMargin = (int) ((rtl ? 12 : 16) * d);
+        if (rtl) {
+            barView.addView(t, tp);
+            barView.addView(back, bp);
+        } else {
+            barView.addView(back, bp);
+            barView.addView(t, tp);
+        }
         root.addView(barView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (int) (56 * d)));
 
         // The page: hidden behind a spinner on the app's background until it has loaded.
