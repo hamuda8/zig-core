@@ -47,6 +47,8 @@ pub const State = struct {
     pressed: u32 = 0,
     /// Host id of the view under the mouse, 0 for none.
     hovered: u32 = 0,
+    /// Transitions are off (the app's "animations" switch: fx.reduceMotion).
+    reduce_motion: bool = false,
 };
 
 fn spansEql(a: []const tree_mod.Span, b: []const tree_mod.Span) bool {
@@ -182,8 +184,9 @@ pub fn Reconciler(comptime H: type) type {
 
             // Set first: the changes below animate with it.
             if (@hasDecl(H, "transition")) {
-                const was: ?st.Transition = if (o) |old| old.style.transition else null;
-                if (!std.meta.eql(was, s.transition)) H.transition(id, s.transition);
+                const was: ?st.Transition = if (o == null or r.prev.reduce_motion) null else o.?.style.transition;
+                const now: ?st.Transition = if (r.now.reduce_motion) null else s.transition;
+                if (!std.meta.eql(was, now)) H.transition(id, now);
             }
 
             if (o == null or !o.?.frame.eql(n.frame)) H.frame(id, n.frame);
@@ -332,6 +335,9 @@ pub const RecordingHost = struct {
     pub fn video(id: u32, v: tree_mod.Video) void {
         write("video {d} {d}", .{ id, v.stream });
     }
+    pub fn transition(id: u32, t: ?st.Transition) void {
+        write("transition {d} {d}", .{ id, if (t) |x| x.duration_ms else 0 });
+    }
 };
 
 const testing = std.testing;
@@ -416,6 +422,34 @@ test "a node opening above unkeyed siblings does not rebuild them (an input keep
     try testing.expect(std.mem.indexOf(u8, RecordingHost.log.items, "destroy") == null);
     try testing.expect(std.mem.indexOf(u8, RecordingHost.log.items, "create") != null); // only the list
     try testing.expect(std.mem.indexOf(u8, RecordingHost.log.items, "create 5 view") == null);
+}
+
+test "reduce motion turns transitions off and back on" {
+    defer RecordingHost.deinit();
+    var a = Tree.init(testing.allocator);
+    defer a.deinit();
+    var b = Tree.init(testing.allocator);
+    defer b.deinit();
+    var r: Reconciler(RecordingHost) = .{ .gpa = testing.allocator };
+    defer r.ids.free.deinit(testing.allocator);
+    const one = struct {
+        fn f(t: *Tree) !void {
+            t.reset();
+            _ = try t.open(.{ .kind = .view, .style = .{ .transition = .{ .duration_ms = 250 } } });
+            t.close();
+        }
+    }.f;
+    try one(&a);
+    r.run(null, &a, .{});
+    try testing.expect(std.mem.indexOf(u8, RecordingHost.log.items, "transition 1 250") != null);
+    RecordingHost.reset();
+    try one(&b);
+    r.run(&a, &b, .{ .reduce_motion = true });
+    try testing.expectEqualStrings("transition 1 0\n", RecordingHost.log.items);
+    RecordingHost.reset();
+    try one(&a);
+    r.run(&b, &a, .{});
+    try testing.expectEqualStrings("transition 1 250\n", RecordingHost.log.items);
 }
 
 test "right-to-left flips text alignment" {

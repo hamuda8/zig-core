@@ -441,6 +441,7 @@ pub fn Fx(comptime Msg: type) type {
             location: *const fn (?*const fn (Location) Msg) void,
             speak: *const fn ([]const u8) void,
             set_link: *const fn ([]const u8) void,
+            reduce_motion: *const fn (bool) void,
             focus: *const fn (u64) void,
             scroll_to: *const fn (u64, ScrollTarget, bool) void,
             scan_barcode: *const fn (Scan, *const fn (ScanEvent) Msg) u32,
@@ -512,6 +513,12 @@ pub fn Fx(comptime Msg: type) type {
         /// one: no new history entry. Other platforms keep it for sharing.
         pub fn setLink(fx: Self, link: []const u8) void {
             fx.vt.set_link(link);
+        }
+
+        /// Turns every Style.transition off (true) or back on: the app's "animations" switch.
+        /// Spinners keep turning (they say something is happening).
+        pub fn reduceMotion(fx: Self, on: bool) void {
+            fx.vt.reduce_motion(on);
         }
 
         /// Goes to a new address with a history entry behind it: Back (the browser's, Android's,
@@ -1560,6 +1567,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .location = fxLocation,
             .speak = fxSpeak,
             .set_link = fxSetLink,
+            .reduce_motion = fxReduceMotion,
             .focus = fxFocus,
             .scroll_to = fxScrollTo,
             .scan_barcode = fxScanBarcode,
@@ -1867,6 +1875,12 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             const owned = gpa.dupe(u8, link) catch return "";
             links.put(gpa, owned, {}) catch {};
             return owned;
+        }
+
+        var reduce_motion = false;
+
+        fn fxReduceMotion(on: bool) void {
+            reduce_motion = on;
         }
 
         fn fxSetLink(link: []const u8) void {
@@ -2497,7 +2511,7 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             const root_frame: st.Rect = .{ .x = s.left, .y = s.top, .w = @max(0, env.width - s.left - s.right), .h = @max(0, env.height - s.top - s.bottom) };
             layout.Engine.runRich(tree, &H.measure, if (@hasDecl(H, "measureRich")) &H.measureRich else null, env.rtl, root_frame) catch return;
             const old: ?*const Tree = if (has_old) &trees[current] else null;
-            rec.run(old, tree, .{ .rtl = env.rtl, .pressed = pressed, .hovered = hovered });
+            rec.run(old, tree, .{ .rtl = env.rtl, .pressed = pressed, .hovered = hovered, .reduce_motion = reduce_motion });
 
             // Handlers now point at host ids, which is what events carry.
             for (ui.presses.items) |*b| b.node = tree.nodes.items[b.node].host;
