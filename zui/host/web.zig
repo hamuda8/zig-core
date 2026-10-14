@@ -47,6 +47,8 @@ const js = struct {
     extern "zui" fn zui_media_open(id: u32, audio: u32, video: u32, screen: u32, back: u32) void;
     extern "zui" fn zui_media_enable(id: u32, audio: u32, video: u32) void;
     extern "zui" fn zui_media_switch(id: u32) void;
+    extern "zui" fn zui_media_devices(id: u32) void;
+    extern "zui" fn zui_media_use(id: u32, kind: u32, ptr: [*]const u8, len: usize) void;
     extern "zui" fn zui_media_close(id: u32) void;
     extern "zui" fn zui_peer_open(id: u32, ice: [*]const u8, ice_len: usize, polite: u32, stream: u32) void;
     extern "zui" fn zui_peer_signal(id: u32, ptr: [*]const u8, len: usize) void;
@@ -237,6 +239,14 @@ pub fn mediaEnable(id: u32, audio: bool, video_: bool) void {
 pub fn switchCamera(id: u32) void {
     js.zui_media_switch(id);
 }
+/// enumerateDevices: microphones, cameras and (where setSinkId exists) loudspeakers; the answer
+/// comes back through zui_devices_event.
+pub fn listMediaDevices(stream: u32) void {
+    js.zui_media_devices(stream);
+}
+pub fn useMediaDevice(stream: u32, kind: zui.MediaDevice.Kind, id: []const u8) void {
+    js.zui_media_use(stream, @intFromEnum(kind), id.ptr, id.len);
+}
 pub fn closeMedia(id: u32) void {
     js.zui_media_close(id);
 }
@@ -367,6 +377,9 @@ pub fn exportEntry(comptime App: type) void {
         fn socketEvent(id: u32, kind: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
             R.socketEvent(id, std.enums.fromInt(zui.SocketEvent.Kind, kind) orelse return, ptr[0..len]);
         }
+        fn devicesEvent(ptr: [*]const u8, len: usize) callconv(.c) void {
+            R.mediaDevicesDone(ptr[0..len]);
+        }
         fn mediaEvent(id: u32, kind: u32, ptr: [*]const u8, len: usize) callconv(.c) void {
             R.mediaEvent(id, std.enums.fromInt(zui.MediaEvent.Kind, kind) orelse return, ptr[0..len]);
         }
@@ -448,6 +461,7 @@ pub fn exportEntry(comptime App: type) void {
     @export(&Entry.pushToken, .{ .name = "zui_push_token" });
     @export(&Entry.pushMessage, .{ .name = "zui_push_message" });
     @export(&Entry.mediaEvent, .{ .name = "zui_media_event" });
+    @export(&Entry.devicesEvent, .{ .name = "zui_devices_event" });
     @export(&Entry.peerEvent, .{ .name = "zui_peer_event" });
     @export(&Entry.recordEvent, .{ .name = "zui_record_event" });
     @export(&Entry.playEvent, .{ .name = "zui_play_event" });

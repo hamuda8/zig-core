@@ -135,6 +135,7 @@ extern "c" const AVLayerVideoGravityResizeAspectFill: id;
 extern "c" const AVLayerVideoGravityResizeAspect: id;
 extern "c" const AVAudioSessionCategoryPlayAndRecord: id;
 extern "c" const AVAudioSessionModeVideoChat: id;
+extern "c" const AVAudioSessionModeVoiceChat: id;
 extern "c" const kCVPixelBufferPixelFormatTypeKey: id;
 
 // ---- state ----------------------------------------------------------------------------------
@@ -274,6 +275,137 @@ pub fn enable(stream: u32, audio: bool, video: bool) void {
     const l = findLocal(stream) orelse return;
     l.audio_on.store(audio, .release);
     l.video_on.store(video, .release);
+}
+
+// ---- devices (zui.MediaDevice) ------------------------------------------------------------
+
+fn utf8(s: id) []const u8 {
+    if (s == null) return "";
+    const p = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(s, objc.sel("UTF8String"));
+    return if (p) |x| std.mem.span(x) else "";
+}
+
+fn at(array: id, i: usize) id {
+    return objc.msgSend(*const fn (id, objc.SEL, usize) callconv(.c) id)(array, objc.sel("objectAtIndex:"), i);
+}
+
+fn countOf(array: id) usize {
+    if (array == null) return 0;
+    return @intCast(objc.sendInt(array, "count"));
+}
+
+/// AVAudioSession port types ("Speaker", "Receiver", "BluetoothHFP"...) as zui.MediaDevice types.
+fn portType(port: id) []const u8 {
+    const t = utf8(objc.send(port, "portType"));
+    if (std.mem.eql(u8, t, "Speaker")) return "speaker";
+    if (std.mem.eql(u8, t, "Receiver")) return "earpiece";
+    if (std.mem.eql(u8, t, "MicrophoneBuiltIn")) return "builtin";
+    if (std.mem.startsWith(u8, t, "Bluetooth")) return "bluetooth";
+    if (std.mem.eql(u8, t, "Headphones") or std.mem.eql(u8, t, "HeadsetMicrophone")) return "wired";
+    if (std.mem.startsWith(u8, t, "USB")) return "usb";
+    return "";
+}
+
+var devices_buf: [8192]u8 = undefined;
+
+fn jsonString(w: anytype, s: []const u8) void {
+    w.writeByte('"') catch return;
+    for (s) |c| {
+        if (c == '"' or c == '\\') w.writeByte('\\') catch return;
+        w.writeByte(if (c < 0x20) ' ' else c) catch return;
+    }
+    w.writeByte('"') catch return;
+}
+
+/// Where the call plays (the earpiece, the loudspeaker, or the headset in use), the microphones
+/// AVAudioSession offers, and the two cameras.
+pub fn mediaDevicesJson(stream: u32) []const u8 {
+    var writer: std.Io.Writer = .fixed(&devices_buf);
+    const w = &writer;
+    const session = objc.send(objc.class("AVAudioSession"), "sharedInstance");
+    const route = objc.send(session, "currentRoute");
+    const outs = objc.send(route, "outputs");
+    const out_type = if (countOf(outs) > 0) portType(at(outs, 0)) else "";
+    w.writeAll("[") catch return "[]";
+    var first = true;
+    const comma = struct {
+        fn f(wr: anytype, fst: *bool) void {
+            if (!fst.*) wr.writeByte(',') catch {};
+            fst.* = false;
+        }
+    }.f;
+    // The phone's own two, and a headset when the call is on it.
+    for ([_][]const u8{ "earpiece", "speaker" }) |t| {
+        comma(w, &first);
+        w.print("{{\"k\":3,\"id\":\"{s}\",\"t\":\"{s}\",\"c\":{}}}", .{ t, t, std.mem.eql(u8, out_type, t) }) catch {};
+    }
+    if (std.mem.eql(u8, out_type, "bluetooth") or std.mem.eql(u8, out_type, "wired") or std.mem.eql(u8, out_type, "usb")) {
+        comma(w, &first);
+        w.print("{{\"k\":3,\"id\":\"route\",\"t\":\"{s}\",\"c\":true,\"l\":", .{out_type}) catch {};
+        jsonString(w, utf8(objc.send(at(outs, 0), "portName")));
+        w.writeAll("}") catch {};
+    }
+    const ins_now = objc.send(route, "inputs");
+    const in_uid = if (countOf(ins_now) > 0) utf8(objc.send(at(ins_now, 0), "UID")) else "";
+    const inputs = objc.send(session, "availableInputs");
+    var i: usize = 0;
+    while (i < countOf(inputs)) : (i += 1) {
+        const port = at(inputs, i);
+        const uid = utf8(objc.send(port, "UID"));
+        comma(w, &first);
+        w.writeAll("{\"k\":1,\"id\":") catch {};
+        jsonString(w, uid);
+        w.writeAll(",\"l\":") catch {};
+        jsonString(w, utf8(objc.send(port, "portName")));
+        w.print(",\"t\":\"{s}\",\"c\":{}}}", .{ portType(port), std.mem.eql(u8, uid, in_uid) }) catch {};
+    }
+    mutex.lock();
+    const l = findLocal(stream);
+    const video = if (l) |x| x.want_video else false;
+    const back = if (l) |x| x.back else false;
+    mutex.unlock();
+    if (video) {
+        comma(w, &first);
+        w.print("{{\"k\":2,\"id\":\"front\",\"t\":\"front\",\"c\":{}}},{{\"k\":2,\"id\":\"back\",\"t\":\"back\",\"c\":{}}}", .{ !back, back }) catch {};
+    }
+    w.writeAll("]") catch return "[]";
+    return w.buffered();
+}
+
+pub fn useMediaDevice(stream: u32, kind: zui.MediaDevice.Kind, dev: []const u8) void {
+    const session = objc.send(objc.class("AVAudioSession"), "sharedInstance");
+    var err: id = null;
+    switch (kind) {
+        .camera => {
+            mutex.lock();
+            const l = findLocal(stream);
+            const back = if (l) |x| x.back else false;
+            mutex.unlock();
+            if (l != null and std.mem.eql(u8, dev, "back") != back) switchCamera(stream);
+        },
+        .speaker => {
+            const override = objc.msgSend(*const fn (id, objc.SEL, usize, *id) callconv(.c) bool);
+            const set_mode = objc.msgSend(*const fn (id, objc.SEL, id, *id) callconv(.c) bool);
+            if (std.mem.eql(u8, dev, "speaker")) {
+                _ = set_mode(session, objc.sel("setMode:error:"), AVAudioSessionModeVideoChat, &err);
+                _ = override(session, objc.sel("overrideOutputAudioPort:error:"), 0x73706b72, &err); // Speaker
+            } else {
+                // The earpiece: voice chat mode plays there unless told otherwise.
+                _ = set_mode(session, objc.sel("setMode:error:"), AVAudioSessionModeVoiceChat, &err);
+                _ = override(session, objc.sel("overrideOutputAudioPort:error:"), 0, &err);
+            }
+        },
+        .microphone => {
+            const inputs = objc.send(session, "availableInputs");
+            var i: usize = 0;
+            while (i < countOf(inputs)) : (i += 1) {
+                const port = at(inputs, i);
+                if (!std.mem.eql(u8, utf8(objc.send(port, "UID")), dev)) continue;
+                _ = objc.msgSend(*const fn (id, objc.SEL, id, *id) callconv(.c) bool)(session, objc.sel("setPreferredInput:error:"), port, &err);
+                return;
+            }
+        },
+    }
 }
 
 pub fn switchCamera(stream: u32) void {

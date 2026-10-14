@@ -200,6 +200,112 @@ final class ZuiMedia {
         }
     }
 
+    // ---- devices (zui.MediaDevice) ----
+
+    static String q(String s) {
+        StringBuilder b = new StringBuilder("\"");
+        for (char c : (s == null ? "" : s).toCharArray()) {
+            if (c == '"' || c == '\\') b.append('\\').append(c);
+            else if (c < 0x20) b.append(' ');
+            else b.append(c);
+        }
+        return b.append('"').toString();
+    }
+
+    static String typeOf(android.media.AudioDeviceInfo d) {
+        switch (d.getType()) {
+            case android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE: return "earpiece";
+            case android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER: return "speaker";
+            case android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC: return "builtin";
+            case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO: return "bluetooth";
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES: return "wired";
+            case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+            case android.media.AudioDeviceInfo.TYPE_USB_DEVICE: return "usb";
+            default: return null;
+        }
+    }
+
+    /** Audio routes (where the call plays: earpiece, speaker, Bluetooth, wired), microphones and
+     *  the two cameras; kinds 1 microphone, 2 camera, 3 speaker. */
+    static String devices(int id) {
+        AudioManager am = (AudioManager) Zui.activity.getSystemService(Context.AUDIO_SERVICE);
+        StringBuilder b = new StringBuilder("[");
+        int current = -1;
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            android.media.AudioDeviceInfo c = am.getCommunicationDevice();
+            if (c != null) current = c.getId();
+        }
+        boolean speakerOn = am.isSpeakerphoneOn();
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        for (android.media.AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+            String t = typeOf(d);
+            if (t == null || t.equals("builtin") || !seen.add("o" + t)) continue;
+            boolean c = current >= 0 ? d.getId() == current : (t.equals("speaker") ? speakerOn : t.equals("earpiece") && !speakerOn);
+            if (b.length() > 1) b.append(',');
+            b.append("{\"k\":3,\"id\":").append(q(String.valueOf(d.getId()))).append(",\"l\":").append(q(String.valueOf(d.getProductName()))).append(",\"t\":").append(q(t)).append(",\"c\":").append(c).append('}');
+        }
+        for (android.media.AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+            String t = typeOf(d);
+            if (t == null || !seen.add("i" + t)) continue;
+            if (b.length() > 1) b.append(',');
+            b.append("{\"k\":1,\"id\":").append(q(String.valueOf(d.getId()))).append(",\"l\":").append(q(String.valueOf(d.getProductName()))).append(",\"t\":").append(q(t)).append(",\"c\":").append(t.equals("builtin")).append('}');
+        }
+        Local l = locals.get(id);
+        if (l != null && l.video) {
+            if (b.length() > 1) b.append(',');
+            b.append("{\"k\":2,\"id\":\"front\",\"t\":\"front\",\"c\":").append(!l.back).append("},{\"k\":2,\"id\":\"back\",\"t\":\"back\",\"c\":").append(l.back).append('}');
+        }
+        return b.append(']').toString();
+    }
+
+    /** Routes the call's audio to that device (Android 12+: the communication device; before:
+     *  the speakerphone or Bluetooth SCO), or switches to that camera. */
+    static void useDevice(int id, int kind, String dev) {
+        if (kind == 2) {
+            Local l = locals.get(id);
+            if (l != null && l.video && dev.equals("back") != l.back) switchCamera(id);
+            return;
+        }
+        AudioManager am = (AudioManager) Zui.activity.getSystemService(Context.AUDIO_SERVICE);
+        int want;
+        try {
+            want = Integer.parseInt(dev);
+        } catch (NumberFormatException e) {
+            return;
+        }
+        android.media.AudioDeviceInfo chosen = null;
+        for (android.media.AudioDeviceInfo d : am.getDevices(kind == 1 ? AudioManager.GET_DEVICES_INPUTS : AudioManager.GET_DEVICES_OUTPUTS)) if (d.getId() == want) chosen = d;
+        if (chosen == null) return;
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            if (kind == 1) {
+                // A microphone goes with its route: the headset's or the phone's own.
+                for (android.media.AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
+                    String t = typeOf(d);
+                    String ct = typeOf(chosen);
+                    if (t != null && (t.equals(ct) || (ct.equals("builtin") && t.equals("earpiece")))) {
+                        am.setCommunicationDevice(d);
+                        return;
+                    }
+                }
+                return;
+            }
+            am.setCommunicationDevice(chosen);
+            return;
+        }
+        String t = typeOf(chosen);
+        if (t == null) return;
+        if (t.equals("bluetooth")) {
+            am.setSpeakerphoneOn(false);
+            am.startBluetoothSco();
+            am.setBluetoothScoOn(true);
+        } else {
+            am.stopBluetoothSco();
+            am.setBluetoothScoOn(false);
+            am.setSpeakerphoneOn(t.equals("speaker"));
+        }
+    }
+
     static void switchCamera(int id) {
         Local l = locals.get(id);
         if (l == null || !l.video) return;

@@ -70,6 +70,7 @@ pub const wufour = @import("wufour.zig");
 pub const DeviceEvent = runtime.DeviceEvent;
 pub const KeyEvent = runtime.KeyEvent;
 pub const Selection = runtime.Selection;
+pub const MediaDevice = runtime.MediaDevice;
 pub const DatePick = runtime.DatePick;
 pub const TimePick = runtime.TimePick;
 pub const OptionPick = runtime.OptionPick;

@@ -369,7 +369,7 @@ fn object(v: jni.jobject) jni.jvalue {
 
 /// Java strings are UTF-16; going through `NewString` keeps emoji and other characters outside
 /// the BMP intact, which `NewStringUTF`'s modified UTF-8 would not.
-fn newString(s: []const u8) jni.jstring {
+pub fn newString(s: []const u8) jni.jstring {
     const f = env.functions;
     var stack: [512]u16 = undefined;
     const len = std.unicode.calcUtf16LeLen(s) catch return f.NewString(env, &stack, 0);
@@ -437,7 +437,7 @@ pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
 }
 
 /// A Java string of any length as UTF-8, in `buf` (3 bytes per UTF-16 unit is always enough).
-fn javaStringLong(s: jni.jstring, buf: []u8) []const u8 {
+pub fn javaStringLong(s: jni.jstring, buf: []u8) []const u8 {
     const f = env.functions;
     const len: usize = @intCast(f.GetStringLength(env, s));
     const units = zui.allocator.alloc(u16, len) catch return "";

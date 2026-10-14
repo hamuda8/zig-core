@@ -91,6 +91,22 @@ pub const KeyEvent = struct {
 /// (start == end: just the cursor).
 pub const Selection = struct { start: u32, end: u32 };
 
+/// A microphone, camera or loudspeaker a call can use (`fx.mediaDevices`).
+pub const MediaDevice = struct {
+    kind: Kind,
+    /// What `fx.useMediaDevice` takes.
+    id: []const u8,
+    /// The platform's name for it (a headset's name; may be empty).
+    label: []const u8 = "",
+    /// What it is, for the app's own words: "earpiece", "speaker", "bluetooth", "wired", "usb",
+    /// "builtin", "front", "back", or "" (the web names its devices itself).
+    type: []const u8 = "",
+    /// In use now.
+    current: bool = false,
+
+    pub const Kind = enum(u8) { microphone = 1, camera = 2, speaker = 3 };
+};
+
 pub const Method = enum { GET, POST, PUT, PATCH, DELETE };
 
 pub const Request = struct {
@@ -480,6 +496,8 @@ pub fn Fx(comptime Msg: type) type {
             open_media: *const fn (Media, *const fn (MediaEvent) Msg) u32,
             media_enable: *const fn (u32, bool, bool) void,
             switch_camera: *const fn (u32) void,
+            media_devices: *const fn (u32, *const fn ([]const MediaDevice) Msg) void,
+            use_media_device: *const fn (u32, MediaDevice.Kind, []const u8) void,
             close_media: *const fn (u32) void,
             open_peer: *const fn (Peer, *const fn (PeerEvent) Msg) u32,
             peer_signal: *const fn (u32, []const u8) void,
@@ -702,6 +720,18 @@ pub fn Fx(comptime Msg: type) type {
         /// Front camera to back camera and back, also on every connection sending this stream.
         pub fn switchCamera(fx: Self, stream: u32) void {
             fx.vt.switch_camera(stream);
+        }
+
+        /// The microphones, cameras and loudspeakers (or earpiece, Bluetooth...) a call on
+        /// `stream` can use, marked where in use. The list is only valid during `update`.
+        pub fn mediaDevices(fx: Self, stream: u32, on: *const fn ([]const MediaDevice) Msg) void {
+            fx.vt.media_devices(stream, on);
+        }
+
+        /// Uses that device for the call on `stream` (the connections get the new track; a
+        /// loudspeaker is where every call sound plays).
+        pub fn useMediaDevice(fx: Self, stream: u32, kind: MediaDevice.Kind, id: []const u8) void {
+            fx.vt.use_media_device(stream, kind, id);
         }
 
         /// Turns the microphone and camera off.
@@ -1622,6 +1652,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             .open_media = fxOpenMedia,
             .media_enable = fxMediaEnable,
             .switch_camera = fxSwitchCamera,
+            .media_devices = fxMediaDevices,
+            .use_media_device = fxUseMediaDevice,
             .close_media = fxCloseMedia,
             .open_peer = fxOpenPeer,
             .peer_signal = fxPeerSignal,
@@ -2069,6 +2101,60 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
 
         fn fxSwitchCamera(id: u32) void {
             if (has_calls) C.switchCamera(id);
+        }
+
+        // Devices: the web and headless hosts have them; the phones' media backends too.
+        const Dev = if (@hasDecl(H, "listMediaDevices") or @hasDecl(H, "mediaDevicesJson")) H else if (@hasDecl(H, "Media") and @hasDecl(H.Media, "mediaDevicesJson")) H.Media else void;
+        var devices_cb: ?*const fn ([]const MediaDevice) Msg = null;
+        var devices: std.ArrayList(MediaDevice) = .empty;
+        var devices_text: std.ArrayList(u8) = .empty;
+
+        fn fxMediaDevices(stream: u32, on: *const fn ([]const MediaDevice) Msg) void {
+            devices_cb = on;
+            if (Dev == void) return mediaDevicesDone("[]");
+            // Hosts that know at once answer here; the web asks the browser and answers later.
+            if (@hasDecl(Dev, "mediaDevicesJson")) return mediaDevicesDone(Dev.mediaDevicesJson(stream));
+            Dev.listMediaDevices(stream);
+        }
+
+        fn fxUseMediaDevice(stream: u32, kind: MediaDevice.Kind, id_: []const u8) void {
+            if (Dev != void) Dev.useMediaDevice(stream, kind, id_);
+        }
+
+        /// The host's list, as JSON: [{"k":1,"id":"...","l":"label","t":"type","c":true}]. The app
+        /// hears it at the next turn (hosts may answer during the update that asked).
+        pub fn mediaDevicesDone(json: []const u8) void {
+            for (devices.items) |*d| {
+                gpa.free(d.id);
+                gpa.free(d.label);
+                gpa.free(d.type);
+            }
+            devices.clearRetainingCapacity();
+            const parsed = std.json.parseFromSlice(std.json.Value, gpa, json, .{}) catch return;
+            defer parsed.deinit();
+            if (parsed.value == .array) for (parsed.value.array.items) |v| {
+                if (v != .object) continue;
+                const k = v.object.get("k") orelse continue;
+                if (k != .integer) continue;
+                const kind = std.enums.fromInt(MediaDevice.Kind, @as(u8, @intCast(@max(0, @min(255, k.integer))))) orelse continue;
+                const s = struct {
+                    fn of(o: std.json.ObjectMap, name: []const u8) []const u8 {
+                        const x = o.get(name) orelse return "";
+                        return if (x == .string) x.string else "";
+                    }
+                };
+                const cur = v.object.get("c");
+                devices.append(gpa, .{
+                    .kind = kind,
+                    .id = gpa.dupe(u8, s.of(v.object, "id")) catch continue,
+                    .label = gpa.dupe(u8, s.of(v.object, "l")) catch continue,
+                    .type = gpa.dupe(u8, s.of(v.object, "t")) catch continue,
+                    .current = cur != null and cur.? == .bool and cur.?.bool,
+                }) catch {};
+            };
+            const cb = devices_cb orelse return;
+            devices_cb = null;
+            fxAfter(0, cb(devices.items));
         }
 
         fn fxCloseMedia(id: u32) void {

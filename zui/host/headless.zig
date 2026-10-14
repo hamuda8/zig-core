@@ -326,6 +326,16 @@ pub fn openMedia(id: u32, _: zui.Media) void {
 }
 pub fn mediaEnable(_: u32, _: bool, _: bool) void {}
 pub fn switchCamera(_: u32) void {}
+/// Tests set what fx.mediaDevices answers (JSON as hosts send it); used devices are recorded.
+pub var media_devices: []const u8 = "[]";
+pub var used_device: std.ArrayList(u8) = .empty;
+pub fn mediaDevicesJson(_: u32) []const u8 {
+    return media_devices;
+}
+pub fn useMediaDevice(_: u32, kind: zui.MediaDevice.Kind, id: []const u8) void {
+    used_device.clearRetainingCapacity();
+    used_device.print(gpa, "{t}:{s}", .{ kind, id }) catch {};
+}
 pub fn closeMedia(_: u32) void {
     media_open = 0;
 }
@@ -1480,4 +1490,49 @@ test "text selection and Ctrl+letter shortcuts: wrap the selection in ** and kee
     try std.testing.expectEqual(@as(u32, 14), sel.end);
     // A plain letter without Ctrl is not a key event.
     try std.testing.expect(!D.key(.{ .key = .letter, .letter = 'b' }));
+}
+
+const Devices = struct {
+    pub const Msg = union(enum) { list, got: []const zui.MediaDevice, use };
+    pub const State = struct { count: usize = 0, speaker_current: bool = false };
+    pub fn init() State {
+        return .{};
+    }
+    fn onDevices(d: []const zui.MediaDevice) Msg {
+        return .{ .got = d };
+    }
+    pub fn update(s: *State, msg: Msg, _: zui.Env, fx: zui.runtime.Fx(Msg)) void {
+        switch (msg) {
+            .list => fx.mediaDevices(7, onDevices),
+            .got => |d| {
+                s.count = d.len;
+                for (d) |x| if (x.kind == .speaker and std.mem.eql(u8, x.type, "speaker")) {
+                    s.speaker_current = x.current;
+                };
+            },
+            .use => fx.useMediaDevice(7, .speaker, "earpiece"),
+        }
+    }
+    pub fn view(_: *const State, ui: *zui.Ui(Msg)) void {
+        ui.begin(.{}, .{});
+        ui.end();
+    }
+};
+
+test "call devices: the list arrives at the next turn; one is chosen" {
+    const D = Driver(Devices);
+    D.start(200, 200);
+    defer D.reset();
+    media_devices =
+        \\[{"k":1,"id":"mic","l":"Built-in","t":"builtin","c":true},{"k":3,"id":"earpiece","t":"earpiece"},{"k":3,"id":"spk","t":"speaker","c":true},{"k":2,"id":"front","t":"front","c":true}]
+    ;
+    D.R.dispatch(.list);
+    try std.testing.expectEqual(@as(usize, 0), D.R.appState().count);
+    const tm = timers.items[timers.items.len - 1];
+    _ = timers.orderedRemove(timers.items.len - 1);
+    D.R.timerDone(tm.id);
+    try std.testing.expectEqual(@as(usize, 4), D.R.appState().count);
+    try std.testing.expect(D.R.appState().speaker_current);
+    D.R.dispatch(.use);
+    try std.testing.expectEqualStrings("speaker:earpiece", used_device.items);
 }

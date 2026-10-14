@@ -1184,6 +1184,8 @@ function webCalls(getEx, getMemory, withBytes, encoder, str) {
   };
 
   const camera = (back) => ({ width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: back ? 'environment' : 'user' });
+  // The loudspeaker chosen for calls (setSinkId), for the audio of connections opened later too.
+  let sinkId = '';
 
   // Hardware-friendly H.264 first, where the browser lets the page choose.
   const preferH264 = (pc) => {
@@ -1245,6 +1247,47 @@ function webCalls(getEx, getMemory, withBytes, encoder, str) {
         for (const v of document.querySelectorAll('video')) if (v.srcObject === s) { v.srcObject = null; v.srcObject = s; }
       }, () => {});
     },
+    zui_media_devices(id) {
+      const s = streams.get(id);
+      const using = { 1: s?.getAudioTracks()[0]?.getSettings?.().deviceId, 2: s?.getVideoTracks()[0]?.getSettings?.().deviceId };
+      const kinds = { audioinput: 1, videoinput: 2, audiooutput: 3 };
+      const canSink = 'setSinkId' in HTMLMediaElement.prototype;
+      const answer = (list) => withBytes(encoder.encode(JSON.stringify(list)), (p, n) => getEx().zui_devices_event(p, n));
+      if (!navigator.mediaDevices?.enumerateDevices) return void setTimeout(() => answer([]));
+      navigator.mediaDevices.enumerateDevices().then((all) => {
+        const list = [];
+        for (const d of all) {
+          const k = kinds[d.kind];
+          if (!k || (k === 3 && !canSink) || !d.deviceId) continue;
+          if (d.deviceId === 'communications') continue;
+          const current = k === 3 ? (sinkId || 'default') === d.deviceId : using[k] === d.deviceId;
+          list.push({ k, id: d.deviceId, l: d.label || '', t: '', c: current });
+        }
+        answer(list);
+      }, () => answer([]));
+    },
+    zui_media_use(id, kind, ptr, len) {
+      const deviceId = str(ptr, len);
+      if (kind === 3) {
+        sinkId = deviceId;
+        for (const p of peers.values()) for (const a of p.audio) a.setSinkId?.(deviceId).catch(() => {});
+        return;
+      }
+      const s = streams.get(id);
+      const video = kind === 2;
+      const old = video ? s?.getVideoTracks()[0] : s?.getAudioTracks()[0];
+      if (!old) return;
+      const ask = video ? { video: { ...camera(s._back), facingMode: undefined, deviceId: { exact: deviceId } } } : { audio: { echoCancellation: true, noiseSuppression: true, deviceId: { exact: deviceId } } };
+      navigator.mediaDevices.getUserMedia(ask).then((fresh) => {
+        const track = video ? fresh.getVideoTracks()[0] : fresh.getAudioTracks()[0];
+        track.enabled = old.enabled;
+        s.removeTrack(old);
+        old.stop();
+        s.addTrack(track);
+        for (const p of peers.values()) if (p.stream === id) send(p, id);
+        if (video) for (const v of document.querySelectorAll('video')) if (v.srcObject === s) { v.srcObject = null; v.srcObject = s; }
+      }, () => {});
+    },
     zui_media_close(id) {
       for (const t of streams.get(id)?.getTracks() || []) t.stop();
       streams.delete(id);
@@ -1280,6 +1323,7 @@ function webCalls(getEx, getMemory, withBytes, encoder, str) {
           attach(sid, s);
           const a = document.createElement('audio');
           a.autoplay = true;
+          if (sinkId && a.setSinkId) a.setSinkId(sinkId).catch(() => {});
           a.srcObject = s;
           a.style.display = 'none';
           document.body.appendChild(a);

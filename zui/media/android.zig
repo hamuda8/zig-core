@@ -106,6 +106,8 @@ var j: struct {
     pick_size: jni.jmethodID,
     swap_encoder: jni.jmethodID,
     remote_closed: jni.jmethodID,
+    devices: jni.jmethodID,
+    use_device: jni.jmethodID,
 } = undefined;
 
 /// JNI for this thread: the UI thread's, or an attachment (as a daemon, never detached).
@@ -284,6 +286,8 @@ pub fn init(h: calls.MediaHooks) void {
         .pick_size = f.GetStaticMethodID(e, media_class, "pickSize", "(III)J"),
         .swap_encoder = f.GetStaticMethodID(e, media_class, "swapEncoder", "(ILandroid/view/Surface;I)V"),
         .remote_closed = f.GetStaticMethodID(e, media_class, "remoteClosed", "(I)V"),
+        .devices = f.GetStaticMethodID(e, media_class, "devices", "(I)Ljava/lang/String;"),
+        .use_device = f.GetStaticMethodID(e, media_class, "useDevice", "(IILjava/lang/String;)V"),
     };
 }
 
@@ -318,6 +322,33 @@ pub fn enable(id: u32, audio: bool, video: bool) void {
     if (findLocal(id)) |l| l.audio_on.store(audio, .release);
     mutex.unlock();
     callJava(host.uiEnv(), j.enable, &.{ int(id), boolean(audio), boolean(video) });
+}
+
+var devices_buf: [16384]u8 = undefined;
+
+/// ZuiMedia.devices: the audio routes (earpiece, speaker, Bluetooth, wired), the microphones and
+/// the front and back cameras, as JSON (zui.MediaDevice).
+pub fn mediaDevicesJson(stream: u32) []const u8 {
+    const e = host.uiEnv();
+    const f = e.functions;
+    const args = [_]jni.jvalue{int(stream)};
+    const s = f.CallStaticObjectMethodA(e, media_class, j.devices, &args);
+    if (f.ExceptionCheck(e) == jni.JNI_TRUE) {
+        f.ExceptionDescribe(e);
+        f.ExceptionClear(e);
+        return "[]";
+    }
+    if (s == null) return "[]";
+    defer f.DeleteLocalRef(e, s);
+    return host.javaStringLong(s, &devices_buf);
+}
+
+pub fn useMediaDevice(stream: u32, kind: zui.MediaDevice.Kind, id: []const u8) void {
+    const e = host.uiEnv();
+    const js = host.newString(id);
+    defer e.functions.DeleteLocalRef(e, js);
+    callJava(e, j.use_device, &.{ int(stream), int(@intFromEnum(kind)), .{ .l = js } });
+    if (kind == .camera) requestKeyframe(stream);
 }
 
 pub fn switchCamera(id: u32) void {
