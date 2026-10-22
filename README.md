@@ -64,6 +64,11 @@ An app is `Msg`, `State`, `init`, `update(state, msg, env, fx)` and `view(state,
   builds Wufour's sign-in address and reads the token from its callback; the web keeps cookies;
   one sign-in for all our apps on a phone: zui/wufour_apps.zig, Android ZuiAuthProvider behind a
   signature permission, iOS a shared Keychain group named by Info.plist `WufourKeychainGroup`).
+- **The Wufour account menu:** `zui.account` draws the profile picture and the menu every Wufour
+  app shows (the same as Wufour's web element `<wufour-account>`): the account, the app's own items,
+  the person's four apps from the Wufour start page and All apps. The app's server serves Wufour's
+  data from `wufour.Verifier.accountMenu`; the client passes it to `Menu.load`. See the top of
+  zui/account.zig, and Wufour's docs/account-menu.md.
 - **Also:** `zui.storage` (plain and secure), `zui.widget` (Android widget; iOS through the fixed
   SwiftUI extension in `shells/ios/widget`, opt-in with `ios_widget`), `t("English")`
   translation bundles in Lassan's format with `t("Text|context")` for clashing keys.

@@ -67,6 +67,8 @@ pub const WebAuthResult = runtime.WebAuthResult;
 pub const WebAuthLook = runtime.WebAuthLook;
 /// Wufour sign-in on the phones: the sign-in address, the token from the callback, keeping it.
 pub const wufour = @import("wufour.zig");
+/// The Wufour account menu: the same profile picture and menu as on the web, in every app.
+pub const account = @import("account.zig");
 pub const DeviceEvent = runtime.DeviceEvent;
 pub const KeyEvent = runtime.KeyEvent;
 pub const Selection = runtime.Selection;
@@ -167,6 +169,7 @@ test {
     _ = sse;
     _ = keys;
     _ = wufour;
+    _ = account;
 }
 
 /// Wall-clock time: milliseconds since 1970-01-01 UTC.

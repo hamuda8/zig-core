@@ -7,6 +7,11 @@
 //!     const t = wufour.token(ctx, .cookie_first) orelse return ctx.fail(.unauthorized, "Please sign in");
 //!     const user = wu.verify(ctx.arena, t.value, now_ms) orelse return ctx.fail(.unauthorized, "Please sign in");
 //!     // user is Wufour's user object: { userId, email, username, role, ... }
+//!
+//! The account menu every app shows (zui.account) reads Wufour's data through the app's server:
+//!
+//!     const json = wu.accountMenu(ctx.arena, token_or_null) orelse return ctx.fail(...);
+//!     // serve it unchanged, with Cache-Control: no-store
 
 const std = @import("std");
 const Io = std.Io;
@@ -149,6 +154,18 @@ pub const Verifier = struct {
         _ = v.fetch.fetch(a, url, .{ .method = .POST, .body = body, .content_type = "application/json", .timeout_ms = v.timeout_ms }) catch {};
     }
 
+    /// What the Wufour account menu shows for `tok` (null: signed out): Wufour's answer to
+    /// POST /api/account/menu, as JSON (in `a`), or null when Wufour cannot be reached. Serve it
+    /// to the app's client unchanged (`no-store`); `zui.account` reads it. Not cached: it changes
+    /// when the person renames or reorders their apps, and it is asked once per screen.
+    pub fn accountMenu(v: *Verifier, a: Allocator, tok: ?[]const u8) ?[]const u8 {
+        const body = val.toJson(a, val.from(a, .{ .token = tok orelse "" }) catch return null) catch return null;
+        const url = std.fmt.allocPrint(a, "{s}/api/account/menu", .{backendHost(a, v.host)}) catch return null;
+        const res = v.fetch.fetch(a, url, .{ .method = .POST, .body = body, .content_type = "application/json", .timeout_ms = v.timeout_ms }) catch return null;
+        if (res.status != 200 or res.body.len == 0 or res.body[0] != '{') return null;
+        return res.body;
+    }
+
     fn store(v: *Verifier, key: *const [64]u8, json: ?[]const u8, until: i64, now_ms: i64) void {
         const gpa = v.fetch.gpa;
         v.lock.lockUncancelable(v.fetch.io);
@@ -248,6 +265,47 @@ test "verify against Wufour, cached, and forgotten" {
     v.forget("good");
     _ = v.verify(a, "good", 40_001).?;
     try testing.expectEqual(@as(u32, 5), verify_calls.load(.monotonic));
+}
+
+fn fakeMenu(ctx: *http.Context) !void {
+    const body = try ctx.body();
+    if (std.mem.indexOf(u8, body, "\"good\"") != null) return ctx.sendJson(.ok, .{ .signedIn = true, .user = .{ .username = "Sara" } });
+    return ctx.sendJson(.ok, .{ .signedIn = false });
+}
+
+var menu_port: std.atomic.Value(u16) = .init(0);
+
+fn onMenuListen(addr: Io.net.IpAddress) void {
+    menu_port.store(addr.getPort(), .release);
+}
+
+fn runMenu(router: *const http.Router) anyerror!void {
+    try http.serve(testing.io, testing.allocator, .{ .address = try .parse("127.0.0.1", 0), .router = router, .on_listen = onMenuListen });
+}
+
+test "the account menu from Wufour, with or without a token" {
+    const io = testing.io;
+    var router: http.Router = .init(testing.allocator);
+    defer router.deinit();
+    try router.post("/api/account/menu", fakeMenu);
+    var server = try io.concurrent(runMenu, .{&router});
+    defer _ = server.cancel(io) catch {};
+    while (menu_port.load(.acquire) == 0) try io.sleep(.fromMilliseconds(5), .awake);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fc: fetch.Client = .init(io, testing.allocator);
+    defer fc.deinit();
+    var v: Verifier = .{ .fetch = &fc, .host = try std.fmt.allocPrint(a, "http://localhost:{d}", .{menu_port.load(.acquire)}) };
+    defer v.deinit();
+
+    try testing.expect(std.mem.indexOf(u8, v.accountMenu(a, "good").?, "\"Sara\"") != null);
+    try testing.expect(std.mem.indexOf(u8, v.accountMenu(a, null).?, "\"signedIn\":false") != null);
+    // Wufour not there: null.
+    var gone: Verifier = .{ .fetch = &fc, .host = "http://127.0.0.1:9", .timeout_ms = 2000 };
+    defer gone.deinit();
+    try testing.expect(gone.accountMenu(a, "good") == null);
 }
 
 test "tokens" {
