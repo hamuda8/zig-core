@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = wufour_imports,
     }) })).step);
-    for ([_][]const u8{ "zui/zui.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "push/push.zig", "fetch/fetch.zig", "smtp/smtp.zig", "ec/ec.zig", "tools/zip.zig", "tools/strings.zig", "tools/xml.zig", "tools/maven.zig", "tools/apk.zig" }) |root| {
+    for ([_][]const u8{ "zui/zui.zig", "zui/font.zig", "http/http.zig", "mongo/mongo.zig", "env/env.zig", "geo/geo.zig", "push/push.zig", "fetch/fetch.zig", "smtp/smtp.zig", "ec/ec.zig", "tools/zip.zig", "tools/strings.zig", "tools/xml.zig", "tools/maven.zig", "tools/apk.zig" }) |root| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,
@@ -169,6 +169,9 @@ pub const AppOptions = struct {
 const android_java = [_][]const u8{ "Zui.java", "ZuiActivity.java", "ZuiLayout.java", "ZuiPath.java", "ZuiSocket.java", "ZuiLocationService.java", "ZuiWidget.java", "ZuiCallService.java", "ZuiCallReceiver.java", "ZuiMedia.java", "ZuiDevice.java", "ZuiStreamRenderer.java", "ZuiRecorder.java", "ZuiPlayer.java", "ZuiStyle.java", "ZuiScanner.java", "ZuiPushHost.java", "ZuiWebAuth.java", "ZuiAuthProvider.java" };
 /// zui's Android resources (the widget), listed for the same reason.
 const android_res = [_][]const u8{ "layout/zui_widget.xml", "xml/zui_widget_info.xml", "drawable/zui_widget_bg.xml" };
+/// Wufour's fonts (shells/fonts; the rule for using them is zui/font.zig): `assets/fonts/` in the
+/// APK, next to the iOS libraries for the bundle. Listed for the same reason.
+const fonts = @import("zui/font.zig").files;
 
 const android_abis = [_]struct { abi: []const u8, arch: std.Target.Cpu.Arch }{
     .{ .abi = "arm64-v8a", .arch = .aarch64 },
@@ -266,6 +269,10 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 run.addDirectoryArg(res);
                 for (opts.android_res_files) |f| run.addFileInput(res.path(b, f));
             }
+            // Wufour's fonts, as assets/fonts/ (Zui.java reads them from there).
+            run.addArg("--assets");
+            run.addPrefixedDirectoryArg("fonts=", core.path("shells/fonts"));
+            for (fonts) |f| run.addFileInput(core.path(b.fmt("shells/fonts/{s}", .{f})));
             // Maven libraries (and, with push, firebase-messaging and ZuiPush).
             var deps: std.ArrayList([]const u8) = .empty;
             deps.appendSlice(b.allocator, opts.android_deps) catch @panic("OOM");
@@ -341,6 +348,9 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
     {
         const step = b.step("ios", "Build the iOS static libraries into zig-out/ios");
         const sim_app = b.step("ios-sim-app", "Link the simulator .app into zig-out/ios (macOS only)");
+        // The font files go next to the libraries: whoever assembles the bundle copies
+        // zig-out/ios/fonts/*.ttf beside Info.plist (which lists them under UIAppFonts).
+        for (fonts) |f| step.dependOn(&b.addInstallFileWithDir(core.path(b.fmt("shells/fonts/{s}", .{f})), .{ .custom = "ios/fonts" }, f).step);
         for (ios_targets) |t| {
             const lib = b.addLibrary(.{
                 .linkage = .static,
@@ -357,26 +367,27 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
                 continue;
             }
             // The system linker turns libapp.a into the app binary; the bundle is that binary
-            // plus Info.plist.
+            // plus Info.plist and the font files.
             // With the widget, swiftc links the app (for the small reload function) and builds
             // the extension into PlugIns/Widget.appex; both are signed with the app group.
             const bundle = b.addSystemCommand(&.{
                 "sh",     "-c",
                 \\set -e
                 \\mkdir -p "$3"
-                \\frameworks="-framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework PushKit -framework CallKit -framework VideoToolbox -framework AudioToolbox -framework CoreMedia -framework CoreVideo -framework WebKit -framework Foundation -lobjc"
+                \\frameworks="-framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreText -framework CoreLocation -framework AVFoundation -framework CoreImage -framework Security -framework UserNotifications -framework PushKit -framework CallKit -framework VideoToolbox -framework AudioToolbox -framework CoreMedia -framework CoreVideo -framework WebKit -framework Foundation -lobjc"
                 \\cp "$2" "$3/Info.plist"
-                \\if [ "$4" = "none" ]; then
+                \\cp "$4"/*.ttf "$3"/
+                \\if [ "$5" = "none" ]; then
                 \\  xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=18.0 "$1" $frameworks -Wl,-U,_zui_widget_reload -o "$3/App"
                 \\  exit 0
                 \\fi
                 \\swift="xcrun --sdk iphonesimulator swiftc -target arm64-apple-ios18.0-simulator -parse-as-library"
-                \\$swift "$5" "$1" $frameworks -framework WidgetKit -o "$3/App"
+                \\$swift "$6" "$1" $frameworks -framework WidgetKit -o "$3/App"
                 \\id=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$2")
                 \\get() { /usr/libexec/PlistBuddy -c "Print $1" "$2" 2>/dev/null || echo "$3"; }
                 \\ext="$3/PlugIns/Widget.appex"
                 \\mkdir -p "$ext"
-                \\$swift -application-extension "$4" -framework WidgetKit -framework SwiftUI -o "$ext/Widget"
+                \\$swift -application-extension "$5" -framework WidgetKit -framework SwiftUI -o "$ext/Widget"
                 \\p() { /usr/libexec/PlistBuddy -c "$1" "$ext/Info.plist" >/dev/null; }
                 \\p "Add :CFBundleIdentifier string $id.widget"
                 \\p "Add :CFBundleExecutable string Widget"
@@ -400,6 +411,8 @@ pub fn addApp(b: *std.Build, core: *std.Build.Dependency, opts: AppOptions) void
             bundle.addFileArg(lib.getEmittedBin());
             bundle.addFileArg(opts.ios_info_plist);
             const app_dir = bundle.addOutputDirectoryArg(b.fmt("{s}.app", .{opts.name}));
+            bundle.addDirectoryArg(core.path("shells/fonts"));
+            for (fonts) |f| bundle.addFileInput(core.path(b.fmt("shells/fonts/{s}", .{f})));
             if (opts.ios_widget) {
                 bundle.addFileArg(core.path("shells/ios/widget/ZuiWidget.swift"));
                 bundle.addFileArg(core.path("shells/ios/widget/ZuiWidgetReload.swift"));

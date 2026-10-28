@@ -15,6 +15,7 @@ const js = struct {
     extern "zui" fn zui_input(id: u32, value: [*]const u8, value_len: usize, placeholder: [*]const u8, placeholder_len: usize, size: f32, weight: u32, line_height: f32, mono: u32, color: u32, text_align: u32) void;
     extern "zui" fn zui_content(id: u32, w: f32, h: f32) void;
     extern "zui" fn zui_root_background(argb: u32) void;
+    extern "zui" fn zui_rtl(on: u32) void;
     extern "zui" fn zui_transform(id: u32, rotate: f32, tilt: f32, perspective: f32, has_origin: u32, ox: f32, oy: f32) void;
     extern "zui" fn zui_clip(id: u32, on: u32) void;
     extern "zui" fn zui_pointer_listen(id: u32, on: u32) void;
@@ -315,6 +316,10 @@ pub fn requestFrame() void {
 pub fn rootBackground(argb: u32) void {
     js.zui_root_background(argb);
 }
+/// The page's writing direction (its CSS picks the Arabic font from it).
+pub fn setRtl(on: bool) void {
+    js.zui_rtl(@intFromBool(on));
+}
 pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
     var out: [2]f32 = .{ 0, 0 };
     js.zui_measure(s.ptr, s.len, f.size, f.weight, f.line_height, @intFromBool(f.mono), f.max_lines, max_width, &out, f.letter_spacing);
@@ -331,6 +336,9 @@ pub fn exportEntry(comptime App: type) void {
         }
         fn resize(w: f32, h: f32) callconv(.c) void {
             R.resize(w, h);
+        }
+        fn relayout() callconv(.c) void {
+            R.relayout();
         }
         fn insets(top: f32, right: f32, bottom: f32, left: f32) callconv(.c) void {
             R.setInsets(.{ .top = top, .right = right, .bottom = bottom, .left = left });
@@ -444,6 +452,7 @@ pub fn exportEntry(comptime App: type) void {
     };
     @export(&Entry.start, .{ .name = "zui_start" });
     @export(&Entry.resize, .{ .name = "zui_resize" });
+    @export(&Entry.relayout, .{ .name = "zui_relayout" });
     @export(&Entry.insets, .{ .name = "zui_insets" });
     @export(&Entry.dark, .{ .name = "zui_dark" });
     @export(&Entry.event, .{ .name = "zui_event" });

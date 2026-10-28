@@ -16,6 +16,7 @@ import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.text.Layout;
 import android.text.SpannableString;
 import android.text.Spanned;
@@ -78,14 +79,17 @@ final class ZuiStyle {
         }
     }
 
-    static Typeface face(int weight, boolean italic, boolean mono) {
-        Typeface base = mono ? Typeface.MONOSPACE : Typeface.DEFAULT;
-        return Typeface.create(base, Math.max(1, Math.min(1000, weight)), italic);
+    /** A run's typeface: the text's face (Zui.FACE_*) at a weight, slanted by Android when the
+     *  run is italic (our files have no italics). */
+    static Typeface face(int weight, boolean italic, int which) {
+        Typeface base = Zui.typeface(weight, which);
+        if (!italic) return base;
+        return Build.VERSION.SDK_INT >= 28 ? Typeface.create(base, Math.max(1, Math.min(1000, weight)), true) : Typeface.create(base, Typeface.ITALIC);
     }
 
     /** Spans come as 5 ints each: start, end (UTF-16), flags (bold 1, italic 2, mono 4,
-     *  underline 8, strike 16), colour, link (-1: none). */
-    static CharSequence spanned(String s, int[] spans, int weight, boolean mono) {
+     *  underline 8, strike 16), colour, link (-1: none). `which` is the text's face. */
+    static CharSequence spanned(String s, int[] spans, int weight, int which) {
         if (spans == null || spans.length == 0) return s;
         SpannableString out = new SpannableString(s);
         for (int k = 0; k + 4 < spans.length; k += 5) {
@@ -93,7 +97,7 @@ final class ZuiStyle {
             int flags = spans[k + 2], color = spans[k + 3], link = spans[k + 4];
             if (a == b) continue;
             boolean bold = (flags & 1) != 0, italic = (flags & 2) != 0, m = (flags & 4) != 0;
-            if (bold || italic || m) out.setSpan(new FontSpan(face(bold ? Math.max(weight, 700) : weight, italic, mono || m)), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            if (bold || italic || m) out.setSpan(new FontSpan(face(bold ? Math.max(weight, 700) : weight, italic, m ? Zui.FACE_MONO : which)), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             if ((flags & 8) != 0) out.setSpan(new UnderlineSpan(), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             if ((flags & 16) != 0) out.setSpan(new StrikethroughSpan(), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             if ((color >>> 24) != 0) out.setSpan(new ForegroundColorSpan(color), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -102,12 +106,12 @@ final class ZuiStyle {
         return out;
     }
 
-    static void richText(int id, String s, int[] spans, float size, int weight, float lineHeight, boolean mono, int maxLines, int color, int align, float letter, boolean selectable) {
+    static void richText(int id, String s, int[] spans, float size, int weight, float lineHeight, int face, int maxLines, int color, int align, float letter, boolean selectable) {
         View v = Zui.views.get(id);
         if (!(v instanceof TextView)) return;
         TextView t = (TextView) v;
-        CharSequence text = spanned(s, spans, weight, mono);
-        Zui.styleText(t, size, weight, lineHeight, mono, color, align);
+        CharSequence text = spanned(s, spans, weight, face);
+        Zui.styleText(t, size, weight, lineHeight, face, color, align);
         t.setLetterSpacing(size > 0 ? letter / size : 0);
         t.setMaxLines(maxLines > 0 ? maxLines : Integer.MAX_VALUE);
         t.setEllipsize(maxLines > 0 && !selectable ? TextUtils.TruncateAt.END : null);
@@ -152,13 +156,13 @@ final class ZuiStyle {
         }
     }
 
-    static long measureRich(String s, int[] spans, float size, int weight, float lineHeight, boolean mono, int maxLines, float maxWidth, float letter) {
+    static long measureRich(String s, int[] spans, float size, int weight, float lineHeight, int face, int maxLines, float maxWidth, float letter) {
         float density = Zui.density;
         TextPaint p = new TextPaint(TextPaint.ANTI_ALIAS_FLAG);
         p.setTextSize(size * density);
-        p.setTypeface(Zui.typeface(weight, mono));
+        p.setTypeface(Zui.typeface(weight, face));
         p.setLetterSpacing(size > 0 ? letter / size : 0);
-        CharSequence text = spanned(s, spans, weight, mono);
+        CharSequence text = spanned(s, spans, weight, face);
         int avail = Float.isInfinite(maxWidth) ? 1 << 20 : Math.max(1, (int) Math.floor(maxWidth * density));
         StaticLayout layout = StaticLayout.Builder.obtain(text, 0, text.length(), p, avail)
                 .setIncludePad(false)

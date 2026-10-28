@@ -190,6 +190,12 @@ pub const Context = struct {
         try ctx.response_headers.append(ctx.arena, .{ .name = name, .value = v });
     }
 
+    /// Whether a response header of this name has been set.
+    pub fn hasHeader(ctx: *Context, name: []const u8) bool {
+        for (ctx.response_headers.items) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
+        return false;
+    }
+
     /// Adds a response header even when one of the same name is already set (Set-Cookie).
     pub fn addHeader(ctx: *Context, name: []const u8, value: []const u8) !void {
         try ctx.response_headers.append(ctx.arena, .{ .name = name, .value = try headerSafe(ctx.arena, value) });
@@ -705,13 +711,14 @@ pub fn serveDir(ctx: *Context, root: []const u8, spa_fallback: bool) !void {
         },
         else => return err,
     };
-    try ctx.setHeader("cache-control", "no-cache");
+    // Revalidated every time, unless the route chose a caching policy of its own first.
+    if (!ctx.hasHeader("cache-control")) try ctx.setHeader("cache-control", "no-cache");
     return ctx.send(.ok, contentType(rel), data);
 }
 
 fn serveFile(ctx: *Context, path: []const u8) !void {
     const data = Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.arena, .limited(64 * 1024 * 1024)) catch return ctx.fail(.not_found, "Not found");
-    try ctx.setHeader("cache-control", "no-cache");
+    if (!ctx.hasHeader("cache-control")) try ctx.setHeader("cache-control", "no-cache");
     return ctx.send(.ok, contentType(path), data);
 }
 

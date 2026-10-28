@@ -655,6 +655,7 @@ final class ZuiDevice {
             android.security.keystore.KeyProtection.Builder p = new android.security.keystore.KeyProtection.Builder(purposes(kind));
             if (kind == KIND_ECDSA) p.setDigests(android.security.keystore.KeyProperties.DIGEST_SHA256);
             keystore().setEntry(alias, new java.security.KeyStore.PrivateKeyEntry(priv, new java.security.cert.Certificate[] {cert}), p.build());
+            if (kind == KIND_ECDH && !agrees(alias, rawPublic)) return null;
             return rawPublic;
         } catch (Exception e) {
             android.util.Log.e("zui", "keystore import: " + e);
@@ -671,7 +672,9 @@ final class ZuiDevice {
                     .setAlgorithmParameterSpec(new java.security.spec.ECGenParameterSpec("secp256r1"));
             if (kind == KIND_ECDSA) b.setDigests(android.security.keystore.KeyProperties.DIGEST_SHA256);
             g.initialize(b.build());
-            return rawPublic(g.generateKeyPair().getPublic());
+            byte[] pub = rawPublic(g.generateKeyPair().getPublic());
+            if (kind == KIND_ECDH && !agrees(alias, pub)) return null;
+            return pub;
         } catch (Exception e) {
             android.util.Log.e("zui", "keystore generate: " + e);
             return null;
@@ -699,6 +702,17 @@ final class ZuiDevice {
             android.util.Log.e("zui", "keystore sign: " + e);
             return null;
         }
+    }
+
+    /**
+     * Whether the Keystore can really agree with `alias`: Android 12+ phones whose secure hardware
+     * is still Keymaster (not KeyMint), like the Galaxy A32, store the key but fail every ECDH.
+     * When it cannot, the key is deleted and zui's engine keeps it instead.
+     */
+    static boolean agrees(String alias, byte[] rawPublic) {
+        if (keyEcdh(alias, rawPublic) != null) return true;
+        keyDelete(alias);
+        return false;
     }
 
     /** The ECDH shared secret (32 bytes) with a raw public key, or null. */

@@ -31,8 +31,11 @@ import java.io.OutputStream;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import android.content.res.AssetManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.fonts.Font;
+import android.graphics.fonts.FontFamily;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.text.Editable;
@@ -348,12 +351,77 @@ public final class Zui {
         });
     }
 
-    static Typeface typeface(int weight, boolean mono) {
-        int key = weight * 2 + (mono ? 1 : 0);
+    // ---- Fonts ----
+    // Wufour's own faces, decided in Zig (zui/font.zig: which face carries which script and
+    // weight) and loaded here from the APK's assets/fonts/. Java only turns (face, weight) into
+    // a Typeface.
+
+    /** zui.font.Face: 0 Wufour Sans, 1 Wufour Arabic, 2 the system monospace. */
+    static final int FACE_SANS = 0, FACE_ARABIC = 1, FACE_MONO = 2;
+    static final String FONT_DIR = "fonts/";
+    static final String[] FONT_FAMILIES = { "WufourSansGolden", "WufourArabicGolden" };
+    /** Our faces by (face, weight step), once loaded; null where the file could not be read. */
+    static final Typeface[] wufourFaces = new Typeface[6];
+    static final boolean[] wufourTried = new boolean[6];
+
+    /** 400, 500 or 700 as 0, 1, 2: the same steps as zui/font.zig's `weight`. */
+    static int weightStep(int weight) {
+        return weight < 450 ? 0 : weight < 600 ? 1 : 2;
+    }
+
+    /** The asset of a Wufour face at a weight: fonts/WufourSansGolden-Medium.ttf and the like. */
+    static String fontFile(int face, int weight) {
+        String[] styles = { "Regular", "Medium", "Bold" };
+        return FONT_DIR + FONT_FAMILIES[face] + "-" + styles[weightStep(weight)] + ".ttf";
+    }
+
+    /**
+     * Wufour Sans or Wufour Arabic at a weight, or null when its file is not in the assets.
+     * From API 29 the typeface is a chain: the face asked for, then the other Wufour face for the
+     * glyphs it lacks (Latin words inside Arabic keep the Sans and the other way round), then the
+     * system's fonts for everything else. Before 29 a typeface holds one file; zui picks the face
+     * by the text's script and Android's own fallback fills in the rest.
+     */
+    static Typeface wufourTypeface(int face, int weight) {
+        int slot = face * 3 + weightStep(weight);
+        if (wufourTried[slot]) return wufourFaces[slot];
+        Context c = ctx();
+        if (c == null) return null;
+        wufourTried[slot] = true;
+        try {
+            AssetManager assets = c.getAssets();
+            if (Build.VERSION.SDK_INT >= 29) {
+                FontFamily primary = new FontFamily.Builder(new Font.Builder(assets, fontFile(face, weight)).build()).build();
+                Typeface.CustomFallbackBuilder chain = new Typeface.CustomFallbackBuilder(primary);
+                try {
+                    chain.addCustomFallback(new FontFamily.Builder(new Font.Builder(assets, fontFile(1 - face, weight)).build()).build());
+                } catch (Exception ignored) {
+                    // The other face is missing: the system fills in its glyphs.
+                }
+                wufourFaces[slot] = chain.setSystemFallback("sans-serif").build();
+            } else {
+                wufourFaces[slot] = Typeface.createFromAsset(assets, fontFile(face, weight));
+            }
+        } catch (Exception e) {
+            wufourFaces[slot] = null; // no such asset: the system font, below
+        }
+        return wufourFaces[slot];
+    }
+
+    /**
+     * The typeface for a face at a weight. Our faces come from the assets (weights already
+     * snapped to 400, 500 or 700 by zui); a face whose file is missing falls back to the system
+     * font, as before the fonts existed. Monospace is the system monospace.
+     */
+    static Typeface typeface(int weight, int face) {
+        int key = weight * 4 + face;
         Typeface t = typefaces.get(key);
         if (t == null) {
-            Typeface base = mono ? Typeface.MONOSPACE : Typeface.DEFAULT;
-            t = Build.VERSION.SDK_INT >= 28 ? Typeface.create(base, weight, false) : Typeface.create(base, weight >= 600 ? Typeface.BOLD : Typeface.NORMAL);
+            if (face != FACE_MONO) t = wufourTypeface(face, weight);
+            if (t == null) {
+                Typeface base = face == FACE_MONO ? Typeface.MONOSPACE : Typeface.DEFAULT;
+                t = Build.VERSION.SDK_INT >= 28 ? Typeface.create(base, weight, false) : Typeface.create(base, weight >= 600 ? Typeface.BOLD : Typeface.NORMAL);
+            }
             typefaces.put(key, t);
         }
         return t;
@@ -363,9 +431,9 @@ public final class Zui {
         return (align == 1 ? Gravity.CENTER_HORIZONTAL : align == 2 ? Gravity.RIGHT : Gravity.LEFT) | Gravity.TOP;
     }
 
-    static void styleText(TextView t, float size, int weight, float lineHeight, boolean mono, int color, int align) {
+    static void styleText(TextView t, float size, int weight, float lineHeight, int face, int color, int align) {
         t.setTextSize(TypedValue.COMPLEX_UNIT_PX, size * density);
-        t.setTypeface(typeface(weight, mono));
+        t.setTypeface(typeface(weight, face));
         t.setTextColor(color);
         t.setGravity(gravity(align));
         t.setTextAlignment(View.TEXT_ALIGNMENT_GRAVITY);
@@ -374,15 +442,15 @@ public final class Zui {
         else t.setLineSpacing(lh - t.getPaint().getFontMetricsInt(null), 1f);
     }
 
-    static void text(int id, String s, float size, int weight, float lineHeight, boolean mono, int maxLines, int color, int align) {
+    static void text(int id, String s, float size, int weight, float lineHeight, int face, int maxLines, int color, int align) {
         TextView t = (TextView) views.get(id);
         t.setText(s);
-        styleText(t, size, weight, lineHeight, mono, color, align);
+        styleText(t, size, weight, lineHeight, face, color, align);
         t.setMaxLines(maxLines > 0 ? maxLines : Integer.MAX_VALUE);
         t.setEllipsize(maxLines > 0 ? TextUtils.TruncateAt.END : null);
     }
 
-    static void input(int id, String value, String placeholder, float size, int weight, float lineHeight, boolean mono, int color, int align) {
+    static void input(int id, String value, String placeholder, float size, int weight, float lineHeight, int face, int color, int align) {
         EditText e = (EditText) views.get(id);
         if (!e.getText().toString().equals(value)) {
             e.setTag(Boolean.TRUE); // not a user edit
@@ -391,7 +459,7 @@ public final class Zui {
             e.setTag(null);
         }
         e.setHint(placeholder);
-        styleText(e, size, weight, lineHeight, mono, color, align);
+        styleText(e, size, weight, lineHeight, face, color, align);
         // Text in the middle of the field, as on the web and iOS; a text area's from the top.
         boolean area = (e.getInputType() & InputType.TYPE_TEXT_FLAG_MULTI_LINE) != 0;
         e.setGravity((gravity(align) & Gravity.HORIZONTAL_GRAVITY_MASK) | (area ? Gravity.TOP : Gravity.CENTER_VERTICAL));
@@ -922,9 +990,9 @@ public final class Zui {
     }
 
     /** Size of `s` in points, packed as (float bits of width << 32) | float bits of height. */
-    static long measure(String s, float size, int weight, float lineHeight, boolean mono, int maxLines, float maxWidth) {
+    static long measure(String s, float size, int weight, float lineHeight, int face, int maxLines, float maxWidth) {
         paint.setTextSize(size * density);
-        paint.setTypeface(typeface(weight, mono));
+        paint.setTypeface(typeface(weight, face));
         int avail = Float.isInfinite(maxWidth) ? 1 << 20 : Math.max(1, (int) Math.floor(maxWidth * density));
         StaticLayout layout = StaticLayout.Builder.obtain(s, 0, s.length(), paint, avail)
                 .setIncludePad(false)

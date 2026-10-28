@@ -2,9 +2,11 @@
 //! <wufour-account> element (Wufour's public/widgets/account.js, see its docs/account-menu.md),
 //! so one Wufour account looks the same in every app, on the web and on the phones.
 //!
-//! The panel, from top to bottom: the person ("Hi, name!", Manage your Wufour account, signed-in
-//! devices, Control for administrators, sign out), the app's own items, then the person's four
-//! apps from the Wufour start page, in the order they chose there, and the red All apps button.
+//! The panel, from top to bottom: the Wufour account (the picture, "Hi, name!", the username, then
+//! the options: Manage your Wufour account, Control for administrators, sign out, and the person's
+//! four apps from the Wufour start page, in the order they chose there, with the plum All apps
+//! button that opens the start page's All apps dialog), the app's own items, then a footer with
+//! Wufour and About.
 //!
 //! The data is Wufour's POST /api/account/menu answer. The app's server asks for it with the
 //! session token (`wufour.Verifier.accountMenu` in zig-core's server helpers) and serves it to its
@@ -36,13 +38,10 @@ const Color = col.Color;
 // Data: Wufour's answer
 // ---------------------------------------------------------------------------------------------
 
-pub const Kind = struct { en: []const u8 = "", ar: []const u8 = "" };
-
 pub const App = struct {
     slug: []const u8 = "",
     name: []const u8 = "",
     ar: []const u8 = "",
-    kind: Kind = .{},
     url: []const u8 = "",
     /// The phones cannot draw SVG; this is Wufour's PNG copy of the logo. Null: the initial.
     logoPng: ?[]const u8 = null,
@@ -55,7 +54,6 @@ pub const Links = struct {
     home: []const u8 = "",
     about: []const u8 = "",
     account: ?[]const u8 = null,
-    devices: ?[]const u8 = null,
     control: ?[]const u8 = null,
     signIn: []const u8 = "",
     signUp: []const u8 = "",
@@ -71,7 +69,7 @@ pub const Data = struct {
 };
 
 /// Which of Wufour's pages a press opens.
-pub const Page = enum { home, about, account, devices, control };
+pub const Page = enum { home, about, account, control };
 
 /// What the menu asks for. `Menu.update` does the menu's own (open, close, All apps, Wufour's
 /// pages, the apps) and hands back what is the app's: sign in, sign out and its items.
@@ -80,9 +78,10 @@ pub const Action = union(enum) {
     none,
     toggle,
     close,
+    /// All apps: opens the start page's All apps dialog (a new tab on the web, the browser on phones).
     all,
     page: Page,
-    /// An app of the row or of All apps, by its index in `Data.apps`.
+    /// An app of the row, by its index in `Data.apps`.
     app: u16,
     sign_in,
     sign_out,
@@ -93,7 +92,6 @@ pub const Action = union(enum) {
 /// The menu's state, kept in the app's state.
 pub const Menu = struct {
     open: bool = false,
-    all: bool = false,
     data: ?Data = null,
     arena: ?std.heap.ArenaAllocator = null,
 
@@ -121,15 +119,15 @@ pub const Menu = struct {
     pub fn update(m: *Menu, comptime Msg: type, act: Action, fx: runtime.Fx(Msg)) ?Action {
         switch (act) {
             .none => {},
-            .toggle => {
-                m.open = !m.open;
-                m.all = false;
-            },
-            .close => {
+            .toggle => m.open = !m.open,
+            .close => m.open = false,
+            .all => {
                 m.open = false;
-                m.all = false;
+                if (m.allAppsUrl(@import("zui.zig").allocator)) |u| {
+                    defer @import("zui.zig").allocator.free(u);
+                    fx.openUrl(u, true);
+                }
             },
-            .all => m.all = !m.all,
             .page => |p| {
                 m.open = false;
                 if (m.pageUrl(p)) |u| fx.openUrl(u, false);
@@ -141,11 +139,17 @@ pub const Menu = struct {
             },
             .sign_in, .sign_out, .item => {
                 m.open = false;
-                m.all = false;
                 return act;
             },
         }
         return null;
+    }
+
+    /// The start page with its All apps dialog open (`<wufour>/?apps=1`), in `a`. Null: no data.
+    pub fn allAppsUrl(m: *const Menu, a: std.mem.Allocator) ?[]u8 {
+        const home = m.pageUrl(.home) orelse return null;
+        const sep: []const u8 = if (std.mem.indexOfScalar(u8, home, '?') != null) "&" else "?";
+        return std.fmt.allocPrint(a, "{s}{s}apps=1", .{ home, sep }) catch null;
     }
 
     /// Escape (the app's `keyEvent`): closes the menu when it is open.
@@ -159,14 +163,13 @@ pub const Menu = struct {
             .home => l.home,
             .about => l.about,
             .account => l.account orelse return null,
-            .devices => l.devices orelse return null,
             .control => l.control orelse return null,
         };
         return if (u.len > 0) u else null;
     }
 };
 
-/// One of the app's own items, between the account part and the apps.
+/// One of the app's own items, after the Wufour account part (its options and apps).
 pub const Item = struct {
     label: []const u8,
     icon: Icon,
@@ -184,8 +187,11 @@ pub fn Options(comptime Msg: type) type {
         ar: bool = false,
         /// This app's slug ("turf"): marked in the row.
         app: []const u8 = "",
-        /// The person as the app knows them: drawn before Wufour answers, and when it cannot.
+        /// The person as the app knows them (their username): drawn before Wufour answers, and when
+        /// it cannot. When Wufour's answer is about the same person (its username or email equals
+        /// `name`), the username line shows Wufour's username.
         name: []const u8 = "",
+        /// Accepted for compatibility; the menu no longer shows the email.
         email: []const u8 = "",
         /// The person's photo in this app, if it has one (Reseal's profile picture): shown over the
         /// initial, in the picture and in the panel.
@@ -207,16 +213,13 @@ const Words = struct {
     hi: []const u8,
     manage: []const u8,
     close: []const u8,
-    devices: []const u8,
     control: []const u8,
     sign_out: []const u8,
     sign_in: []const u8,
     sign_up: []const u8,
     signed_out: []const u8,
     signed_out_body: []const u8,
-    apps: []const u8,
     all_apps: []const u8,
-    arrange: []const u8,
     about: []const u8,
     wufour: []const u8,
 };
@@ -226,16 +229,13 @@ const en: Words = .{
     .hi = "Hi, {s}!",
     .manage = "Manage your Wufour account",
     .close = "Close",
-    .devices = "Signed-in devices",
     .control = "Control",
     .sign_out = "Sign out",
     .sign_in = "Sign in",
     .sign_up = "Create an account",
     .signed_out = "Not signed in",
     .signed_out_body = "One Wufour account opens every app.",
-    .apps = "Your apps",
     .all_apps = "All apps",
-    .arrange = "Arrange your apps on Wufour",
     .about = "About",
     .wufour = "Wufour",
 };
@@ -245,19 +245,33 @@ const ar: Words = .{
     .hi = "أهلاً، {s}!",
     .manage = "إدارة حسابك في وفور",
     .close = "إغلاق",
-    .devices = "الأجهزة المسجّلة",
     .control = "لوحة تحكم وفور",
     .sign_out = "تسجيل الخروج",
     .sign_in = "تسجيل الدخول",
     .sign_up = "أنشئ حساباً",
     .signed_out = "لم تسجّل الدخول",
     .signed_out_body = "حساب وفور واحد يفتح كل التطبيقات.",
-    .apps = "تطبيقاتك",
     .all_apps = "كل التطبيقات",
-    .arrange = "رتّب تطبيقاتك على وفور",
     .about = "عن وفور",
     .wufour = "وفور",
 };
+
+/// The apps' names are fixed words, the same in every menu, whatever Wufour's answer spells.
+const AppName = struct { slug: []const u8, en: []const u8, ar: []const u8 };
+const app_names = [_]AppName{
+    .{ .slug = "wufour", .en = "Wufour", .ar = "وفور" },
+    .{ .slug = "taazur", .en = "Taazur", .ar = "تآزر" },
+    .{ .slug = "turf", .en = "Turf", .ar = "طرف" },
+    .{ .slug = "maps", .en = "Maps", .ar = "خرائط" },
+    .{ .slug = "reseal", .en = "Reseal", .ar = "رسيل" },
+    .{ .slug = "lassan", .en = "Lassan", .ar = "لسن" },
+};
+
+/// An app's name in the menu's language: the fixed word for the apps we know, else Wufour's.
+pub fn appName(app: App, arabic: bool) []const u8 {
+    for (app_names) |n| if (std.mem.eql(u8, n.slug, app.slug)) return if (arabic) n.ar else n.en;
+    return if (arabic and app.ar.len > 0) app.ar else app.name;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Colours: Wufour's TwOP scheme and its dark-mode transforms (Wufour's public/styles/style.css)
@@ -384,7 +398,15 @@ const View = struct {
 fn viewOf(comptime Msg: type, a: std.mem.Allocator, m: *const Menu, o: Options(Msg)) View {
     const d = m.data orelse Data{};
     var user: ?User = if (d.signedIn) d.user else null;
-    if (o.signed_out) user = null else if (o.name.len > 0) user = .{ .username = o.name, .email = if (o.email.len > 0) o.email else if (user) |u| u.email else "" };
+    if (o.signed_out) {
+        user = null;
+    } else if (o.name.len > 0) {
+        // The app's name wins. Wufour's username is taken only when its answer is about the same
+        // person (the name is that username, or that account's email).
+        const same = if (user) |u| std.mem.eql(u8, u.username, o.name) or std.mem.eql(u8, u.email, o.name) else false;
+        const wufour_name = if (user) |u| u.username else "";
+        user = .{ .username = if (same and wufour_name.len > 0) wufour_name else o.name, .email = if (same) (if (user) |u| u.email else "") else o.email };
+    }
     var dock: std.ArrayList(u16) = .empty;
     for (d.dock) |slug| for (d.apps, 0..) |app, i| {
         if (std.mem.eql(u8, app.slug, slug)) dock.append(a, @intCast(i)) catch {};
@@ -413,7 +435,7 @@ fn avatar(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, user: ?User, phot
         ui.begin(s, .{ .key = key });
         const initial = initialOf(if (u.username.len > 0) u.username else u.email);
         const upper = std.ascii.allocUpperString(ui.arena(), initial) catch initial;
-        ui.text(upper, .{ .font_size = size * 0.42, .weight = 800, .color = base, .line_height = 1 });
+        ui.text(upper, .{ .font_size = size * 0.42, .weight = 700, .color = base, .line_height = 1 });
         if (photo.len > 0) ui.image(photo, .{ .position = .absolute, .inset = .{ .top = 0, .start = 0 }, .width = .{ .px = size }, .height = .{ .px = size }, .fit = .cover }, runtime.key(photo) +% key);
         ui.end();
         return;
@@ -475,7 +497,7 @@ pub fn panel(comptime Msg: type, ui: *runtime.Ui(Msg), m: *const Menu, o: Option
         .inset = inset,
         .width = .{ .px = width },
         .max_height = @max(200, room),
-        .radius = 30,
+        .radius = 24,
         .background = k.sheet,
         .border_width = 1,
         .border_color = k.line,
@@ -483,48 +505,47 @@ pub fn panel(comptime Msg: type, ui: *runtime.Ui(Msg), m: *const Menu, o: Option
         .clip = true,
     }, .{ .key = runtime.key("wufour-account-panel"), .on_press = o.msg(.none) });
     ui.beginScroll(.{ .padding = .all(10), .max_height = @max(200, room) }, runtime.key("wufour-account-scroll"));
+    // The Wufour account (the person, the options, the apps), then the app's own items.
     head(Msg, ui, k, w, v, o);
     if (v.user != null) accountCard(Msg, ui, k, w, v, o);
+    appsCard(Msg, ui, k, w, v, o);
     ownItems(Msg, ui, k, o);
-    appsCard(Msg, ui, k, w, v, m, o);
     foot(Msg, ui, k, w, o);
     ui.end();
     ui.end();
 }
 
 fn head(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, w: Words, v: View, o: Options(Msg)) void {
-    // The email in the middle, the close button at the end.
-    ui.begin(.{ .direction = .row, .align_items = .center, .min_height = 40, .padding = .{ .start = 40 } }, .{});
-    ui.text(if (v.user) |u| u.email else "", .{ .grow = 1, .text_align = .center, .font_size = 13.5, .weight = 600, .color = k.ink_2, .max_lines = 1 });
-    ui.begin(.{ .width = .{ .px = 40 }, .height = .{ .px = 40 }, .radius = 20, .align_items = .center, .justify = .center, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.close), .label = w.close, .key = runtime.key("wufour-account-close") });
+    // Nothing sits above the picture: the head only carries the close button, in the corner.
+    ui.begin(.{ .height = .{ .px = 0 } }, .{});
+    ui.begin(.{ .position = .absolute, .inset = .{ .top = 0, .end = 0 }, .width = .{ .px = 44 }, .height = .{ .px = 44 }, .radius = 22, .align_items = .center, .justify = .center, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.close), .label = w.close, .key = runtime.key("wufour-account-close") });
     ui.icon(icons.close, 18, k.ink_2, .{}, 0);
     ui.end();
     ui.end();
 
-    ui.begin(.{ .align_items = .center, .gap = 10, .padding = .{ .top = 12, .bottom = 20, .start = 16, .end = 16 } }, .{});
+    ui.begin(.{ .align_items = .center, .gap = 4, .padding = .{ .top = 18, .bottom = 18, .start = 16, .end = 16 } }, .{});
     if (v.user) |u| {
+        ui.begin(.{ .padding = .{ .top = 4, .start = 4, .end = 4, .bottom = 4 + 8 }, .align_items = .center }, .{});
         ui.begin(.{ .padding = .all(4), .radius = 42, .background = k.card, .border_width = 1, .border_color = k.line }, .{});
         avatar(Msg, ui, k, u, o.photo, false, 72, runtime.key("wufour-account-big"));
         ui.end();
+        ui.end();
         const name = if (u.username.len > 0) u.username else u.email;
-        ui.text(fill(ui.arena(), w.hi, name), .{ .font_size = 21, .weight = 700, .color = k.brand_ink, .text_align = .center, .line_height = 1.25 });
-        if (v.data.links.account != null) {
-            ui.begin(.{ .direction = .row, .align_items = .center, .height = .{ .px = 40 }, .padding = .xy(22, 0), .radius = 999, .border_width = 1, .border_color = k.line_strong, .background = k.card, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.{ .page = .account }), .key = runtime.key("wufour-account-manage") });
-            ui.text(w.manage, .{ .font_size = 14, .weight = 700, .color = k.ink });
-            ui.end();
-        }
+        ui.text(fill(ui.arena(), w.hi, name), .{ .font_size = 20, .weight = 700, .color = k.brand_ink, .text_align = .center, .line_height = 1.25 });
+        // The username right under the greeting, where the Manage button sat (it is a row now).
+        if (u.username.len > 0) ui.text(u.username, .{ .font_size = 14, .weight = 500, .color = k.ink_2, .text_align = .center, .max_lines = 1 });
         return ui.end();
     }
     avatar(Msg, ui, k, null, "", false, 76, 0);
-    ui.text(w.signed_out, .{ .font_size = 21, .weight = 700, .color = k.brand_ink, .text_align = .center });
+    ui.text(w.signed_out, .{ .font_size = 20, .weight = 700, .color = k.brand_ink, .text_align = .center });
     ui.text(w.signed_out_body, .{ .font_size = 14, .color = k.ink_2, .text_align = .center });
-    ui.begin(.{ .direction = .row, .wrap = true, .justify = .center, .gap = 8, .padding = .{ .top = 6 } }, .{});
-    ui.begin(.{ .direction = .row, .align_items = .center, .gap = 8, .height = .{ .px = 42 }, .padding = .xy(20, 0), .radius = 999, .background = k.a, .pressed_opacity = 0.85, .hover_background = k.v }, .{ .on_press = o.msg(.sign_in), .key = runtime.key("wufour-account-signin") });
+    ui.begin(.{ .direction = .row, .wrap = true, .justify = .center, .gap = 12, .padding = .{ .top = 12 } }, .{});
+    ui.begin(.{ .direction = .row, .align_items = .center, .gap = 8, .height = .{ .px = 44 }, .padding = .xy(20, 0), .radius = 12, .background = k.a, .pressed_opacity = 0.85, .hover_background = k.v }, .{ .on_press = o.msg(.sign_in), .key = runtime.key("wufour-account-signin") });
     ui.icon(icons.login, 18, core, .{}, 0);
-    ui.text(w.sign_in, .{ .font_size = 14.4, .weight = 700, .color = core });
+    ui.text(w.sign_in, .{ .font_size = 15, .weight = 700, .color = core });
     ui.end();
-    ui.begin(.{ .direction = .row, .align_items = .center, .height = .{ .px = 42 }, .padding = .xy(20, 0), .radius = 999, .border_width = 1, .border_color = k.line_strong, .background = k.card, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.sign_in), .key = runtime.key("wufour-account-signup") });
-    ui.text(w.sign_up, .{ .font_size = 14.4, .weight = 700, .color = k.ink });
+    ui.begin(.{ .direction = .row, .align_items = .center, .height = .{ .px = 44 }, .padding = .xy(20, 0), .radius = 12, .border_width = 1, .border_color = k.line_strong, .background = k.card, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.sign_in), .key = runtime.key("wufour-account-signup") });
+    ui.text(w.sign_up, .{ .font_size = 15, .weight = 700, .color = k.ink });
     ui.end();
     ui.end();
     ui.end();
@@ -535,15 +556,15 @@ fn row(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, ic: Icon, label: []c
         .direction = .row,
         .align_items = .center,
         .gap = 14,
-        .min_height = 50,
-        .padding = .xy(16, 8),
-        .radius = 18,
+        .min_height = 44,
+        .padding = .xy(16, 6),
+        .radius = 12,
         .background = if (current) k.gold_soft else null,
         .hover_background = k.teal_soft,
         .pressed_background = k.teal_soft,
     }, .{ .on_press = msg, .key = key });
     ui.icon(ic, 20, k.ink_2, .{}, 0);
-    ui.text(label, .{ .grow = 1, .font_size = 14.7, .weight = 600, .color = k.ink, .max_lines = 1 });
+    ui.text(label, .{ .grow = 1, .font_size = 15, .weight = 500, .color = k.ink, .max_lines = 1 });
     if (count > 0) {
         const s = std.fmt.allocPrint(ui.arena(), "{d}", .{count}) catch "";
         ui.text(s, .{ .font_size = 13, .weight = 700, .color = k.ink_3 });
@@ -552,12 +573,12 @@ fn row(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, ic: Icon, label: []c
 }
 
 fn cardBegin(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors) void {
-    ui.begin(.{ .background = k.card, .radius = 24, .padding = .all(6), .gap = 0 }, .{});
+    ui.begin(.{ .background = k.card, .radius = 18, .padding = .all(6), .gap = 0 }, .{});
 }
 
 fn accountCard(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, w: Words, v: View, o: Options(Msg)) void {
     cardBegin(Msg, ui, k);
-    if (v.data.links.devices != null) row(Msg, ui, k, icons.devices, w.devices, 0, false, o.msg(.{ .page = .devices }), runtime.key("wufour-account-devices"));
+    if (v.data.links.account != null) row(Msg, ui, k, icons.user, w.manage, 0, false, o.msg(.{ .page = .account }), runtime.key("wufour-account-manage"));
     if (v.data.links.control != null and !std.mem.eql(u8, o.app, "control")) row(Msg, ui, k, icons.shield, w.control, 0, false, o.msg(.{ .page = .control }), runtime.key("wufour-account-control"));
     row(Msg, ui, k, icons.logout, w.sign_out, 0, false, o.msg(.sign_out), runtime.key("wufour-account-signout"));
     ui.end();
@@ -588,91 +609,84 @@ fn emblem(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, app: App, size: f
         .background = if (k.dark) k.b.mix(0.84, k.c) else k.b,
         .border_width = if (current) 2 else 3,
         .border_color = if (current) k.a else tint.withAlpha(0.24),
-        .shadow = .{ .y = 4, .blur = 12, .color = k.deep.withAlpha(0.12) },
     }, .{});
     if (app.logoPng) |png| {
         ui.image(png, .{ .width = .{ .px = size * 0.54 }, .height = .{ .px = size * 0.54 }, .fit = .contain }, runtime.key(png));
     } else {
         const letter = if (app.name.len > 0) app.name[0..1] else "?";
-        ui.text(letter, .{ .font_size = size * 0.4, .weight = 800, .line_height = 1, .color = if (k.dark) tint.mix(0.5, k.c) else tint });
+        ui.text(letter, .{ .font_size = size * 0.4, .weight = 700, .line_height = 1, .color = if (k.dark) tint.mix(0.5, k.c) else tint });
     }
     ui.end();
 }
 
-fn appButton(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, d: Data, i: u16, o: Options(Msg), wide: bool) void {
+fn appButton(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, d: Data, i: u16, o: Options(Msg)) void {
     const app = d.apps[i];
     const current = std.mem.eql(u8, app.slug, o.app);
     ui.begin(.{
         .width = .fill,
         .align_items = .center,
         .gap = 7,
-        .padding = if (wide) .{ .top = 10, .bottom = 8, .start = 4, .end = 4 } else .{ .top = 8, .bottom = 6, .start = 2, .end = 2 },
-        .radius = 18,
-        .hover_background = if (wide) k.teal_soft else null,
+        .padding = .{ .top = 8, .bottom = 6, .start = 2, .end = 2 },
+        .radius = 12,
         .pressed_background = k.teal_soft,
-    }, .{ .on_press = o.msg(.{ .app = i }), .key = runtime.key(@as(u64, if (wide) 8000 else 8500) + i) });
+    }, .{ .on_press = o.msg(.{ .app = i }), .key = runtime.key(@as(u64, 8500) + i) });
     emblem(Msg, ui, k, app, 48, current);
-    ui.text(if (o.ar and app.ar.len > 0) app.ar else app.name, .{ .font_size = 12, .weight = 700, .color = if (current) k.ink else k.ink_2, .max_lines = 1, .text_align = .center });
-    if (wide) ui.text(if (o.ar) app.kind.ar else app.kind.en, .{ .font_size = 11, .weight = 600, .color = k.ink_3, .max_lines = 1, .text_align = .center });
+    ui.text(appName(app, o.ar), .{ .font_size = 12, .weight = 700, .color = if (current) k.ink else k.ink_2, .max_lines = 1, .text_align = .center });
     ui.end();
 }
 
-fn appsCard(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, w: Words, v: View, m: *const Menu, o: Options(Msg)) void {
+/// The person's four apps from the start page and the All apps button, in the Wufour account
+/// part, with no heading. All apps opens the start page's All apps dialog in a new tab.
+fn appsCard(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, w: Words, v: View, o: Options(Msg)) void {
     if (v.dock.len == 0) return;
-    ui.begin(.{ .background = k.card, .radius = 24, .padding = .{ .top = 12, .bottom = 8, .start = 6, .end = 6 } }, .{});
-    ui.text(w.apps, .{ .font_size = 13.5, .weight = 700, .color = k.ink_2, .padding = .{ .start = 10, .end = 10, .bottom = 10 } });
+    ui.begin(.{ .background = k.card, .radius = 18, .padding = .{ .top = 10, .bottom = 6, .start = 6, .end = 6 } }, .{});
     ui.begin(.{ .direction = .row, .gap = 2 }, .{});
-    for (v.dock) |i| appButton(Msg, ui, k, v.data, i, o, false);
-    // The red "All apps" button (fatal), as on the start page.
-    ui.begin(.{ .width = .fill, .align_items = .center, .gap = 7, .padding = .{ .top = 8, .bottom = 6 }, .radius = 18, .pressed_opacity = 0.85 }, .{ .on_press = o.msg(.all), .label = w.all_apps, .key = runtime.key("wufour-account-all") });
+    for (v.dock) |i| appButton(Msg, ui, k, v.data, i, o);
+    // The plum "All apps" button (prime), as on the start page; the variant on hover and press.
+    // A view only shows its own hover and press, so the dots and the name are each pressable.
+    const on_brand = if (k.dark) k.c else k.b;
+    ui.begin(.{ .width = .fill, .align_items = .center, .gap = 7, .padding = .{ .top = 8, .bottom = 6 } }, .{});
     ui.begin(.{
         .width = .{ .px = 48 },
         .height = .{ .px = 48 },
         .radius = 24,
-        .direction = if (m.all) .column else .row,
+        .direction = .row,
         .gap = 3.5,
         .align_items = .center,
         .justify = .center,
-        .background = k.f,
-        .shadow = .{ .y = 10, .blur = 20, .color = k.f.withAlpha(0.45) },
-    }, .{});
+        .background = k.plum,
+        .hover_background = k.v,
+        .pressed_background = k.v,
+        .transition = .{ .duration_ms = 200 },
+    }, .{ .on_press = o.msg(.all), .label = w.all_apps, .key = runtime.key("wufour-account-all") });
     for (0..3) |_| {
-        ui.begin(.{ .width = .{ .px = 5 }, .height = .{ .px = 5 }, .radius = 2.5, .background = k.b }, .{});
+        ui.begin(.{ .width = .{ .px = 5 }, .height = .{ .px = 5 }, .radius = 2.5, .background = on_brand }, .{});
         ui.end();
     }
     ui.end();
+    ui.begin(.{ .padding = .xy(6, 2), .radius = 12, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.all), .key = runtime.key("wufour-account-all-name") });
     ui.text(w.all_apps, .{ .font_size = if (o.ar) 11 else 12, .weight = 700, .color = k.ink_2, .max_lines = 1, .text_align = .center });
     ui.end();
     ui.end();
-
-    if (m.all) {
-        ui.begin(.{ .height = .{ .px = 1 }, .background = k.line, .padding = .{ .top = 0 } }, .{});
-        ui.end();
-        ui.begin(.{ .grid = .{ .columns = 3 }, .gap = 2, .padding = .{ .top = 10 } }, .{});
-        for (v.data.apps, 0..) |_, i| appButton(Msg, ui, k, v.data, @intCast(i), o, true);
-        ui.end();
-        ui.begin(.{ .direction = .row, .align_items = .center, .justify = .center, .gap = 8, .padding = .all(10), .radius = 16, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.{ .page = .home }), .key = runtime.key("wufour-account-arrange") });
-        ui.text(w.arrange, .{ .font_size = 13.5, .weight = 700, .color = k.v });
-        ui.icon(icons.arrow, 16, k.v, .{}, 0);
-        ui.end();
-    }
     ui.end();
+    ui.end();
+    gapAfter(Msg, ui);
 }
 
 fn foot(comptime Msg: type, ui: *runtime.Ui(Msg), k: Colors, w: Words, o: Options(Msg)) void {
     ui.begin(.{ .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .padding = .{ .top = 12, .bottom = 4 } }, .{});
-    ui.begin(.{ .direction = .row, .align_items = .center, .gap = 6, .padding = .xy(8, 4), .radius = 999, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.{ .page = .home }), .key = runtime.key("wufour-account-home") });
+    ui.begin(.{ .direction = .row, .align_items = .center, .gap = 6, .padding = .xy(8, 4), .radius = 12, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.{ .page = .home }), .key = runtime.key("wufour-account-home") });
     ui.begin(.{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }, .{});
     const tints = [_]Color{ k.a, k.v, k.plum, k.deep };
     for (mark_parts, tints) |d, c| {
         ui.icon(.{ .paths = &.{d}, .fill = true, .box = 64 }, 18, c, .{ .position = .absolute, .inset = .{ .top = 0, .start = 0 }, .no_mirror = true }, 0);
     }
     ui.end();
-    ui.text(w.wufour, .{ .font_size = 12.5, .weight = 800, .color = k.brand_ink });
+    ui.text(w.wufour, .{ .font_size = 12.5, .weight = 700, .color = k.brand_ink });
     ui.end();
     ui.text("·", .{ .font_size = 12.5, .color = k.ink_3 });
-    ui.begin(.{ .padding = .xy(8, 4), .radius = 999, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.{ .page = .about }), .key = runtime.key("wufour-account-about") });
-    ui.text(w.about, .{ .font_size = 12.5, .weight = 600, .color = k.ink_3 });
+    ui.begin(.{ .padding = .xy(8, 4), .radius = 12, .hover_background = k.teal_soft, .pressed_background = k.teal_soft }, .{ .on_press = o.msg(.{ .page = .about }), .key = runtime.key("wufour-account-about") });
+    ui.text(w.about, .{ .font_size = 12.5, .weight = 500, .color = k.ink_3 });
     ui.end();
     ui.end();
 }
@@ -693,6 +707,9 @@ test "Wufour's answer is read, unknown fields and nulls included" {
     try testing.expectEqual(@as(usize, 2), d.dock.len);
     try testing.expectEqualStrings("https://www.example.com/account", m.pageUrl(.account).?);
     try testing.expect(m.pageUrl(.control) == null);
+    const all = m.allAppsUrl(testing.allocator).?;
+    defer testing.allocator.free(all);
+    try testing.expectEqualStrings("https://www.example.com/?apps=1", all);
     try testing.expectEqualStrings("https://www.example.com/assets/logos/png/taazur.png", d.apps[0].logoPng.?);
     // Not the menu: what was there stays.
     m.load("<html>");
@@ -753,17 +770,26 @@ test "the menu opens from the picture, shows the account, the app's items and th
     try D.press("S");
     try testing.expect(D.R.appState().menu.open);
     try testing.expect(D.findText("Hi, Sara!") != 0);
-    try testing.expect(D.findText("sara@example.com") != 0);
+    // Nothing above the picture (no email); the username under the greeting.
+    try testing.expect(D.findText("sara@example.com") == 0);
+    try testing.expect(D.findText("Sara") != 0);
+    // The options: Manage first (a row), no devices row, Control only for administrators.
     try testing.expect(D.findText("Manage your Wufour account") != 0);
-    try testing.expect(D.findText("Signed-in devices") != 0);
+    try testing.expect(D.findText("Signed-in devices") == 0);
     try testing.expect(D.findText("Control") == 0);
     try testing.expect(D.findText("My trips") != 0);
     try testing.expect(D.findText("3") != 0);
-    // The row: Maps then Taazur, as the person arranged them; All apps closed.
+    // The row: Maps then Taazur, as the person arranged them, with fixed names; no heading, no kinds.
+    try testing.expect(D.findText("Maps") != 0);
+    try testing.expect(D.findText("Taazur") != 0);
+    try testing.expect(D.findText("Your apps") == 0);
     try testing.expect(D.findText("Marketplace") == 0);
+    // All apps opens the start page's All apps dialog and closes the menu.
     try D.press("All apps");
-    try testing.expect(D.findText("Marketplace") != 0);
-    try testing.expect(D.findText("Arrange your apps on Wufour") != 0);
+    try testing.expectEqualStrings("https://www.example.com/?apps=1", @import("host/headless.zig").opened.items);
+    try testing.expect(!D.R.appState().menu.open);
+    try D.press("S");
+    try testing.expect(D.findText("Arrange your apps on Wufour") == 0);
     // The app's item goes back to the app; the menu closes.
     try D.press("My trips");
     try testing.expectEqual(@as(u16, 0), D.R.appState().left.?.item);

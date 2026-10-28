@@ -14,6 +14,11 @@ extern "UIKit" var NSFontAttributeName: id;
 extern "UIKit" var NSForegroundColorAttributeName: id;
 extern "UIKit" var NSParagraphStyleAttributeName: id;
 extern "UIKit" var NSBaselineOffsetAttributeName: id;
+extern "UIKit" var NSObliquenessAttributeName: id;
+extern "UIKit" var UIFontDescriptorNameAttribute: id;
+extern "UIKit" var UIFontDescriptorCascadeListAttribute: id;
+/// Registers a font file for this process (kCTFontManagerScopeProcess = 1). The app links CoreText.
+extern "CoreText" fn CTFontManagerRegisterFontsForURL(url: id, scope: u32, err: ?*id) bool;
 extern "UIKit" var UIApplicationWillEnterForegroundNotification: id;
 extern "UIKit" var UIApplicationDidEnterBackgroundNotification: id;
 extern "UIKit" var UIKeyInputEscape: id;
@@ -137,7 +142,18 @@ fn faded(argb: u32) u32 {
     return (a << 24) | (argb & 0xffffff);
 }
 
-fn font(f: zui.Font) id {
+// ---- Fonts ----
+// Wufour Sans and Wufour Arabic (zui/font.zig decides which face carries which script and
+// weight). The files travel in the bundle (each app's Info.plist lists them under UIAppFonts; the
+// `ios` build step puts them in zig-out/ios/fonts) and are registered again at start, so a bundle
+// without the plist entries still works. A face whose file is missing falls back to the system
+// font, as before the fonts existed.
+
+/// Which of the six fonts are available, found out once after registration (0 unknown, 1 yes, 2 no).
+var font_known: [2][3]u8 = .{ .{ 0, 0, 0 }, .{ 0, 0, 0 } };
+
+/// The system font at a weight: monospace for `mono`, otherwise the fallback for a missing file.
+fn systemFont(f: zui.Font) id {
     const w: CGFloat = switch (f.weight) {
         0...149 => -0.8,
         150...249 => -0.6,
@@ -154,10 +170,77 @@ fn font(f: zui.Font) id {
     return make(objc.class("UIFont"), objc.sel(name), f.size, w);
 }
 
+/// Registers every Wufour font file found in the bundle (at its root or under Fonts/). A file
+/// UIKit already registered from UIAppFonts makes CoreText report an error, which is fine.
+fn registerFonts() void {
+    const bundle = objc.send(objc.class("NSBundle"), "mainBundle");
+    if (bundle == null) return;
+    const url_for = objc.msgSend(*const fn (id, objc.SEL, id, id, id) callconv(.c) id);
+    const ext = objc.nsString("ttf");
+    defer objc.release(ext);
+    const sub = objc.nsString("Fonts");
+    defer objc.release(sub);
+    for (zui.font.files) |file| {
+        const name = objc.nsString(file[0 .. file.len - ".ttf".len]);
+        defer objc.release(name);
+        var url = url_for(bundle, objc.sel("URLForResource:withExtension:subdirectory:"), name, ext, null);
+        if (url == null) url = url_for(bundle, objc.sel("URLForResource:withExtension:subdirectory:"), name, ext, sub);
+        if (url == null) continue;
+        _ = CTFontManagerRegisterFontsForURL(url, 1, null);
+    }
+}
+
+fn weightStep(w: u16) usize {
+    return switch (zui.font.weight(w)) {
+        400 => 0,
+        500 => 1,
+        else => 2,
+    };
+}
+
+/// Whether a Wufour face at a weight can be made (its file is registered); asked of UIKit once.
+fn fontAvailable(face: zui.font.Face, w: u16) bool {
+    const known = &font_known[@backingInt(face)][weightStep(w)];
+    if (known.* == 0) {
+        const name = objc.nsString(zui.font.postscriptName(face, w) orelse return false);
+        defer objc.release(name);
+        const probe = objc.msgSend(*const fn (id, objc.SEL, id, CGFloat) callconv(.c) id)(objc.class("UIFont"), objc.sel("fontWithName:size:"), name, 12);
+        known.* = if (probe != null) 1 else 2;
+    }
+    return known.* == 1;
+}
+
+/// The UIFont for `s` in `f`: Wufour Sans or Wufour Arabic by the text's script, with the other
+/// one in its cascade list for the glyphs it lacks and the system font after that (CoreText's own
+/// last resort). The system monospace for `mono`; the system font when our file is missing.
+fn font(f: zui.Font, s: []const u8) id {
+    if (f.mono) return systemFont(f);
+    const face = zui.font.faceFor(false, s);
+    const w = zui.font.weight(f.weight);
+    if (!fontAvailable(face, w)) return systemFont(f);
+    const primary = objc.nsString(zui.font.postscriptName(face, w).?);
+    defer objc.release(primary);
+    const with_name = objc.msgSend(*const fn (id, objc.SEL, id, CGFloat) callconv(.c) id);
+    const other = face.fallback();
+    if (!fontAvailable(other, w)) return with_name(objc.class("UIFont"), objc.sel("fontWithName:size:"), primary, f.size);
+    const fallback_name = objc.nsString(zui.font.postscriptName(other, w).?);
+    defer objc.release(fallback_name);
+    const descriptor_named = objc.msgSend(*const fn (id, objc.SEL, id, CGFloat) callconv(.c) id);
+    const fallback = descriptor_named(objc.class("UIFontDescriptor"), objc.sel("fontDescriptorWithName:size:"), fallback_name, 0);
+    var cascade = [_]id{fallback};
+    const array = objc.msgSend(*const fn (id, objc.SEL, [*]id, usize) callconv(.c) id)(objc.class("NSArray"), objc.sel("arrayWithObjects:count:"), &cascade, 1);
+    var keys = [_]id{ UIFontDescriptorNameAttribute, UIFontDescriptorCascadeListAttribute };
+    var values = [_]id{ primary, array };
+    const dict = objc.msgSend(*const fn (id, objc.SEL, [*]id, [*]id, usize) callconv(.c) id)(objc.class("NSDictionary"), objc.sel("dictionaryWithObjects:forKeys:count:"), &values, &keys, keys.len);
+    const descriptor = objc.msgSend(*const fn (id, objc.SEL, id) callconv(.c) id)(objc.class("UIFontDescriptor"), objc.sel("fontDescriptorWithFontAttributes:"), dict);
+    const ui_font = objc.msgSend(*const fn (id, objc.SEL, id, CGFloat) callconv(.c) id)(objc.class("UIFont"), objc.sel("fontWithDescriptor:size:"), descriptor, f.size);
+    return if (ui_font != null) ui_font else systemFont(f);
+}
+
 /// Attributes shared by drawing and measuring, so they always agree: the font, a fixed line
 /// height with the text centred in it (as CSS does), alignment and wrapping.
-fn attributes(f: zui.Font, argb: u32, a: zui.PhysicalAlign) id {
-    const ui_font = font(f);
+fn attributes(f: zui.Font, s: []const u8, argb: u32, a: zui.PhysicalAlign) id {
+    const ui_font = font(f, s);
     const para = objc.new("NSMutableParagraphStyle");
     defer objc.release(para);
     objc.sendVoidFloat(para, "setMinimumLineHeight:", f.line_height);
@@ -335,7 +418,7 @@ pub fn pressable(i: u32, on: bool) void {
 pub fn text(i: u32, s: []const u8, f: zui.Font, argb: u32, a: zui.PhysicalAlign) void {
     if (f.letter_spacing != 0) return richText(i, s, &.{}, f, argb, a);
     const l = view(i);
-    const str = attributed(s, attributes(f, argb, a));
+    const str = attributed(s, attributes(f, s, argb, a));
     defer objc.release(str);
     objc.sendVoid1(l, "setAttributedText:", str);
     objc.sendVoidInt(l, "setNumberOfLines:", f.max_lines);
@@ -352,10 +435,12 @@ pub fn input(i: u32, value: []const u8, placeholder: []const u8, f: zui.Font, ar
         defer objc.release(v);
         objc.sendVoid1(t, "setText:", v);
     }
-    objc.sendVoid1(t, "setFont:", font(f));
+    // The face follows what is in the field, or the placeholder while it is empty; the font's
+    // cascade carries the other Wufour face, so mixed typing still draws right.
+    objc.sendVoid1(t, "setFont:", font(f, if (value.len > 0) value else placeholder));
     objc.sendVoid1(t, "setTextColor:", color(argb));
     objc.sendVoidInt(t, "setTextAlignment:", @backingInt(a));
-    const ph = attributed(placeholder, attributes(f, faded(argb), a));
+    const ph = attributed(placeholder, attributes(f, placeholder, faded(argb), a));
     defer objc.release(ph);
     objc.sendVoid1(t, "setAttributedPlaceholder:", ph);
 }
@@ -363,7 +448,7 @@ pub fn input(i: u32, value: []const u8, placeholder: []const u8, f: zui.Font, ar
 /// A UITextView: the same attributes as text views, for what is there and what is typed.
 fn textArea(i: u32, value: []const u8, placeholder: []const u8, f: zui.Font, argb: u32, a: zui.PhysicalAlign) void {
     const tv = view(i);
-    const attrs = attributes(f, argb, a);
+    const attrs = attributes(f, if (value.len > 0) value else placeholder, argb, a);
     const current = objc.send(tv, "text");
     const utf8 = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) ?[*:0]const u8)(current, objc.sel("UTF8String"));
     const same = if (utf8) |p| std.mem.eql(u8, std.mem.span(p), value) else value.len == 0;
@@ -375,7 +460,7 @@ fn textArea(i: u32, value: []const u8, placeholder: []const u8, f: zui.Font, arg
     objc.sendVoid1(tv, "setTypingAttributes:", attrs);
     objc.sendVoid1(tv, "setTintColor:", color(argb));
     const ph = placeholders.items[i];
-    const str = attributed(placeholder, attributes(f, faded(argb), a));
+    const str = attributed(placeholder, attributes(f, placeholder, faded(argb), a));
     defer objc.release(str);
     objc.sendVoid1(ph, "setAttributedText:", str);
     objc.sendVoidBool(ph, "setHidden:", value.len > 0);
@@ -425,7 +510,7 @@ pub fn rootBackground(argb: u32) void {
 pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
     if (f.letter_spacing != 0) return measureRich(s, &.{}, f, max_width);
     if (s.len == 0) return .{ .w = 0, .h = f.line_height };
-    const str = attributed(s, attributes(f, 0xff000000, .left));
+    const str = attributed(s, attributes(f, s, 0xff000000, .left));
     defer objc.release(str);
     const bound = objc.msgSend(*const fn (id, objc.SEL, objc.CGSize, isize, id) callconv(.c) objc.CGRect);
     const width: CGFloat = if (std.math.isFinite(max_width)) max_width else 1e7;
@@ -524,6 +609,7 @@ pub fn exportEntry(comptime App: type) void {
                 .{ "appHidden:", @ptrCast(&appHidden), "v@:@" },
             });
             styleInit(R);
+            registerFonts();
             return UIApplicationMain(argc, argv, null, objc.nsString("ZuiAppDelegate"));
         }
 
@@ -2614,7 +2700,7 @@ fn utf16Len(s: []const u8) usize {
 
 /// The text with its spans' looks and links (+1 retained).
 fn richAttributed(s: []const u8, spans: []const zui.Span, f: zui.Font, argb: u32, a: zui.PhysicalAlign) id {
-    const base = attributes(f, argb, a);
+    const base = attributes(f, s, argb, a);
     const attrs = objc.send(base, "mutableCopy");
     defer objc.release(attrs);
     const set = objc.msgSend(*const fn (id, objc.SEL, id, id) callconv(.c) void);
@@ -2632,12 +2718,17 @@ fn richAttributed(s: []const u8, spans: []const zui.Span, f: zui.Font, argb: u32
             var ff = f;
             if (sp.bold) ff.weight = @max(f.weight, 700);
             if (sp.mono) ff.mono = true;
-            var uf = font(ff);
+            var uf = font(ff, s[lo..hi]);
             if (sp.italic) {
                 const desc = objc.send(uf, "fontDescriptor");
                 const traits: u32 = @intCast(objc.msgSend(*const fn (id, objc.SEL) callconv(.c) u32)(desc, objc.sel("symbolicTraits")));
                 const it = objc.msgSend(*const fn (id, objc.SEL, u32) callconv(.c) id)(desc, objc.sel("fontDescriptorWithSymbolicTraits:"), traits | 1);
-                if (it != null) uf = objc.msgSend(*const fn (id, objc.SEL, id, CGFloat) callconv(.c) id)(objc.class("UIFont"), objc.sel("fontWithDescriptor:size:"), it, 0);
+                if (it != null) {
+                    uf = objc.msgSend(*const fn (id, objc.SEL, id, CGFloat) callconv(.c) id)(objc.class("UIFont"), objc.sel("fontWithDescriptor:size:"), it, 0);
+                } else {
+                    // Our faces have no italic: slant the upright one, as the web does.
+                    add(m, objc.sel("addAttribute:value:range:"), NSObliquenessAttributeName, objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) id)(objc.class("NSNumber"), objc.sel("numberWithDouble:"), 0.2), r);
+                }
             }
             add(m, objc.sel("addAttribute:value:range:"), NSFontAttributeName, uf, r);
         }
@@ -2789,8 +2880,7 @@ pub fn showLabel(i: u32, s: []const u8) void {
     objc.sendVoidInt(l, "setTextAlignment:", 1); // centre
     objc.sendVoidBool(l, "setClipsToBounds:", true);
     objc.sendVoidFloat(objc.send(l, "layer"), "setCornerRadius:", 8);
-    const small = objc.msgSend(*const fn (id, objc.SEL, CGFloat) callconv(.c) id)(objc.class("UIFont"), objc.sel("systemFontOfSize:"), 14);
-    objc.sendVoid1(l, "setFont:", small);
+    objc.sendVoid1(l, "setFont:", font(.{ .size = 14, .weight = 500 }, s));
     objc.sendVoid(l, "sizeToFit");
     const get_rect = objc.msgSend(*const fn (id, objc.SEL) callconv(.c) objc.CGRect);
     const conv = objc.msgSend(*const fn (id, objc.SEL, objc.CGRect, id) callconv(.c) objc.CGRect);

@@ -15,6 +15,8 @@ pub const reconcile = @import("reconcile.zig");
 pub const runtime = @import("runtime.zig");
 /// Native calls on the phones: the media backend and call-engine interfaces (see the file).
 pub const calls = @import("calls.zig");
+/// Wufour's own fonts on the phones: which face draws which script and weight (see the file).
+pub const font = @import("font.zig");
 const style = @import("style.zig");
 
 pub const Color = color.Color;
@@ -152,6 +154,7 @@ pub fn exportApp(comptime App: type) void {
 
 test {
     _ = color;
+    _ = font;
     _ = text;
     _ = barcode;
     _ = gesture;

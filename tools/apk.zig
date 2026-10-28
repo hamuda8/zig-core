@@ -4,8 +4,11 @@
 //!
 //! apk --sdk DIR --build-tools VER --platform android-NN --min-sdk N --jdk DIR
 //!     --manifest FILE --java DIR [--java DIR ...] --lib ABI=FILE [--lib ABI=FILE ...]
-//!     [--res DIR ...] [--dep GROUP:ARTIFACT:VERSION ... --maven-cache DIR]
+//!     [--res DIR ...] [--assets NAME=DIR ...] [--dep GROUP:ARTIFACT:VERSION ... --maven-cache DIR]
 //!     [--firebase google-services.json] --keystore FILE --out FILE
+//!
+//! `--assets NAME=DIR` puts DIR's files into the APK under assets/NAME/ (addApp passes the fonts
+//! from shells/fonts as `fonts=`, which Zui.java opens through the AssetManager).
 //!
 //! Maven dependencies (`--dep`, from `addApp(.android_deps)`) are resolved with their
 //! transitive dependencies by `maven.zig` into the cache. Then, without Gradle:
@@ -41,6 +44,7 @@ const bat_ext = if (builtin.os.tag == .windows) ".bat" else "";
 const path_sep = if (builtin.os.tag == .windows) ";" else ":";
 
 const Lib = struct { abi: []const u8, path: []const u8 };
+const Asset = struct { name: []const u8, dir: []const u8 };
 
 const Options = struct {
     sdk: []const u8 = "",
@@ -55,6 +59,8 @@ const Options = struct {
     libs: std.ArrayList(Lib) = .empty,
     /// Android resource folders (res/), compiled and linked in order.
     res: std.ArrayList([]const u8) = .empty,
+    /// Asset folders (`--assets NAME=DIR`): DIR's files go under assets/NAME/.
+    assets: std.ArrayList(Asset) = .empty,
     deps: std.ArrayList([]const u8) = .empty,
     maven_cache: []const u8 = "",
     firebase: []const u8 = "",
@@ -249,6 +255,15 @@ pub fn main(init: std.process.Init) !void {
     for (opts.libs.items) |lib| {
         const so = try cwd.readFileAlloc(io, lib.path, arena, max_file);
         try entries.append(arena, zip.stored(try std.fmt.allocPrint(arena, "lib/{s}/libapp.so", .{lib.abi}), so, 16 * 1024));
+    }
+    // The app's own assets (the fonts): stored as they are, like aapt2 would keep font files.
+    for (opts.assets.items) |a| {
+        var files: std.ArrayList([]const u8) = .empty;
+        try collect(arena, io, a.dir, "", &files);
+        for (files.items) |f| {
+            const name = try std.mem.replaceOwned(u8, arena, try std.fmt.allocPrint(arena, "assets/{s}/{s}", .{ a.name, f[a.dir.len + 1 ..] }), "\\", "/");
+            try entries.append(arena, zip.stored(name, try cwd.readFileAlloc(io, f, arena, max_file), 4));
+        }
     }
     for (libraries.items) |l| {
         const dir = l.dir orelse continue;
@@ -546,6 +561,9 @@ fn parseArgs(arena: std.mem.Allocator, args: []const [:0]const u8) !Options {
         if (eql(key, "--sdk")) o.sdk = val else if (eql(key, "--build-tools")) o.build_tools = val else if (eql(key, "--platform")) o.platform = val else if (eql(key, "--min-sdk")) o.min_sdk = val else if (eql(key, "--jdk")) o.jdk = val else if (eql(key, "--manifest")) o.manifest = val else if (eql(key, "--java")) try o.java.append(arena, val) else if (eql(key, "--keystore")) o.keystore = val else if (eql(key, "--out")) o.out = val else if (eql(key, "--res")) try o.res.append(arena, val) else if (eql(key, "--dep")) try o.deps.append(arena, val) else if (eql(key, "--maven-cache")) o.maven_cache = val else if (eql(key, "--firebase")) o.firebase = val else if (eql(key, "--wufour-apps")) o.wufour_apps = val else if (eql(key, "--lib")) {
             const eq = std.mem.indexOfScalar(u8, val, '=') orelse return error.BadLibArg;
             try o.libs.append(arena, .{ .abi = val[0..eq], .path = val[eq + 1 ..] });
+        } else if (eql(key, "--assets")) {
+            const eq = std.mem.indexOfScalar(u8, val, '=') orelse return error.BadAssetsArg;
+            try o.assets.append(arena, .{ .name = val[0..eq], .dir = val[eq + 1 ..] });
         } else {
             std.debug.print("apk: unknown option {s}\n", .{key});
             return error.BadArgs;

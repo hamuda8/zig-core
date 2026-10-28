@@ -298,12 +298,12 @@ fn bind(e: *jni.Env) void {
         .{ "frame", "frame", "(IFFFF)V" },
         .{ "box", "box", "(IIFFIF)V" },
         .{ "pressable", "pressable", "(IZ)V" },
-        .{ "text", "text", "(ILjava/lang/String;FIFZIII)V" },
-        .{ "input", "input", "(ILjava/lang/String;Ljava/lang/String;FIFZII)V" },
+        .{ "text", "text", "(ILjava/lang/String;FIFIIII)V" },
+        .{ "input", "input", "(ILjava/lang/String;Ljava/lang/String;FIFIII)V" },
         .{ "content", "content", "(IFF)V" },
         .{ "root_background", "rootBackground", "(I)V" },
         .{ "commit", "commit", "()V" },
-        .{ "measure", "measure", "(Ljava/lang/String;FIFZIF)J" },
+        .{ "measure", "measure", "(Ljava/lang/String;FIFIIF)J" },
         .{ "transform", "transform", "(IFFFZFF)V" },
         .{ "clip", "clip", "(IZ)V" },
         .{ "pointer", "pointer", "(IZ)V" },
@@ -404,18 +404,30 @@ pub fn box(id: u32, b: zui.Box) void {
 pub fn pressable(id: u32, on: bool) void {
     call(methods.pressable, &.{ int(id), boolean(on) });
 }
+/// The face (zui.font.Face, as Java gets it) and the weight a run of text is drawn with: Wufour
+/// Sans or Wufour Arabic by the script of `s`, the system monospace for `mono`.
+fn face(f: zui.Font, s: []const u8) jni.jvalue {
+    return int(@backingInt(zui.font.faceFor(f.mono, s)));
+}
+fn weight(f: zui.Font) jni.jvalue {
+    return int(zui.font.hostWeight(f.mono, f.weight));
+}
+
 pub fn text(id: u32, s: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
     if (f.letter_spacing != 0 or isSelectable(id)) return richText(id, s, &.{}, f, color, a);
     const js = newString(s);
     defer env.functions.DeleteLocalRef(env, js);
-    call(methods.text, &.{ int(id), object(js), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(f.max_lines), int(color), int(@backingInt(a)) });
+    call(methods.text, &.{ int(id), object(js), float(f.size), weight(f), float(f.line_height), face(f, s), int(f.max_lines), int(color), int(@backingInt(a)) });
 }
 pub fn input(id: u32, value: []const u8, placeholder: []const u8, f: zui.Font, color: u32, a: zui.PhysicalAlign) void {
     const jv = newString(value);
     defer env.functions.DeleteLocalRef(env, jv);
     const jp = newString(placeholder);
     defer env.functions.DeleteLocalRef(env, jp);
-    call(methods.input, &.{ int(id), object(jv), object(jp), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(color), int(@backingInt(a)) });
+    // The face follows what is in the field, or the placeholder while it is empty; the typeface
+    // itself carries the other Wufour face as a fallback, so mixed typing still draws right.
+    const shown = if (value.len > 0) value else placeholder;
+    call(methods.input, &.{ int(id), object(jv), object(jp), float(f.size), weight(f), float(f.line_height), face(f, shown), int(color), int(@backingInt(a)) });
 }
 pub fn content(id: u32, s: zui.Size) void {
     call(methods.content, &.{ int(id), float(s.w), float(s.h) });
@@ -430,7 +442,7 @@ pub fn measure(s: []const u8, f: zui.Font, max_width: f32) zui.Size {
     if (f.letter_spacing != 0) return measureRich(s, &.{}, f, max_width);
     const js = newString(s);
     defer env.functions.DeleteLocalRef(env, js);
-    const args = [_]jni.jvalue{ object(js), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(f.max_lines), float(max_width) };
+    const args = [_]jni.jvalue{ object(js), float(f.size), weight(f), float(f.line_height), face(f, s), int(f.max_lines), float(max_width) };
     const bits: u64 = @bitCast(env.functions.CallStaticLongMethodA(env, class, methods.measure, &args));
     check();
     return .{ .w = @bitCast(@as(u32, @truncate(bits >> 32))), .h = @bitCast(@as(u32, @truncate(bits))) };
@@ -953,8 +965,8 @@ fn styleBind() void {
     style_class = f.NewGlobalRef(env, local);
     f.DeleteLocalRef(env, local);
     inline for (.{
-        .{ "rich_text", "richText", "(ILjava/lang/String;[IFIFZIIIFZ)V" },
-        .{ "measure_rich", "measureRich", "(Ljava/lang/String;[IFIFZIFF)J" },
+        .{ "rich_text", "richText", "(ILjava/lang/String;[IFIFIIIIFZ)V" },
+        .{ "measure_rich", "measureRich", "(Ljava/lang/String;[IFIFIIFF)J" },
         .{ "image_bytes", "imageBytes", "(ILjava/lang/String;[B)V" },
         .{ "image_fit", "imageFit", "(II)V" },
         .{ "decor", "decor", "(II[F[I)V" },
@@ -1068,7 +1080,7 @@ pub fn richText(id: u32, s: []const u8, spans: []const zui.Span, f: zui.Font, co
     defer env.functions.DeleteLocalRef(env, js);
     const arr = spanInts(s, spans);
     defer env.functions.DeleteLocalRef(env, arr);
-    callStyle(style_m.rich_text, &.{ int(id), object(js), object(arr), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(f.max_lines), int(color), int(@backingInt(a)), float(f.letter_spacing), boolean(isSelectable(id)) });
+    callStyle(style_m.rich_text, &.{ int(id), object(js), object(arr), float(f.size), weight(f), float(f.line_height), face(f, s), int(f.max_lines), int(color), int(@backingInt(a)), float(f.letter_spacing), boolean(isSelectable(id)) });
 }
 
 pub fn measureRich(s: []const u8, spans: []const zui.Span, f: zui.Font, max_width: f32) zui.Size {
@@ -1077,7 +1089,7 @@ pub fn measureRich(s: []const u8, spans: []const zui.Span, f: zui.Font, max_widt
     defer env.functions.DeleteLocalRef(env, js);
     const arr = spanInts(s, spans);
     defer env.functions.DeleteLocalRef(env, arr);
-    const args = [_]jni.jvalue{ object(js), object(arr), float(f.size), int(f.weight), float(f.line_height), boolean(f.mono), int(f.max_lines), float(max_width), float(f.letter_spacing) };
+    const args = [_]jni.jvalue{ object(js), object(arr), float(f.size), weight(f), float(f.line_height), face(f, s), int(f.max_lines), float(max_width), float(f.letter_spacing) };
     const bits: u64 = @bitCast(env.functions.CallStaticLongMethodA(env, style_class, style_m.measure_rich, &args));
     check();
     return .{ .w = @bitCast(@as(u32, @truncate(bits >> 32))), .h = @bitCast(@as(u32, @truncate(bits))) };

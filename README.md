@@ -12,7 +12,7 @@ Zig code shared by Reseal, Maps and Turf, and the build steps every app gets thr
 | `geo/` | `.osm.pbf` parser and the memory-mapped search / reverse-geocoding index (Arabic and Latin folding, any number of regions) |
 | `push/` | Web Push (RFC 8291/8292), FCM HTTP v1 (RS256), APNs over our HTTP/2 client (TLS with ALPN, HPACK) |
 | `fetch/`, `smtp/`, `wufour/`, `env/` | Server helpers: outgoing HTTP with time limits and a self-healing connection pool, SMTP, Wufour sign-in (cookie or Bearer), `.env` loading (`<APP>_ENV_FILE`, `.env.local`, `.env.production`, `.env`) |
-| `shells/` | The fixed per-platform entry points: `web/zui.js` and `android/.../ZuiActivity.java`. They never change per screen |
+| `shells/` | The fixed per-platform entry points: `web/zui.js` and `android/.../ZuiActivity.java`. They never change per screen. `fonts/`: Wufour Sans and Wufour Arabic as `.ttf`, packaged into every app (see Fonts) |
 | `tools/` | `apk.zig` packages and signs APKs without Gradle; `zip.zig` writes the archive with page-aligned native libraries |
 | `toolchain.zon` | Where the Android SDK, NDK and JDK live on this machine |
 
@@ -36,6 +36,28 @@ Run from an app folder (`Maps`, `Turf`, `Reseal`):
 | `zig build test` | Client tests (headless host) and server tests |
 
 Add `-Doptimize=ReleaseSmall` for release-size builds. `zig build test` here runs the zig-core tests.
+
+## Fonts
+
+The phones draw text with Wufour's own pair, like the web: Wufour Sans for English and Wufour
+Arabic for Arabic, in the weights 400, 500 and 700 (`shells/fonts/*.ttf`, six files). `addApp`
+packages them into every app:
+
+- Android: `assets/fonts/` in the APK (`tools/apk.zig --assets fonts=`). `Zui.java` builds one
+  Typeface per face and weight from them, with the other Wufour face as a fallback and the system's
+  fonts after that (before API 29 a typeface holds one file and the system fills in the rest).
+- iOS: `zig build ios` puts them in `zig-out/ios/fonts/`; the bundle needs those six files next to
+  `Info.plist`, which lists them under `UIAppFonts` (`ios-sim-app` copies them). The app registers
+  them again at start through CoreText, so the app binary links the `CoreText` framework.
+
+`zui/font.zig` is the one rule both hosts follow: a weight is snapped to the nearest of the three;
+text with an Arabic letter is set in Wufour Arabic with Wufour Sans filling in the glyphs it lacks
+(Latin words inside Arabic keep the Sans), everything else in Wufour Sans with Wufour Arabic
+filling in. Monospace stays the system monospace. A missing file falls back to the system font
+without an error.
+
+To refresh the fonts, copy `C:\MProjects\WufourType\dist\golden\*.ttf` over `shells/fonts/`
+(the names must stay), rebuild, and point each app's `build.zig.zon` at the new zig-core commit.
 
 ## Tests
 

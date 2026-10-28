@@ -910,6 +910,11 @@ export async function start(wasm, mount = document.body, options = {}) {
         root.style.background = c;
         if (!embedded) document.documentElement.style.background = c;
       },
+      zui_rtl(on) {
+        // The writing direction of the page (or, embedded, of the mount) follows the app's
+        // language, so the page's CSS can pick the Arabic font with [dir="rtl"].
+        (embedded ? mount : document.documentElement).dir = on ? 'rtl' : 'ltr';
+      },
       zui_log(ptr, len) {
         console.error(str(ptr, len));
       },
@@ -931,6 +936,8 @@ export async function start(wasm, mount = document.body, options = {}) {
     : (await WebAssembly.instantiateStreaming(fetch(wasm), imports)).instance;
   ex = instance.exports;
   memory = ex.memory;
+  // A web font that arrives after the first layout changes every text's size: lay out again.
+  document.fonts?.addEventListener('loadingdone', () => ex.zui_relayout?.());
 
   // Safe-area insets (notches) come from CSS env() through a probe element.
   const probe = document.createElement('div');

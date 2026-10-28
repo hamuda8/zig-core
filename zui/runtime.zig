@@ -1328,6 +1328,8 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
         /// Inside render: a platform may report events while views change (a focused input
         /// that is removed reports "blur" at once). Those wait in `queued` until it is done.
         var rendering = false;
+        /// The direction last given to the host (null: never).
+        var told_rtl: ?bool = null;
         var queued: std.ArrayList(Msg) = .empty;
         var changes: []const Binding(*const fn ([]const u8) Msg) = &.{};
         var inputs: []const Binding(InputHandlers(Msg)) = &.{};
@@ -2393,6 +2395,12 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             if (started) render();
         }
 
+        /// Measures and places everything again with the same state (the web, when a font
+        /// file arrives after the first layout).
+        pub fn relayout() void {
+            if (started and !rendering) render();
+        }
+
         pub fn setInsets(safe: Insets) void {
             if (std.meta.eql(env.safe, safe)) return;
             env.safe = safe;
@@ -2657,6 +2665,10 @@ pub fn Runtime(comptime App: type, comptime H: type) type {
             const tree = &trees[next];
             tree.reset();
             env.rtl = i18n.isRtl();
+            if (@hasDecl(H, "setRtl") and told_rtl != env.rtl) {
+                told_rtl = env.rtl;
+                H.setRtl(env.rtl);
+            }
 
             var ui: U = .{ .tree = tree, .env = env };
             App.view(&state, &ui);

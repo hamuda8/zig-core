@@ -197,7 +197,12 @@ pub fn Engine(comptime Store: type) type {
                     defer std.crypto.secureZero(u8, &shared);
                     if (k.hardware) {
                         if (!@hasDecl(hw, "ecdh")) return .{ .failed, "" };
-                        shared = hw.ecdh(a, req.name, req.peer) orelse return .{ .failed, "" };
+                        // A bad peer key is the request's fault, not the Keystore's.
+                        _ = P256.fromSec1(req.peer) catch return .{ .failed, "" };
+                        // The Keystore holds the key but cannot use it (Keymaster hardware on
+                        // Android 12+, imported before zui checked): as good as missing, so the
+                        // app restores it, and the import keeps it in software this time.
+                        shared = hw.ecdh(a, req.name, req.peer) orelse return .{ .missing, "" };
                     } else {
                         const p = P256.fromSec1(req.peer) catch return .{ .failed, "" };
                         const q = p.mul(k.secret, .big) catch return .{ .failed, "" };
