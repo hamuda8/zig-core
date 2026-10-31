@@ -25,6 +25,8 @@ pub const Error = error{
     AuthenticationFailed,
     BadReply,
     ConnectionClosed,
+    /// The database could not be reached (logged once when it goes away and once when it is back).
+    DatabaseUnreachable,
 };
 
 pub const Credentials = struct {
@@ -48,6 +50,9 @@ pub const Client = struct {
     /// Message of the most recent failed command (for logs).
     last_error: [256]u8 = undefined,
     last_error_len: usize = 0,
+    /// The database could not be reached: when that was last tried (ms), 0 while it is up. Other
+    /// requests fail at once for a few seconds instead of each waiting for the network again.
+    down_since: std.atomic.Value(i64) = .init(0),
 
     /// `mongodb://[user:password@]host[:port][/db][?authSource=admin]`
     pub fn init(io: Io, gpa: std.mem.Allocator, uri: []const u8) !*Client {
@@ -186,8 +191,17 @@ pub const Client = struct {
     }
 
     fn connect(c: *Client) !*Conn {
+        const now = Io.Clock.awake.now(c.io).toMilliseconds();
+        const down = c.down_since.load(.acquire);
+        if (down != 0 and now - down < 5_000) return error.DatabaseUnreachable;
         const addresses = try Io.net.HostName.init(c.host);
-        var stream = try addresses.connect(c.io, c.port, .{ .mode = .stream });
+        var stream = addresses.connect(c.io, c.port, .{ .mode = .stream }) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
+            if (c.down_since.swap(@max(now, 1), .acq_rel) == 0)
+                std.log.err("Cannot reach the database at {s}:{d} ({t}); trying again every few seconds", .{ c.host, c.port, err });
+            return error.DatabaseUnreachable;
+        };
+        if (c.down_since.swap(0, .acq_rel) != 0) std.log.info("The database at {s}:{d} is reachable again", .{ c.host, c.port });
         errdefer stream.close(c.io);
         const conn = try c.gpa.create(Conn);
         errdefer c.gpa.destroy(conn);
